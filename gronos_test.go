@@ -188,3 +188,7 @@ func TestCom(t *testing.T) {
 	g.Wait()
 	fmt.Println("counter", counter)
 }
+
+// TODO test phashing out
+// TODO test interruption
+// TODO test optional interruption with restart

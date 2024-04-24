@@ -184,6 +184,7 @@ type RuntimeStation struct {
 	cancel  context.CancelFunc
 	courier *Courier
 	mailbox *Mailbox
+	signal  *Signal
 }
 
 // not sure if i'm going to use the error here
@@ -244,6 +245,7 @@ func (c *Station) Add(opts ...OptionRuntime) (uint, context.CancelFunc) {
 		ctx:     context.Background(), // new context
 		courier: newCourier(),
 		mailbox: newObserver(),
+		signal:  newSignal(),
 	}
 	r.ctx, r.cancel = context.WithCancel(r.ctx) // basic one
 	for _, opt := range opts {
@@ -332,6 +334,43 @@ func (c *Station) NotifyAllExceptAll(err error, excepts ...uint) {
 	}
 }
 
+// Interrupt will stop the runtime immediately, your runtime will eventually trigger it's own shutdown
+func (c *Station) Interrupt(id uint) {
+	if _, ok := c.runtimes[id]; ok {
+		c.runtimes[id].cancel()
+	}
+}
+
+func (c *Station) InterruptAllExcept(except uint) {
+	for _, runtime := range c.runtimes {
+		if runtime.id != except {
+			runtime.cancel()
+		}
+	}
+}
+
+func (c *Station) InterruptAllExceptAll(excepts ...uint) {
+	for _, runtime := range c.runtimes {
+		for _, except := range excepts {
+			if runtime.id != except {
+				runtime.cancel()
+			}
+		}
+	}
+}
+
+func (c *Station) InterruptAll() {
+	for _, runtime := range c.runtimes {
+		runtime.cancel()
+	}
+}
+
+func (c *Station) PhasingOut(id uint) {
+	if _, ok := c.runtimes[id]; ok {
+		c.runtimes[id].signal.Complete()
+	}
+}
+
 func New(opts ...Option) (*Station, error) {
 	ctx := &Station{
 		runtimes:     make(map[uint]RuntimeStation),
@@ -364,6 +403,10 @@ func (c *Station) accumuluate() {
 	c.running++
 }
 
+func (s *Station) remove(id uint) {
+	delete(s.runtimes, id)
+}
+
 // Run is the bootstrapping function that manages the lifecycle of the application.
 func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 	// ctx, cancel := context.WithCancel(context.Background())
@@ -374,7 +417,6 @@ func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 		go func(r RuntimeStation) {
 
 			var innerWg sync.WaitGroup
-			innerLifeline := newSignal()
 
 			defer func() {
 				r.courier.Complete()
@@ -383,11 +425,13 @@ func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 				innerWg.Wait()
 				// slog.Info("Gronos runtime finished", slog.Any("id", r.id))
 				c.done()
+				// TODO make it optional to remove or keep for eventual restart
+				c.remove(r.id)
 			}()
 
 			innerWg.Add(1)
 			go func() {
-				r.runtime(r.ctx, r.mailbox, r.courier, innerLifeline)
+				r.runtime(r.ctx, r.mailbox, r.courier, r.signal)
 				// slog.Info("Gronos runtime done", slog.Any("id", r.id))
 				innerWg.Done()
 				r.courier.Complete()
@@ -412,7 +456,7 @@ func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 					r.courier.Complete()
 					r.mailbox.Complete()
 					// slog.Info("Gronos shutdown runtime", slog.Any("id", r.id))
-					innerLifeline.Complete()
+					r.signal.Complete()
 					return
 				}
 			}
