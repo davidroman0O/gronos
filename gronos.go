@@ -132,7 +132,7 @@ func newSignal() *Signal {
 type Receiver chan error
 
 // RuntimeFunc represents a function that runs a runtime.
-type RuntimeFunc func(ctx context.Context, mailbox *Mailbox, shutdown *Signal, err *Courier) error
+type RuntimeFunc func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error
 
 // Centralized place that manage the lifecycle of runtimes
 type Station struct {
@@ -295,7 +295,7 @@ func (c *Station) Run() (*Signal, Receiver) {
 
 			innerWg.Add(1)
 			go func() {
-				r.runtime(r.ctx, r.mailbox, innerLifeline, r.courier)
+				r.runtime(r.ctx, r.mailbox, r.courier, innerLifeline)
 				slog.Info("Gronos runtime done", slog.Any("id", r.id))
 				innerWg.Done()
 				r.courier.Complete()
@@ -397,7 +397,7 @@ func (c *Station) Wait() {
 
 // Cron is a function that runs a function periodically.
 func Cron(duration time.Duration, fn func() error) RuntimeFunc {
-	return func(ctx context.Context, mailbox *Mailbox, shutdown *Signal, courier *Courier) error {
+	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 
 		ticker := time.NewTicker(duration)
 		defer ticker.Stop()
@@ -429,7 +429,7 @@ func Cron(duration time.Duration, fn func() error) RuntimeFunc {
 
 // Timed is a function that runs a function periodically and waits for it to complete.
 func Timed(duration time.Duration, fn func() error) RuntimeFunc {
-	return func(ctx context.Context, mailbox *Mailbox, shutdown *Signal, courier *Courier) error {
+	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 
 		ticker := time.NewTicker(duration)
 		defer ticker.Stop()
