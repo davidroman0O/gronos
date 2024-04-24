@@ -8,19 +8,29 @@ import (
 	"time"
 )
 
-func testRuntime(ctx context.Context, shutdown *Lifeline, sink *Sink) error {
+func testRuntime(ctx context.Context, mailbox *Mailbox, shutdown *Signal, courier *Courier) error {
 	slog.Info("runtime ")
 	fmt.Println("runtime  value", ctx.Value("testRuntime"))
 
-	select {
-	case <-ctx.Done():
-		slog.Info("runtime ctx.Done()")
-		return nil
-	case <-shutdown.Wait():
-		slog.Info("runtime shutdown")
-		sink.Write(fmt.Errorf("shutdown"))
-		return nil
+	courier.Deliver(Envelope{
+		To:  0,
+		Msg: "hello myself",
+	})
+
+	for {
+		select {
+		case msg := <-mailbox.Read():
+			slog.Info("runtime msg: ", slog.Any("msg", msg))
+		case <-ctx.Done():
+			slog.Info("runtime ctx.Done()")
+			return nil
+		case <-shutdown.Await():
+			slog.Info("runtime shutdown")
+			courier.Notify(fmt.Errorf("shutdown"))
+			return nil
+		}
 	}
+
 	return fmt.Errorf("runtime error")
 }
 
@@ -44,7 +54,7 @@ func TestSimpleStack(t *testing.T) {
 	lifeline, receiver := g.Run() // todo we should have a general context
 
 	select {
-	case <-lifeline.Wait():
+	case <-lifeline.Await():
 		slog.Info("lifeline")
 	case err := <-receiver:
 		slog.Info("error: ", err)
