@@ -34,7 +34,7 @@ func testRuntime(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdo
 	return fmt.Errorf("runtime error")
 }
 
-func TestSimpleStack(t *testing.T) {
+func TestSimple(t *testing.T) {
 
 	g, err := New(
 	// WithImmediateShutdown(),
@@ -51,11 +51,11 @@ func TestSimpleStack(t *testing.T) {
 	ctx := context.Background()
 	ctx, _ = context.WithTimeout(ctx, 7*time.Second)
 
-	lifeline, receiver := g.Run() // todo we should have a general context
+	signal, receiver := g.Run(ctx) // todo we should have a general context
 
 	select {
-	case <-lifeline.Await():
-		slog.Info("lifeline")
+	case <-signal.Await():
+		slog.Info("signal")
 	case err := <-receiver:
 		slog.Info("error: ", err)
 	case <-ctx.Done():
@@ -87,17 +87,98 @@ func TestCron(t *testing.T) {
 	ctx := context.Background()
 	ctx, _ = context.WithTimeout(ctx, 7*time.Second)
 
-	lifeline, receiver := g.Run() // todo we should have a general context
+	signal, receiver := g.Run(ctx) // todo we should have a general context
 
 	select {
-	case <-lifeline.Await():
-		slog.Info("lifeline")
+	case <-signal.Await():
+		slog.Info("signal")
 	case err := <-receiver:
 		slog.Info("error: ", err)
 	case <-ctx.Done():
 		slog.Info("ctx.Done()")
 		clfn()
 		g.Shutdown()
+	}
+
+	g.Wait()
+}
+
+func testPing(pongID uint) RuntimeFunc {
+	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+		for {
+			select {
+			case msg := <-mailbox.Read():
+				slog.Info("ping msg: ", slog.Any("msg", msg))
+				courier.Deliver(Envelope{
+					To:  pongID,
+					Msg: "ping",
+				})
+			case <-ctx.Done():
+				slog.Info("ping ctx.Done()")
+				return nil
+			case <-shutdown.Await():
+				slog.Info("ping shutdown")
+				courier.Notify(fmt.Errorf("shutdown"))
+				return nil
+			}
+		}
+	}
+}
+
+func testPong(pingID uint) RuntimeFunc {
+	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+		for {
+			select {
+			case msg := <-mailbox.Read():
+				slog.Info("pong msg: ", slog.Any("msg", msg))
+				courier.Deliver(Envelope{
+					To:  pingID,
+					Msg: "pong",
+				})
+			case <-ctx.Done():
+				slog.Info("pong ctx.Done()")
+				return nil
+			case <-shutdown.Await():
+				slog.Info("pong shutdown")
+				courier.Notify(fmt.Errorf("shutdown"))
+				return nil
+			}
+		}
+	}
+}
+
+func TestCom(t *testing.T) {
+
+	g, err := New(
+	// WithImmediateShutdown(),
+	)
+	if err != nil {
+		t.Errorf("Error creating new context: %v", err)
+	}
+
+	pingID := g.AddFuture()
+	pongID := g.AddFuture()
+
+	g.Push(pingID, WithRuntime(testPing(pongID)))
+	g.Push(pongID, WithRuntime(testPong(pingID)))
+
+	g.Send("ping", pongID)
+
+	ctx := context.Background()
+	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
+
+	signal, receiver := g.Run(ctx) // todo we should have a general context
+
+	select {
+	case <-signal.Await():
+		slog.Info("signal ended")
+		cl()
+	case err := <-receiver:
+		slog.Info("error: ", err)
+	case <-ctx.Done():
+		slog.Info("ctx.Done()")
+		g.Shutdown()
+		cl()
 	}
 
 	g.Wait()
