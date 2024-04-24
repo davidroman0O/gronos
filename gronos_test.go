@@ -103,11 +103,12 @@ func TestCron(t *testing.T) {
 	g.Wait()
 }
 
-func testPing(pongID uint) RuntimeFunc {
+func testPing(pongID uint, counter *int) RuntimeFunc {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		for {
 			select {
 			case msg := <-mailbox.Read():
+				(*counter)++
 				slog.Info("ping msg: ", slog.Any("msg", msg))
 				courier.Deliver(Envelope{
 					To:  pongID,
@@ -125,11 +126,12 @@ func testPing(pongID uint) RuntimeFunc {
 	}
 }
 
-func testPong(pingID uint) RuntimeFunc {
+func testPong(pingID uint, counter *int) RuntimeFunc {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		for {
 			select {
 			case msg := <-mailbox.Read():
+				(*counter)++
 				slog.Info("pong msg: ", slog.Any("msg", msg))
 				courier.Deliver(Envelope{
 					To:  pingID,
@@ -156,11 +158,13 @@ func TestCom(t *testing.T) {
 		t.Errorf("Error creating new context: %v", err)
 	}
 
+	counter := 0
+
 	pingID := g.AddFuture()
 	pongID := g.AddFuture()
 
-	g.Push(pingID, WithRuntime(testPing(pongID)))
-	g.Push(pongID, WithRuntime(testPong(pingID)))
+	g.Push(pingID, WithRuntime(testPing(pongID, &counter)))
+	g.Push(pongID, WithRuntime(testPong(pingID, &counter)))
 
 	g.Send("ping", pongID)
 
@@ -182,4 +186,5 @@ func TestCom(t *testing.T) {
 	}
 
 	g.Wait()
+	fmt.Println("counter", counter)
 }
