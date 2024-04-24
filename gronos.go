@@ -2,7 +2,6 @@ package gronos
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -71,7 +70,7 @@ func (s *Courier) readMails() <-chan Envelope {
 
 func (s *Courier) Deliver(env Envelope) {
 	if s.closed {
-		slog.Info("Courier closed")
+		// slog.Info("Courier closed")
 		return
 	}
 	s.e <- env
@@ -79,7 +78,7 @@ func (s *Courier) Deliver(env Envelope) {
 
 func (s *Courier) Notify(err error) {
 	if s.closed {
-		slog.Info("Courier closed")
+		// slog.Info("Courier closed")
 		return
 	}
 	s.c <- err
@@ -287,16 +286,16 @@ func (c *Station) Run() (*Signal, Receiver) {
 			defer func() {
 				r.courier.Complete()
 				r.mailbox.Complete()
-				slog.Info("Gronos runtime wait", slog.Any("id", r.id))
+				// // slog.Info("Gronos runtime wait", slog.Any("id", r.id))
 				innerWg.Wait()
-				slog.Info("Gronos runtime finished", slog.Any("id", r.id))
+				// // slog.Info("Gronos runtime finished", slog.Any("id", r.id))
 				c.done()
 			}()
 
 			innerWg.Add(1)
 			go func() {
 				r.runtime(r.ctx, r.mailbox, r.courier, innerLifeline)
-				slog.Info("Gronos runtime done", slog.Any("id", r.id))
+				// // slog.Info("Gronos runtime done", slog.Any("id", r.id))
 				innerWg.Done()
 				r.courier.Complete()
 				r.mailbox.Complete()
@@ -305,19 +304,20 @@ func (c *Station) Run() (*Signal, Receiver) {
 			for {
 				select {
 				case notice := <-r.courier.readNotices():
-					slog.Info("gronos received runtime notice: ", slog.Any("notice", notice))
+					c.errChan <- notice
+					// // slog.Info("gronos received runtime notice: ", slog.Any("notice", notice))
 				case msg := <-r.courier.readMails():
-					slog.Info("gronos received runtime msg: ", slog.Any("msg", msg))
+					// // slog.Info("gronos received runtime msg: ", slog.Any("msg", msg))
 					courrier.Deliver(msg)
 				case <-r.ctx.Done():
 					r.courier.Complete()
 					r.mailbox.Complete()
-					slog.Info("Gronos context runtime done", slog.Any("id", r.id))
+					// // slog.Info("Gronos context runtime done", slog.Any("id", r.id))
 					return
 				case <-c.shutdown.Await():
 					r.courier.Complete()
 					r.mailbox.Complete()
-					slog.Info("Gronos shutdown runtime", slog.Any("id", r.id))
+					// // slog.Info("Gronos shutdown runtime", slog.Any("id", r.id))
 					innerLifeline.Complete()
 					return
 				case err := <-r.courier.c:
@@ -334,16 +334,18 @@ func (c *Station) Run() (*Signal, Receiver) {
 		for {
 			select {
 			case err := <-courrier.readNotices():
-				slog.Info("gronos deliverying notice: ", slog.Any("notice", err))
+				c.errChan <- err
+				// // slog.Info("gronos deliverying notice: ", slog.Any("notice", err))
 			case msg := <-courrier.readMails():
-				slog.Info("gronos deliverying msg: ", slog.Any("msg", msg))
+				// // slog.Info("gronos deliverying msg: ", slog.Any("msg", msg))
 				if _, ok := c.runtimes[msg.To]; ok {
 					c.runtimes[msg.To].mailbox.post(msg)
-				} else {
-					slog.Info("gronos deliverying msg: ", slog.Any("msg", msg), slog.Any("error", "receiver not found"))
 				}
+				// else {
+				// 	// // // slog.Info("gronos deliverying msg: ", slog.Any("msg", msg), slog.Any("error", "receiver not found"))
+				// }
 			case <-c.shutdown.Await():
-				slog.Info("gronos courrier shutdown")
+				// slog.Info("gronos courrier shutdown")
 				courrier.Complete()
 				return
 			}
@@ -356,14 +358,14 @@ func (c *Station) Run() (*Signal, Receiver) {
 		<-sigCh
 		switch c.shutdownMode {
 		case Gracefull:
-			slog.Info("Gracefull shutdown")
+			// slog.Info("Gracefull shutdown")
 			// cancel()
 			c.Kill()
 			c.Cut()
 			// calling ourselves to wait for the end
 			c.Wait()
 		case Immediate:
-			slog.Info("Immediate shutdown")
+			// slog.Info("Immediate shutdown")
 			// cancel()
 			c.Kill()
 			c.Cut()
