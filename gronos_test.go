@@ -66,3 +66,39 @@ func TestSimpleStack(t *testing.T) {
 
 	g.Wait()
 }
+
+func TestCron(t *testing.T) {
+
+	g, err := New(
+	// WithImmediateShutdown(),
+	)
+	if err != nil {
+		t.Errorf("Error creating new context: %v", err)
+	}
+
+	_, clfn := g.Add(
+		WithRuntime(Timed(1*time.Second, func() error {
+			slog.Info("tick")
+			return nil
+		})),
+		WithTimeout(time.Second*5),
+		WithValue("testRuntime", "testRuntime"))
+
+	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, 7*time.Second)
+
+	lifeline, receiver := g.Run() // todo we should have a general context
+
+	select {
+	case <-lifeline.Await():
+		slog.Info("lifeline")
+	case err := <-receiver:
+		slog.Info("error: ", err)
+	case <-ctx.Done():
+		slog.Info("ctx.Done()")
+		clfn()
+		g.Shutdown()
+	}
+
+	g.Wait()
+}
