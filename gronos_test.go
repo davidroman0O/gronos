@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+// TODO Gronos talking to other Gronos
+
 func testRuntime(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 	slog.Info("runtime ")
 	fmt.Println("runtime  value", ctx.Value("testRuntime"))
@@ -36,9 +38,7 @@ func testRuntime(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdo
 
 func TestSimple(t *testing.T) {
 
-	g, err := New(
-	// WithImmediateShutdown(),
-	)
+	g, err := New()
 	if err != nil {
 		t.Errorf("Error creating new context: %v", err)
 	}
@@ -67,20 +67,20 @@ func TestSimple(t *testing.T) {
 	g.Wait()
 }
 
-func TestCron(t *testing.T) {
+func TestTimed(t *testing.T) {
 
-	g, err := New(
-	// WithImmediateShutdown(),
-	)
+	g, err := New()
 	if err != nil {
 		t.Errorf("Error creating new context: %v", err)
 	}
 
 	_, clfn := g.Add(
-		WithRuntime(Timed(1*time.Second, func() error {
-			slog.Info("tick")
-			return nil
-		})),
+		WithRuntime(
+			// it should manage middlewares
+			Timed(1*time.Second, func() error {
+				slog.Info("tick")
+				return nil
+			})),
 		WithTimeout(time.Second*5),
 		WithValue("testRuntime", "testRuntime"))
 
@@ -107,9 +107,9 @@ func testPing(pongID uint, counter *int) RuntimeFunc {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		for {
 			select {
-			case msg := <-mailbox.Read():
+			case <-mailbox.Read():
 				(*counter)++
-				slog.Info("ping msg: ", slog.Any("msg", msg))
+				// slog.Info("ping msg: ", slog.Any("msg", msg))
 				courier.Deliver(Envelope{
 					To:  pongID,
 					Msg: "ping",
@@ -130,9 +130,9 @@ func testPong(pingID uint, counter *int) RuntimeFunc {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		for {
 			select {
-			case msg := <-mailbox.Read():
+			case <-mailbox.Read():
 				(*counter)++
-				slog.Info("pong msg: ", slog.Any("msg", msg))
+				// slog.Info("pong msg: ", slog.Any("msg", msg))
 				courier.Deliver(Envelope{
 					To:  pingID,
 					Msg: "pong",
@@ -151,9 +151,7 @@ func testPong(pingID uint, counter *int) RuntimeFunc {
 
 func TestCom(t *testing.T) {
 
-	g, err := New(
-	// WithImmediateShutdown(),
-	)
+	g, err := New()
 	if err != nil {
 		t.Errorf("Error creating new context: %v", err)
 	}
@@ -169,7 +167,8 @@ func TestCom(t *testing.T) {
 	g.Send("ping", pongID)
 
 	ctx := context.Background()
-	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cl := context.WithTimeout(ctx, 1*time.Second)
+	defer cl()
 
 	signal, receiver := g.Run(ctx) // todo we should have a general context
 
@@ -189,6 +188,113 @@ func TestCom(t *testing.T) {
 	fmt.Println("counter", counter)
 }
 
-// TODO test phashing out
-// TODO test interruption
-// TODO test optional interruption with restart
+func testNamedWorker(name string) RuntimeFunc {
+	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+
+		fmt.Println(name + " test worker")
+		pause, resume, ok := Paused(ctx)
+		if !ok {
+			return fmt.Errorf(name + " unsupported context type")
+		}
+		fmt.Println(name + " goroutine")
+
+		go func() {
+			for {
+				select {
+				// never forget ctx.Done()
+				case <-ctx.Done():
+					return
+				// never forget shutdown signal
+				case <-shutdown.Await():
+					return
+				// that's how you pause and resume
+				case <-pause:
+					fmt.Println(name + " )Worker paused")
+					<-resume
+					fmt.Println(name + " )Worker resumed")
+				// default case is the actual work
+				default:
+					fmt.Println(name + " )Worker doing work...")
+					time.Sleep(time.Second / 5)
+				}
+			}
+		}()
+
+		<-shutdown.Await()
+		fmt.Println(name + " )shutdown runtime")
+
+		return nil
+	}
+}
+
+func TestPlay(t *testing.T) {
+	g, err := New()
+	if err != nil {
+		t.Errorf("Error creating new context: %v", err)
+	}
+
+	id, _ := g.Add(WithRuntime(testNamedWorker("testPlayPause")))
+
+	ctx := context.Background()
+	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
+	defer cl()
+	signal, receiver := g.Run(ctx) // todo we should have a general context
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		g.Pause(id)
+		fmt.Println("paused")
+		time.Sleep(2 * time.Second)
+		g.Resume(id)
+		fmt.Println("resume")
+	}()
+
+	select {
+	case <-signal.Await():
+		slog.Info("signal ended")
+		cl()
+	case err := <-receiver:
+		slog.Info("error: ", err)
+	case <-ctx.Done():
+		slog.Info("ctx.Done()")
+		g.Shutdown()
+		cl()
+	}
+
+	g.Wait()
+	time.Sleep(1 * time.Second)
+}
+
+func TestPhasingOut(t *testing.T) {
+	g, err := New()
+	if err != nil {
+		t.Errorf("Error creating new context: %v", err)
+	}
+
+	id, _ := g.Add(WithRuntime(testNamedWorker("testPhasingOut")))
+
+	ctx := context.Background()
+	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
+	defer cl()
+	signal, receiver := g.Run(ctx) // todo we should have a general context
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		g.PhasingOut(id)
+		time.Sleep(2 * time.Second)
+	}()
+
+	select {
+	case <-signal.Await():
+		slog.Info("signal ended")
+		cl()
+	case err := <-receiver:
+		slog.Info("error: ", err)
+	case <-ctx.Done():
+		slog.Info("ctx.Done()")
+		g.Shutdown()
+		cl()
+	}
+
+	g.Wait()
+}

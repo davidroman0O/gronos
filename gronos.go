@@ -2,12 +2,71 @@ package gronos
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// TODO increase i/o with circular buffers and configurable channel sizes (how to manage full buffer?)
+// TODO make a good documentation
+
+type playPauseContext struct {
+	context.Context
+	done   chan struct{}
+	pause  chan struct{}
+	resume chan struct{}
+}
+
+type Pause <-chan struct{}
+type Play <-chan struct{}
+
+type pauseKey string
+
+func WithPlayPause(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	pause := make(chan struct{}, 1)
+	resume := make(chan struct{}, 1)
+
+	playPauseCtx := &playPauseContext{ctx, done, pause, resume}
+	ctx = context.WithValue(ctx, pauseKey("pause"), playPauseCtx)
+
+	return ctx, cancel
+}
+
+func Paused(ctx context.Context) (Pause, Play, bool) {
+	playPauseCtx, ok := ctx.Value(pauseKey("pause")).(*playPauseContext)
+	if !ok {
+		return nil, nil, false
+	}
+	return Pause(playPauseCtx.pause), Play(playPauseCtx.resume), true
+}
+
+func PlayPauseOperations(ctx context.Context) (func(), func(), bool) {
+	playPauseCtx, ok := ctx.Value(pauseKey("pause")).(*playPauseContext)
+	if !ok {
+		return nil, nil, false
+	}
+
+	pauseFunc := func() {
+		select {
+		case playPauseCtx.pause <- struct{}{}:
+		default:
+		}
+	}
+
+	resumeFunc := func() {
+		select {
+		case playPauseCtx.resume <- struct{}{}:
+		default:
+		}
+	}
+
+	return pauseFunc, resumeFunc, true
+}
 
 type FlipID struct {
 	current uint
@@ -42,6 +101,7 @@ type Envelope struct {
 type Mailbox struct {
 	closed bool
 	r      chan Envelope
+	// TODO: add optional circular buffer
 }
 
 func (s *Mailbox) Read() <-chan Envelope {
@@ -73,6 +133,8 @@ type Courier struct {
 	closed bool
 	c      chan error
 	e      chan Envelope
+
+	// TODO: add optional circular buffer
 }
 
 func (s *Courier) readNotices() <-chan error {
@@ -88,7 +150,9 @@ func (s *Courier) Deliver(env Envelope) {
 		// slog.Info("Courier closed")
 		return
 	}
-	s.e <- env
+	if env.Msg != nil {
+		s.e <- env
+	}
 }
 
 func (s *Courier) Notify(err error) {
@@ -96,7 +160,9 @@ func (s *Courier) Notify(err error) {
 		// slog.Info("Courier closed")
 		return
 	}
-	s.c <- err
+	if err != nil {
+		s.c <- err
+	}
 }
 
 // todo check for unecessary close
@@ -147,7 +213,7 @@ func newSignal() *Signal {
 type RuntimeFunc func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error
 
 // Centralized place that manage the lifecycle of runtimes
-type Station struct {
+type Gronos struct {
 	shutdownMode Shutdown
 	runtimes     map[uint]RuntimeStation
 	shutdown     *Signal
@@ -156,21 +222,44 @@ type Station struct {
 	running      uint
 	flipID       *FlipID
 	courier      *Courier
+	logger       Logger
+	toggleLog    bool
 }
 
-type Option func(*Station) error
+type Option func(*Gronos) error
 
 // Interuption won't wait for runtimes to gracefully finish
 func WithImmediateShutdown() Option {
-	return func(c *Station) error {
+	return func(c *Gronos) error {
 		c.shutdownMode = Immediate
+		return nil
+	}
+}
+
+func WithLogger(logger Logger) Option {
+	return func(c *Gronos) error {
+		c.logger = logger
+		return nil
+	}
+}
+
+func WithSlogLogger() Option {
+	return func(c *Gronos) error {
+		c.logger = NewSlog()
+		return nil
+	}
+}
+
+func WithFmtLogger() Option {
+	return func(c *Gronos) error {
+		c.logger = NewFmt()
 		return nil
 	}
 }
 
 // Interuption will wait for runtimes to gracefully finish
 func WithGracefullShutdown() Option {
-	return func(c *Station) error {
+	return func(c *Gronos) error {
 		c.shutdownMode = Gracefull
 		return nil
 	}
@@ -238,16 +327,16 @@ func WithRuntime(r RuntimeFunc) OptionRuntime {
 	}
 }
 
-func (c *Station) Add(opts ...OptionRuntime) (uint, context.CancelFunc) {
+func (c *Gronos) Add(opts ...OptionRuntime) (uint, context.CancelFunc) {
 	id := c.flipID.Next()
 	r := RuntimeStation{
 		id:      id,
-		ctx:     context.Background(), // new context
 		courier: newCourier(),
 		mailbox: newObserver(),
 		signal:  newSignal(),
 	}
-	r.ctx, r.cancel = context.WithCancel(r.ctx) // basic one
+	ctx := context.Background()
+	r.ctx, r.cancel = WithPlayPause(ctx)
 	for _, opt := range opts {
 		opt(&r)
 	}
@@ -255,18 +344,19 @@ func (c *Station) Add(opts ...OptionRuntime) (uint, context.CancelFunc) {
 	return id, r.cancel
 }
 
-func (c *Station) AddFuture() uint {
+func (c *Gronos) AddFuture() uint {
 	return c.flipID.Next()
 }
 
-func (c *Station) Push(id uint, opts ...OptionRuntime) (uint, context.CancelFunc) {
+func (c *Gronos) Push(id uint, opts ...OptionRuntime) (uint, context.CancelFunc) {
 	r := RuntimeStation{
 		id:      id,
-		ctx:     context.Background(), // new context
 		courier: newCourier(),
 		mailbox: newObserver(),
+		signal:  newSignal(),
 	}
-	r.ctx, r.cancel = context.WithCancel(r.ctx) // basic one
+	ctx := context.Background()
+	r.ctx, r.cancel = WithPlayPause(ctx)
 	for _, opt := range opts {
 		opt(&r)
 	}
@@ -274,31 +364,31 @@ func (c *Station) Push(id uint, opts ...OptionRuntime) (uint, context.CancelFunc
 	return id, r.cancel
 }
 
-func (c *Station) Send(msg Message, to uint) {
+func (c *Gronos) Send(msg Message, to uint) {
 	if _, ok := c.runtimes[to]; ok {
 		c.runtimes[to].courier.Deliver(Envelope{To: to, Msg: msg})
 	}
 }
 
-func (c *Station) Notify(err error, to uint) {
+func (c *Gronos) Notify(err error, to uint) {
 	if _, ok := c.runtimes[to]; ok {
 		c.runtimes[to].courier.Notify(err)
 	}
 }
 
-func (c *Station) NotifyAll(err error) {
+func (c *Gronos) NotifyAll(err error) {
 	for _, runtime := range c.runtimes {
 		runtime.courier.Notify(err)
 	}
 }
 
-func (c *Station) SendAll(msg Message) {
+func (c *Gronos) SendAll(msg Message) {
 	for _, runtime := range c.runtimes {
 		runtime.courier.Deliver(Envelope{To: runtime.id, Msg: msg})
 	}
 }
 
-func (c *Station) SendAllExcept(msg Message, except uint) {
+func (c *Gronos) SendAllExcept(msg Message, except uint) {
 	for _, runtime := range c.runtimes {
 		if runtime.id != except {
 			runtime.courier.Deliver(Envelope{To: runtime.id, Msg: msg})
@@ -306,7 +396,7 @@ func (c *Station) SendAllExcept(msg Message, except uint) {
 	}
 }
 
-func (c *Station) SendAllExceptAll(msg Message, excepts ...uint) {
+func (c *Gronos) SendAllExceptAll(msg Message, excepts ...uint) {
 	for _, runtime := range c.runtimes {
 		for _, except := range excepts {
 			if runtime.id != except {
@@ -316,7 +406,7 @@ func (c *Station) SendAllExceptAll(msg Message, excepts ...uint) {
 	}
 }
 
-func (c *Station) NotifyAllExcept(err error, except uint) {
+func (c *Gronos) NotifyAllExcept(err error, except uint) {
 	for _, runtime := range c.runtimes {
 		if runtime.id != except {
 			runtime.courier.Notify(err)
@@ -324,7 +414,7 @@ func (c *Station) NotifyAllExcept(err error, except uint) {
 	}
 }
 
-func (c *Station) NotifyAllExceptAll(err error, excepts ...uint) {
+func (c *Gronos) NotifyAllExceptAll(err error, excepts ...uint) {
 	for _, runtime := range c.runtimes {
 		for _, except := range excepts {
 			if runtime.id != except {
@@ -334,14 +424,14 @@ func (c *Station) NotifyAllExceptAll(err error, excepts ...uint) {
 	}
 }
 
-// Interrupt will stop the runtime immediately, your runtime will eventually trigger it's own shutdown
-func (c *Station) Interrupt(id uint) {
+// Cancel will stop the runtime immediately, your runtime will eventually trigger it's own shutdown
+func (c *Gronos) Cancel(id uint) {
 	if _, ok := c.runtimes[id]; ok {
 		c.runtimes[id].cancel()
 	}
 }
 
-func (c *Station) InterruptAllExcept(except uint) {
+func (c *Gronos) CancelAllExcept(except uint) {
 	for _, runtime := range c.runtimes {
 		if runtime.id != except {
 			runtime.cancel()
@@ -349,7 +439,7 @@ func (c *Station) InterruptAllExcept(except uint) {
 	}
 }
 
-func (c *Station) InterruptAllExceptAll(excepts ...uint) {
+func (c *Gronos) CancelAllExceptAll(excepts ...uint) {
 	for _, runtime := range c.runtimes {
 		for _, except := range excepts {
 			if runtime.id != except {
@@ -359,20 +449,49 @@ func (c *Station) InterruptAllExceptAll(excepts ...uint) {
 	}
 }
 
-func (c *Station) InterruptAll() {
+func (c *Gronos) CancelAll() {
 	for _, runtime := range c.runtimes {
 		runtime.cancel()
 	}
 }
 
-func (c *Station) PhasingOut(id uint) {
+func (c *Gronos) Pause(id uint) {
+	if _, ok := c.runtimes[id]; ok {
+		pause, _, ok := PlayPauseOperations(c.runtimes[id].ctx)
+		if ok {
+			pause()
+		}
+	}
+}
+
+func (c *Gronos) Resume(id uint) {
+	if _, ok := c.runtimes[id]; ok {
+		_, resume, ok := PlayPauseOperations(c.runtimes[id].ctx)
+		if ok {
+			resume()
+		}
+	}
+}
+
+func (c *Gronos) Complete(id uint) {
 	if _, ok := c.runtimes[id]; ok {
 		c.runtimes[id].signal.Complete()
 	}
 }
 
-func New(opts ...Option) (*Station, error) {
-	ctx := &Station{
+func (c *Gronos) PhasingOut(id uint) {
+	if _, ok := c.runtimes[id]; ok {
+		pause, _, ok := PlayPauseOperations(c.runtimes[id].ctx)
+		if ok {
+			pause()
+		}
+		c.runtimes[id].signal.Complete()
+		<-c.runtimes[id].signal.Await()
+	}
+}
+
+func New(opts ...Option) (*Gronos, error) {
+	ctx := &Gronos{
 		runtimes:     make(map[uint]RuntimeStation),
 		shutdown:     newSignal(),
 		finished:     false,
@@ -381,6 +500,7 @@ func New(opts ...Option) (*Station, error) {
 		// receiver:     make(chan error, 1), // Buffered channel to prevent panic on multiple ctrl+c signals
 		flipID:  NewFlipID(),
 		courier: newCourier(),
+		logger:  NoopLogger{},
 	}
 	for _, opt := range opts {
 		if err := opt(ctx); err != nil {
@@ -390,7 +510,7 @@ func New(opts ...Option) (*Station, error) {
 	return ctx, nil
 }
 
-func (c *Station) done() {
+func (c *Gronos) done() {
 	c.wg.Done()
 	c.running--
 	if c.running == 0 {
@@ -398,19 +518,25 @@ func (c *Station) done() {
 	}
 }
 
-func (c *Station) accumuluate() {
+func (c *Gronos) accumuluate() {
 	c.wg.Add(1)
 	c.running++
 }
 
-func (s *Station) remove(id uint) {
+func (s *Gronos) remove(id uint) {
 	delete(s.runtimes, id)
 }
 
 // Run is the bootstrapping function that manages the lifecycle of the application.
-func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
-	// ctx, cancel := context.WithCancel(context.Background())
-	// defer cancel()
+func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
+
+	c.toggleLog = true
+	// > but but but why are you doing that?!
+	// cause i just want to avoid a stupid instruction interruption
+	// if only we had pre-processor directives ¯\_(ツ)_/¯
+	if _, ok := c.logger.(NoopLogger); ok {
+		c.toggleLog = false
+	}
 
 	for _, runtime := range c.runtimes {
 		c.accumuluate()
@@ -419,43 +545,51 @@ func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 			var innerWg sync.WaitGroup
 
 			defer func() {
+				innerWg.Done()
 				r.courier.Complete()
 				r.mailbox.Complete()
-				// slog.Info("Gronos runtime wait", slog.Any("id", r.id))
-				innerWg.Wait()
-				// slog.Info("Gronos runtime finished", slog.Any("id", r.id))
+				if c.toggleLog {
+					c.logger.Info("Gronos runtime wait", slog.Any("id", r.id))
+				}
 				c.done()
-				// TODO make it optional to remove or keep for eventual restart
 				c.remove(r.id)
+				innerWg.Wait()
 			}()
 
 			innerWg.Add(1)
 			go func() {
-				r.runtime(r.ctx, r.mailbox, r.courier, r.signal)
-				// slog.Info("Gronos runtime done", slog.Any("id", r.id))
-				innerWg.Done()
-				r.courier.Complete()
-				r.mailbox.Complete()
+				if err := r.runtime(r.ctx, r.mailbox, r.courier, r.signal); err != nil {
+					slog.Error("Gronos runtime error", slog.Any("id", r.id), slog.Any("error", err))
+					c.courier.Notify(err)
+				}
+				if c.toggleLog {
+					c.logger.Info("Gronos runtime done", slog.Any("id", r.id))
+				}
 			}()
 
 			for {
 				select {
 				case notice := <-r.courier.readNotices():
-					// c.errChan <- notice
 					c.courier.Notify(notice)
-					// slog.Info("gronos received runtime notice: ", slog.Any("notice", notice))
+					if c.toggleLog {
+						c.logger.Info("gronos received runtime notice: ", slog.Any("notice", notice))
+					}
 				case msg := <-r.courier.readMails():
-					// slog.Info("gronos received runtime msg: ", slog.Any("msg", msg))
+					if c.toggleLog {
+						c.logger.Info("gronos received runtime msg: ", slog.Any("msg", msg))
+					}
 					c.courier.Deliver(msg)
 				case <-r.ctx.Done():
-					r.courier.Complete()
-					r.mailbox.Complete()
-					// slog.Info("Gronos context runtime done", slog.Any("id", r.id))
+					if c.toggleLog {
+						c.logger.Info("Gronos context runtime done", slog.Any("id", r.id))
+					}
+					return
+				case <-r.signal.c:
 					return
 				case <-c.shutdown.Await():
-					r.courier.Complete()
-					r.mailbox.Complete()
-					// slog.Info("Gronos shutdown runtime", slog.Any("id", r.id))
+					if c.toggleLog {
+						c.logger.Info("Gronos shutdown runtime", slog.Any("id", r.id))
+					}
 					r.signal.Complete()
 					return
 				}
@@ -470,17 +604,25 @@ func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 		for {
 			select {
 			case <-ctx.Done():
-				// slog.Info("gronos context done")
+				if c.toggleLog {
+					c.logger.Info("gronos context done")
+				}
 				sigCh <- syscall.SIGINT
 			case msg := <-c.courier.readMails():
-				// slog.Info("gronos deliverying msg: ", slog.Any("msg", msg))
+				if c.toggleLog {
+					c.logger.Info("gronos deliverying msg: ", slog.Any("msg", msg))
+				}
 				if _, ok := c.runtimes[msg.To]; ok {
 					c.runtimes[msg.To].mailbox.post(msg)
 				} else {
-					// slog.Info("gronos deliverying msg: ", slog.Any("msg", msg), slog.Any("error", "receiver not found"))
+					if c.toggleLog {
+						c.logger.Info("gronos deliverying msg: ", slog.Any("msg", msg), slog.Any("error", "receiver not found"))
+					}
 				}
 			case <-c.shutdown.Await():
-				// slog.Info("gronos courrier shutdown")
+				if c.toggleLog {
+					c.logger.Info("gronos courrier shutdown")
+				}
 				c.courier.Complete()
 				return
 			}
@@ -488,20 +630,20 @@ func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 	}()
 
 	// gracefull shutdown
-	// TODO make it configurable
 	go func() {
 		<-sigCh
 		switch c.shutdownMode {
 		case Gracefull:
-			// slog.Info("Gracefull shutdown")
-			// cancel()
+			if c.toggleLog {
+				c.logger.Info("Gracefull shutdown")
+			}
 			c.Kill()
 			c.Cut()
-			// calling ourselves to wait for the end
 			c.Wait()
 		case Immediate:
-			// slog.Info("Immediate shutdown")
-			// cancel()
+			if c.toggleLog {
+				c.logger.Info("Immediate shutdown")
+			}
 			c.Kill()
 			c.Cut()
 		}
@@ -511,24 +653,24 @@ func (c *Station) Run(ctx context.Context) (*Signal, <-chan error) {
 }
 
 // Close all lifelines while waiting
-func (c *Station) Shutdown() {
+func (c *Gronos) Shutdown() {
 	c.Kill()
 	c.Cut()
 	c.Wait()
 }
 
 // Close lifeline
-func (c *Station) Kill() {
+func (c *Gronos) Kill() {
 	c.shutdown.Complete()
 }
 
 // Close receiver
-func (c *Station) Cut() {
+func (c *Gronos) Cut() {
 	c.courier.Complete()
 }
 
 // Gracefully wait for the end
-func (c *Station) Wait() {
+func (c *Gronos) Wait() {
 	c.wg.Wait()
 }
 
