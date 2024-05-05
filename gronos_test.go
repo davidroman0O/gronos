@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/k0kubun/pp/v3"
 )
 
 // TODO Gronos talking to other Gronos
@@ -14,10 +16,11 @@ func testRuntime(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdo
 	slog.Info("runtime ")
 	fmt.Println("runtime  value", ctx.Value("testRuntime"))
 
-	courier.Deliver(Envelope{
-		To:  0,
-		Msg: "hello myself",
-	})
+	// courier.Deliver(Envelope{
+	// 	To:  0,
+	// 	Msg: "hello myself",
+	// })
+	courier.Deliver(Envelope("simple", "hello myself"))
 
 	for {
 		select {
@@ -28,7 +31,7 @@ func testRuntime(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdo
 			return nil
 		case <-shutdown.Await():
 			slog.Info("runtime shutdown")
-			courier.Notify(fmt.Errorf("shutdown"))
+			courier.Transmit(fmt.Errorf("shutdown"))
 			return nil
 		}
 	}
@@ -44,6 +47,7 @@ func TestSimple(t *testing.T) {
 	}
 
 	_, clfn := g.Add(
+		"simple",
 		WithRuntime(testRuntime),
 		WithTimeout(time.Second*5),
 		WithValue("testRuntime", "testRuntime"))
@@ -75,6 +79,7 @@ func TestTimed(t *testing.T) {
 	}
 
 	_, clfn := g.Add(
+		"ticker",
 		WithRuntime(
 			// it should manage middlewares
 			Timed(1*time.Second, func() error {
@@ -103,46 +108,48 @@ func TestTimed(t *testing.T) {
 	g.Wait()
 }
 
-func testPing(pongID uint, counter *int) RuntimeFunc {
+func testPing(counter *int) RuntimeFunc {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		for {
 			select {
 			case <-mailbox.Read():
 				(*counter)++
 				// slog.Info("ping msg: ", slog.Any("msg", msg))
-				courier.Deliver(Envelope{
-					To:  pongID,
-					Msg: "ping",
-				})
+				// courier.Deliver(Envelope{
+				// 	To:  pongID,
+				// 	Msg: "ping",
+				// })
+				courier.Deliver(Envelope("pong", "ping"))
 			case <-ctx.Done():
 				slog.Info("ping ctx.Done()")
 				return nil
 			case <-shutdown.Await():
 				slog.Info("ping shutdown")
-				courier.Notify(fmt.Errorf("shutdown"))
+				courier.Transmit(fmt.Errorf("shutdown"))
 				return nil
 			}
 		}
 	}
 }
 
-func testPong(pingID uint, counter *int) RuntimeFunc {
+func testPong(counter *int) RuntimeFunc {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		for {
 			select {
 			case <-mailbox.Read():
 				(*counter)++
 				// slog.Info("pong msg: ", slog.Any("msg", msg))
-				courier.Deliver(Envelope{
-					To:  pingID,
-					Msg: "pong",
-				})
+				// courier.Deliver(Envelope{
+				// 	To:  pingID,
+				// 	Msg: "pong",
+				// })
+				courier.Deliver(Envelope("ping", "pong"))
 			case <-ctx.Done():
 				slog.Info("pong ctx.Done()")
 				return nil
 			case <-shutdown.Await():
 				slog.Info("pong shutdown")
-				courier.Notify(fmt.Errorf("shutdown"))
+				courier.Transmit(fmt.Errorf("shutdown"))
 				return nil
 			}
 		}
@@ -158,13 +165,15 @@ func TestCom(t *testing.T) {
 
 	counter := 0
 
-	pingID := g.AddFuture()
-	pongID := g.AddFuture()
+	// pingID := g.AddFuture()
+	// pongID := g.AddFuture()
 
-	g.Push(pingID, WithRuntime(testPing(pongID, &counter)))
-	g.Push(pongID, WithRuntime(testPong(pingID, &counter)))
+	g.Add("ping", WithRuntime(testPing(&counter)))
+	g.Add("pong", WithRuntime(testPong(&counter)))
 
-	g.Send("ping", pongID)
+	if err = g.Named("pong", "ping"); err != nil {
+		t.Errorf("Error naming pong: %v", err)
+	}
 
 	ctx := context.Background()
 	ctx, cl := context.WithTimeout(ctx, 1*time.Second)
@@ -194,6 +203,7 @@ func testNamedWorker(name string) RuntimeFunc {
 		fmt.Println(name + " test worker")
 		pause, resume, ok := Paused(ctx)
 		if !ok {
+			pp.Println(ctx)
 			return fmt.Errorf(name + " unsupported context type")
 		}
 		fmt.Println(name + " goroutine")
@@ -233,7 +243,7 @@ func TestPlay(t *testing.T) {
 		t.Errorf("Error creating new context: %v", err)
 	}
 
-	id, _ := g.Add(WithRuntime(testNamedWorker("testPlayPause")))
+	id, _ := g.Add("worker", WithRuntime(testNamedWorker("testPlayPause")))
 
 	ctx := context.Background()
 	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
@@ -242,10 +252,10 @@ func TestPlay(t *testing.T) {
 
 	go func() {
 		time.Sleep(1 * time.Second)
-		g.Pause(id)
+		g.DirectPause(id)
 		fmt.Println("paused")
 		time.Sleep(2 * time.Second)
-		g.Resume(id)
+		g.DirectResume(id)
 		fmt.Println("resume")
 	}()
 
@@ -271,7 +281,7 @@ func TestPhasingOut(t *testing.T) {
 		t.Errorf("Error creating new context: %v", err)
 	}
 
-	id, _ := g.Add(WithRuntime(testNamedWorker("testPhasingOut")))
+	id, _ := g.Add("worker", WithRuntime(testNamedWorker("testPhasingOut")))
 
 	ctx := context.Background()
 	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
@@ -280,7 +290,7 @@ func TestPhasingOut(t *testing.T) {
 
 	go func() {
 		time.Sleep(1 * time.Second)
-		g.PhasingOut(id)
+		g.DirectPhasingOut(id)
 		time.Sleep(2 * time.Second)
 	}()
 
@@ -297,4 +307,8 @@ func TestPhasingOut(t *testing.T) {
 	}
 
 	g.Wait()
+}
+
+func TestGronosToGronos(t *testing.T) {
+
 }

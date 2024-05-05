@@ -2,6 +2,7 @@ package gronos
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -10,8 +11,35 @@ import (
 	"time"
 )
 
+/// Gronos organize the lifecycle of runtimes to help you compose your applications.
+/// See runtimes and channels as gears, we're building a digital machine
+
+/// Features
+/// - basic runtimes functions
+/// - play/pause context
+/// - communication between runtimes
+/// -
+
+// TODO Replace API with ID and use string for names
+// allowing both ID and name
+// TODO runtimes should send status: ready, paused, stopped
+// TODO ONE mainly Circular buffer for all message analysis, when publishing a message then analyze them in batches and then eventually push them back to other runtimes
+// TODO we should send messages like `Send("namespace.name", msg)`
+// TODO gronos should check if the namespace is its own, otherwise try to send it to a middleman
+// TODO gronos to gronos with namespaces
 // TODO increase i/o with circular buffers and configurable channel sizes (how to manage full buffer?)
 // TODO make a good documentation
+
+// TODO: use watermill's message router to send messages to other gronos instances
+// Eventually, we could configure `gronos` with external pubsub if necessary
+
+/// My general idea is to be able to split the application into smaller parts that can be managed independently.
+/// I want to compose my application in a DDD way (with my opinions on it) while not conflicting domains.
+
+/// I think that a runtime could be splitted into multiple runtime and even on different machines.
+/// Eventually, you might want to have your application running different workloads for different types of processing on different hardware.
+/// Exchanging messages within a runtime or between applications of the same fleet should be easy to do and configure.
+/// Ideally, it would be up to the person that want to deploy the app to decide how to split the workloads and how to communicate between them with which third-party (sql, redis or rabbitmq).
 
 type playPauseContext struct {
 	context.Context
@@ -23,7 +51,10 @@ type playPauseContext struct {
 type Pause <-chan struct{}
 type Play <-chan struct{}
 
-type pauseKey string
+type gronosKey string
+
+var getIDKey gronosKey = gronosKey("getID")
+var pauseKey gronosKey = gronosKey("pause")
 
 func WithPlayPause(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
@@ -32,13 +63,13 @@ func WithPlayPause(parent context.Context) (context.Context, context.CancelFunc)
 	resume := make(chan struct{}, 1)
 
 	playPauseCtx := &playPauseContext{ctx, done, pause, resume}
-	ctx = context.WithValue(ctx, pauseKey("pause"), playPauseCtx)
+	ctx = context.WithValue(ctx, pauseKey, playPauseCtx)
 
 	return ctx, cancel
 }
 
 func Paused(ctx context.Context) (Pause, Play, bool) {
-	playPauseCtx, ok := ctx.Value(pauseKey("pause")).(*playPauseContext)
+	playPauseCtx, ok := ctx.Value(pauseKey).(*playPauseContext)
 	if !ok {
 		return nil, nil, false
 	}
@@ -46,7 +77,7 @@ func Paused(ctx context.Context) (Pause, Play, bool) {
 }
 
 func PlayPauseOperations(ctx context.Context) (func(), func(), bool) {
-	playPauseCtx, ok := ctx.Value(pauseKey("pause")).(*playPauseContext)
+	playPauseCtx, ok := ctx.Value(pauseKey).(*playPauseContext)
 	if !ok {
 		return nil, nil, false
 	}
@@ -74,7 +105,7 @@ type FlipID struct {
 
 func NewFlipID() *FlipID {
 	return &FlipID{
-		current: 0,
+		current: 1, // 0 means no id
 	}
 }
 
@@ -92,23 +123,32 @@ const (
 
 type Message interface{}
 
-type Envelope struct {
-	To  uint
-	Msg Message
+type envelope struct {
+	to   uint
+	name string
+	Msg  Message
+}
+
+func Envelope(name string, msg Message) envelope {
+	return envelope{
+		to:   0,
+		name: name,
+		Msg:  msg,
+	}
 }
 
 // It's a Mailbox
 type Mailbox struct {
 	closed bool
-	r      chan Envelope
+	r      chan envelope
 	// TODO: add optional circular buffer
 }
 
-func (s *Mailbox) Read() <-chan Envelope {
+func (s *Mailbox) Read() <-chan envelope {
 	return s.r
 }
 
-func (r *Mailbox) post(msg Envelope) {
+func (r *Mailbox) post(msg envelope) {
 	r.r <- msg
 }
 
@@ -122,9 +162,9 @@ func (s *Mailbox) Complete() {
 }
 
 // TODO make the size of those channels configurable
-func newObserver() *Mailbox {
+func newMailbox() *Mailbox {
 	return &Mailbox{
-		r: make(chan Envelope),
+		r: make(chan envelope),
 	}
 }
 
@@ -132,7 +172,7 @@ func newObserver() *Mailbox {
 type Courier struct {
 	closed bool
 	c      chan error
-	e      chan Envelope
+	e      chan envelope
 
 	// TODO: add optional circular buffer
 }
@@ -141,11 +181,11 @@ func (s *Courier) readNotices() <-chan error {
 	return s.c
 }
 
-func (s *Courier) readMails() <-chan Envelope {
+func (s *Courier) readMails() <-chan envelope {
 	return s.e
 }
 
-func (s *Courier) Deliver(env Envelope) {
+func (s *Courier) Deliver(env envelope) {
 	if s.closed {
 		// slog.Info("Courier closed")
 		return
@@ -155,7 +195,7 @@ func (s *Courier) Deliver(env Envelope) {
 	}
 }
 
-func (s *Courier) Notify(err error) {
+func (s *Courier) Transmit(err error) {
 	if s.closed {
 		// slog.Info("Courier closed")
 		return
@@ -177,7 +217,7 @@ func (s *Courier) Complete() {
 
 func newCourier() *Courier {
 	c := make(chan error, 1)    // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
-	e := make(chan Envelope, 1) // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
+	e := make(chan envelope, 1) // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
 	return &Courier{
 		closed: false,
 		c:      c,
@@ -215,15 +255,20 @@ type RuntimeFunc func(ctx context.Context, mailbox *Mailbox, courrier *Courier, 
 // Centralized place that manage the lifecycle of runtimes
 type Gronos struct {
 	shutdownMode Shutdown
-	runtimes     map[uint]RuntimeStation
-	shutdown     *Signal
-	wg           sync.WaitGroup
-	finished     bool
-	running      uint
-	flipID       *FlipID
-	courier      *Courier
-	logger       Logger
-	toggleLog    bool
+	// runtimesNames map[string]uint
+	runtimesNames *safeMap[string, uint]
+	// runtimes      map[uint]RuntimeStation
+	runtimes  *safeMap[uint, RuntimeStation]
+	shutdown  *Signal
+	wg        sync.WaitGroup
+	finished  bool
+	running   uint
+	flipID    *FlipID
+	courier   *Courier
+	logger    Logger
+	toggleLog bool
+
+	mailbox *Mailbox // gronos to gronos
 }
 
 type Option func(*Gronos) error
@@ -267,6 +312,7 @@ func WithGracefullShutdown() Option {
 
 // One runtime can receive and send messages while performing it's own task
 type RuntimeStation struct {
+	name    string // easier to reason with
 	id      uint
 	ctx     context.Context
 	runtime RuntimeFunc
@@ -302,14 +348,14 @@ func WithValue(key, value interface{}) OptionRuntime {
 	}
 }
 
-func WithCancel() OptionRuntime {
-	return func(r *RuntimeStation) error {
-		ctx, cnfn := context.WithCancel(r.ctx)
-		r.cancel = cnfn
-		r.ctx = ctx
-		return nil
-	}
-}
+// func WithCancel() OptionRuntime {
+// 	return func(r *RuntimeStation) error {
+// 		ctx, cnfn := context.WithCancel(r.ctx)
+// 		r.cancel = cnfn
+// 		r.ctx = ctx
+// 		return nil
+// 	}
+// }
 
 func WithDeadline(d time.Time) OptionRuntime {
 	return func(r *RuntimeStation) error {
@@ -327,180 +373,139 @@ func WithRuntime(r RuntimeFunc) OptionRuntime {
 	}
 }
 
-func (c *Gronos) Add(opts ...OptionRuntime) (uint, context.CancelFunc) {
+func (c *Gronos) Add(name string, opts ...OptionRuntime) (uint, context.CancelFunc) {
 	id := c.flipID.Next()
 	r := RuntimeStation{
+		name:    name,
 		id:      id,
 		courier: newCourier(),
-		mailbox: newObserver(),
+		mailbox: newMailbox(),
 		signal:  newSignal(),
 	}
 	ctx := context.Background()
+	ctx = context.WithValue(ctx, getIDKey, c.getID)
 	r.ctx, r.cancel = WithPlayPause(ctx)
 	for _, opt := range opts {
 		opt(&r)
 	}
-	c.runtimes[id] = r
+	c.runtimes.Set(id, &r)
+	c.runtimesNames.Set(name, &id)
 	return id, r.cancel
 }
 
-func (c *Gronos) AddFuture() uint {
-	return c.flipID.Next()
+// func (c *Gronos) AddFuture() uint {
+// 	return c.flipID.Next()
+// }
+
+// func (c *Gronos) Push(name string, opts ...OptionRuntime) (uint, context.CancelFunc) {
+// 	id := c.flipID.Next()
+// 	r := RuntimeStation{
+// 		id:      id,
+// 		courier: newCourier(),
+// 		mailbox: newMailbox(),
+// 		signal:  newSignal(),
+// 	}
+// 	ctx := context.Background()
+// 	r.ctx, r.cancel = WithPlayPause(ctx)
+// 	for _, opt := range opts {
+// 		opt(&r)
+// 	}
+// 	c.runtimes[id] = r
+// 	return id, r.cancel
+// }
+
+// `Direct` require the ID of the runtime, faster but less readable
+func (c *Gronos) Direct(msg Message, to uint) error {
+	if runtime, ok := c.runtimes.Get(to); ok {
+		runtime.courier.Deliver(envelope{to: to, Msg: msg})
+	}
+	return fmt.Errorf("receiver not found")
 }
 
-func (c *Gronos) Push(id uint, opts ...OptionRuntime) (uint, context.CancelFunc) {
-	r := RuntimeStation{
-		id:      id,
-		courier: newCourier(),
-		mailbox: newObserver(),
-		signal:  newSignal(),
-	}
-	ctx := context.Background()
-	r.ctx, r.cancel = WithPlayPause(ctx)
-	for _, opt := range opts {
-		opt(&r)
-	}
-	c.runtimes[id] = r
-	return id, r.cancel
-}
-
-func (c *Gronos) Send(msg Message, to uint) {
-	if _, ok := c.runtimes[to]; ok {
-		c.runtimes[to].courier.Deliver(Envelope{To: to, Msg: msg})
-	}
-}
-
-func (c *Gronos) Notify(err error, to uint) {
-	if _, ok := c.runtimes[to]; ok {
-		c.runtimes[to].courier.Notify(err)
-	}
-}
-
-func (c *Gronos) NotifyAll(err error) {
-	for _, runtime := range c.runtimes {
-		runtime.courier.Notify(err)
-	}
-}
-
-func (c *Gronos) SendAll(msg Message) {
-	for _, runtime := range c.runtimes {
-		runtime.courier.Deliver(Envelope{To: runtime.id, Msg: msg})
-	}
-}
-
-func (c *Gronos) SendAllExcept(msg Message, except uint) {
-	for _, runtime := range c.runtimes {
-		if runtime.id != except {
-			runtime.courier.Deliver(Envelope{To: runtime.id, Msg: msg})
+// `Delivery` require the name of the runtime, more readable but slower
+func (c *Gronos) Named(msg Message, name string) error {
+	if id, ok := c.runtimesNames.Get(name); ok {
+		if runtime, okID := c.runtimes.Get(*id); okID {
+			runtime.courier.Deliver(envelope{to: *id, Msg: msg})
 		}
 	}
+	return fmt.Errorf("receiver not found")
 }
 
-func (c *Gronos) SendAllExceptAll(msg Message, excepts ...uint) {
-	for _, runtime := range c.runtimes {
-		for _, except := range excepts {
-			if runtime.id != except {
-				runtime.courier.Deliver(Envelope{To: runtime.id, Msg: msg})
-			}
-		}
-	}
+func (c *Gronos) Broadcast(msg Message) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+		runtime.courier.Deliver(envelope{to: id, Msg: msg})
+	})
 }
 
-func (c *Gronos) NotifyAllExcept(err error, except uint) {
-	for _, runtime := range c.runtimes {
-		if runtime.id != except {
-			runtime.courier.Notify(err)
-		}
-	}
-}
-
-func (c *Gronos) NotifyAllExceptAll(err error, excepts ...uint) {
-	for _, runtime := range c.runtimes {
-		for _, except := range excepts {
-			if runtime.id != except {
-				runtime.courier.Notify(err)
-			}
-		}
-	}
+func (c *Gronos) Transmit(err error, to uint) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+		runtime.courier.Transmit(err)
+	})
 }
 
 // Cancel will stop the runtime immediately, your runtime will eventually trigger it's own shutdown
 func (c *Gronos) Cancel(id uint) {
-	if _, ok := c.runtimes[id]; ok {
-		c.runtimes[id].cancel()
-	}
-}
-
-func (c *Gronos) CancelAllExcept(except uint) {
-	for _, runtime := range c.runtimes {
-		if runtime.id != except {
-			runtime.cancel()
-		}
-	}
-}
-
-func (c *Gronos) CancelAllExceptAll(excepts ...uint) {
-	for _, runtime := range c.runtimes {
-		for _, except := range excepts {
-			if runtime.id != except {
-				runtime.cancel()
-			}
-		}
-	}
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+		runtime.cancel()
+	})
 }
 
 func (c *Gronos) CancelAll() {
-	for _, runtime := range c.runtimes {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
 		runtime.cancel()
-	}
+	})
 }
 
-func (c *Gronos) Pause(id uint) {
-	if _, ok := c.runtimes[id]; ok {
-		pause, _, ok := PlayPauseOperations(c.runtimes[id].ctx)
+func (c *Gronos) DirectPause(id uint) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+		pause, _, ok := PlayPauseOperations(runtime.ctx)
 		if ok {
 			pause()
 		}
-	}
+	})
 }
 
-func (c *Gronos) Resume(id uint) {
-	if _, ok := c.runtimes[id]; ok {
-		_, resume, ok := PlayPauseOperations(c.runtimes[id].ctx)
+func (c *Gronos) DirectResume(id uint) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+		_, resume, ok := PlayPauseOperations(runtime.ctx)
 		if ok {
 			resume()
 		}
-	}
+	})
 }
 
-func (c *Gronos) Complete(id uint) {
-	if _, ok := c.runtimes[id]; ok {
-		c.runtimes[id].signal.Complete()
-	}
+func (c *Gronos) DirectComplete(id uint) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+		runtime.signal.Complete()
+	})
 }
 
-func (c *Gronos) PhasingOut(id uint) {
-	if _, ok := c.runtimes[id]; ok {
-		pause, _, ok := PlayPauseOperations(c.runtimes[id].ctx)
+func (c *Gronos) DirectPhasingOut(id uint) {
+	if runtime, ok := c.runtimes.Get(id); ok {
+		pause, _, ok := PlayPauseOperations(runtime.ctx)
 		if ok {
 			pause()
 		}
-		c.runtimes[id].signal.Complete()
-		<-c.runtimes[id].signal.Await()
+		runtime.signal.Complete()
+		<-runtime.signal.Await()
 	}
 }
 
 func New(opts ...Option) (*Gronos, error) {
 	ctx := &Gronos{
-		runtimes:     make(map[uint]RuntimeStation),
+		runtimes:      newSafeMap[uint, RuntimeStation](), // faster usage - dev could use only that to be faster
+		runtimesNames: newSafeMap[string, uint](),         // convienient usage - dev could use that to be more readable
+
 		shutdown:     newSignal(),
 		finished:     false,
 		running:      0,
 		shutdownMode: Gracefull,
-		// receiver:     make(chan error, 1), // Buffered channel to prevent panic on multiple ctrl+c signals
+
 		flipID:  NewFlipID(),
 		courier: newCourier(),
 		logger:  NoopLogger{},
+		mailbox: newMailbox(),
 	}
 	for _, opt := range opts {
 		if err := opt(ctx); err != nil {
@@ -524,7 +529,14 @@ func (c *Gronos) accumuluate() {
 }
 
 func (s *Gronos) remove(id uint) {
-	delete(s.runtimes, id)
+	s.runtimes.Delete(id)
+}
+
+func (c *Gronos) getID(name string) uint {
+	if id, ok := c.runtimesNames.Get(name); ok {
+		return *id
+	}
+	return 0
 }
 
 // Run is the bootstrapping function that manages the lifecycle of the application.
@@ -538,9 +550,9 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 		c.toggleLog = false
 	}
 
-	for _, runtime := range c.runtimes {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
 		c.accumuluate()
-		go func(r RuntimeStation) {
+		go func(r *RuntimeStation) {
 
 			var innerWg sync.WaitGroup
 
@@ -560,7 +572,7 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 			go func() {
 				if err := r.runtime(r.ctx, r.mailbox, r.courier, r.signal); err != nil {
 					slog.Error("Gronos runtime error", slog.Any("id", r.id), slog.Any("error", err))
-					c.courier.Notify(err)
+					c.courier.Transmit(err)
 				}
 				if c.toggleLog {
 					c.logger.Info("Gronos runtime done", slog.Any("id", r.id))
@@ -570,7 +582,7 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 			for {
 				select {
 				case notice := <-r.courier.readNotices():
-					c.courier.Notify(notice)
+					c.courier.Transmit(notice)
 					if c.toggleLog {
 						c.logger.Info("gronos received runtime notice: ", slog.Any("notice", notice))
 					}
@@ -595,7 +607,7 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 				}
 			}
 		}(runtime)
-	}
+	})
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
@@ -612,8 +624,8 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 				if c.toggleLog {
 					c.logger.Info("gronos deliverying msg: ", slog.Any("msg", msg))
 				}
-				if _, ok := c.runtimes[msg.To]; ok {
-					c.runtimes[msg.To].mailbox.post(msg)
+				if runtime, ok := c.runtimes.Get(msg.to); ok {
+					runtime.mailbox.post(msg)
 				} else {
 					if c.toggleLog {
 						c.logger.Info("gronos deliverying msg: ", slog.Any("msg", msg), slog.Any("error", "receiver not found"))
@@ -674,64 +686,64 @@ func (c *Gronos) Wait() {
 	c.wg.Wait()
 }
 
-// Cron is a function that runs a function periodically.
-func Cron(duration time.Duration, fn func() error) RuntimeFunc {
-	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+/// TODO: since a terminology for sending errors instead of "Notify"
 
-		ticker := time.NewTicker(duration)
-		defer ticker.Stop()
+// func (c *Gronos) NotifyAll(err error) {
+// 	for _, runtime := range c.runtimes {
+// 		runtime.courier.Transmit(err)
+// 	}
+// }
 
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-shutdown.Await():
-				return nil
-			case <-ticker.C:
-				go func() {
-					if err := fn(); err != nil {
-						courier.Notify(err)
-						select {
-						case <-ctx.Done():
-							return
-						case <-shutdown.Await():
-							return
-						}
-					}
-				}()
-			}
-		}
+// func (c *Gronos) NotifyAllExcept(err error, except uint) {
+// 	for _, runtime := range c.runtimes {
+// 		if runtime.id != except {
+// 			runtime.courier.Transmit(err)
+// 		}
+// 	}
+// }
 
-		return nil
-	}
-}
+// func (c *Gronos) NotifyAllExceptAll(err error, excepts ...uint) {
+// 	for _, runtime := range c.runtimes {
+// 		for _, except := range excepts {
+// 			if runtime.id != except {
+// 				runtime.courier.Transmit(err)
+// 			}
+// 		}
+// 	}
+// }
 
-// Timed is a function that runs a function periodically and waits for it to complete.
-func Timed(duration time.Duration, fn func() error) RuntimeFunc {
-	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+// func (c *Gronos) SendBroadcastExcept(msg Message, except uint) {
+// 	for _, runtime := range c.runtimes {
+// 		if runtime.id != except {
+// 			runtime.courier.Deliver(envelope{to: runtime.id, Msg: msg})
+// 		}
+// 	}
+// }
 
-		ticker := time.NewTicker(duration)
-		defer ticker.Stop()
+// func (c *Gronos) SendBroadcastExceptAll(msg Message, excepts ...uint) {
+// 	for _, runtime := range c.runtimes {
+// 		for _, except := range excepts {
+// 			if runtime.id != except {
+// 				runtime.courier.Deliver(envelope{to: runtime.id, Msg: msg})
+// 			}
+// 		}
+// 	}
+// }
 
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-shutdown.Await():
-				return nil
-			case <-ticker.C:
-				if err := fn(); err != nil {
-					courier.Notify(err)
-					select {
-					case <-ctx.Done():
-						return nil
-					case <-shutdown.Await():
-						return nil
-					}
-				}
-			}
-		}
+// func (c *Gronos) CancelAllExcept(except uint) {
+// 	for _, runtime := range c.runtimes {
+// 		if runtime.id != except {
+// 			runtime.cancel()
+// 		}
+// 	}
+// }
 
-		return nil
-	}
-}
+// func (c *Gronos) CancelAllExceptAll(excepts ...uint) {
+// 	for _, runtime := range c.runtimes {
+// 		for _, except := range excepts {
+// 			if runtime.id != except {
+// 				runtime.cancel()
+// 			}
+// 		}
+// 	}
+// }
