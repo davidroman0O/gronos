@@ -613,6 +613,7 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
+		// run all the time
 		for {
 			select {
 			case <-ctx.Done():
