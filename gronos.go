@@ -123,10 +123,13 @@ const (
 
 type Message interface{}
 
+type Metadata map[string]interface{}
+
 type envelope struct {
 	to   uint
 	name string
 	Msg  Message
+	Meta Metadata
 }
 
 func Envelope(name string, msg Message) envelope {
@@ -137,34 +140,12 @@ func Envelope(name string, msg Message) envelope {
 	}
 }
 
-// It's a Mailbox
-type Mailbox struct {
-	closed bool
-	r      chan envelope
-	// TODO: add optional circular buffer
-}
-
-func (s *Mailbox) Read() <-chan envelope {
-	return s.r
-}
-
-func (r *Mailbox) post(msg envelope) {
-	r.r <- msg
-}
-
-// todo check for unecessary close
-func (s *Mailbox) Complete() {
-	if s.closed {
-		return
-	}
-	close(s.r)
-	s.closed = true
-}
-
-// TODO make the size of those channels configurable
-func newMailbox() *Mailbox {
-	return &Mailbox{
-		r: make(chan envelope),
+func EnvelopeMetadata(name string, msg Message, metadata Metadata) envelope {
+	return envelope{
+		to:   0,
+		name: name,
+		Msg:  msg,
+		Meta: metadata,
 	}
 }
 
@@ -173,7 +154,6 @@ type Courier struct {
 	closed bool
 	c      chan error
 	e      chan envelope
-
 	// TODO: add optional circular buffer
 }
 
@@ -248,9 +228,6 @@ func newSignal() *Signal {
 		c: c,
 	}
 }
-
-// RuntimeFunc represents a function that runs a runtime.
-type RuntimeFunc func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error
 
 // Centralized place that manage the lifecycle of runtimes
 type Gronos struct {
@@ -393,27 +370,6 @@ func (c *Gronos) Add(name string, opts ...OptionRuntime) (uint, context.CancelFu
 	return id, r.cancel
 }
 
-// func (c *Gronos) AddFuture() uint {
-// 	return c.flipID.Next()
-// }
-
-// func (c *Gronos) Push(name string, opts ...OptionRuntime) (uint, context.CancelFunc) {
-// 	id := c.flipID.Next()
-// 	r := RuntimeStation{
-// 		id:      id,
-// 		courier: newCourier(),
-// 		mailbox: newMailbox(),
-// 		signal:  newSignal(),
-// 	}
-// 	ctx := context.Background()
-// 	r.ctx, r.cancel = WithPlayPause(ctx)
-// 	for _, opt := range opts {
-// 		opt(&r)
-// 	}
-// 	c.runtimes[id] = r
-// 	return id, r.cancel
-// }
-
 // `Direct` require the ID of the runtime, faster but less readable
 func (c *Gronos) Direct(msg Message, to uint) error {
 	if runtime, ok := c.runtimes.Get(to); ok {
@@ -540,6 +496,7 @@ func (c *Gronos) getID(name string) uint {
 }
 
 // Run is the bootstrapping function that manages the lifecycle of the application.
+// TODO replace with Router
 func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 
 	c.toggleLog = true

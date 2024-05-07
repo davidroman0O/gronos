@@ -5,6 +5,9 @@ import (
 	"sync/atomic"
 )
 
+/// TODO there is room for improvement, i'm pretty sure i can get 30M messages per seconds with some optimizations
+/// TODO maybe keep `(atomic.LoadInt64(&rb.tail) - atomic.LoadInt64(&rb.head)) >= int64(rb.throughput)` but with a new condition with a timeout to release the data if the buffer is not filled in time
+
 type RingBuffer[T any] struct {
 	buffer        []T
 	size          int
@@ -27,6 +30,15 @@ func NewRingBuffer[T any](initialSize int, expandable bool, throughput int) *Rin
 	}
 }
 
+func (rb *RingBuffer[T]) Close() {
+	rb.buffer = nil
+	rb.size = 0
+	rb.capacity = 0
+	rb.head = 0
+	rb.tail = 0
+	close(rb.dataAvailable)
+}
+
 func (rb *RingBuffer[T]) Push(value T) error {
 	currentTail := atomic.LoadInt64(&rb.tail)
 	nextTail := currentTail + 1
@@ -41,7 +53,7 @@ func (rb *RingBuffer[T]) Push(value T) error {
 	rb.buffer[currentTail%int64(rb.size)] = value
 	atomic.StoreInt64(&rb.tail, nextTail) // Update tail only after storing value
 
-	go rb.maybeNotify()
+	go rb.maybeNotify() // at every push, we might want to notify the consumer
 
 	return nil
 }
@@ -61,6 +73,7 @@ func (rb *RingBuffer[T]) PushN(values []T) error {
 }
 
 func (rb *RingBuffer[T]) maybeNotify() {
+	// TODO make a better throughput mechanism
 	// if (atomic.LoadInt64(&rb.tail) - atomic.LoadInt64(&rb.head)) >= int64(rb.throughput) {
 	// runtime.Gosched()
 	rb.notify()
