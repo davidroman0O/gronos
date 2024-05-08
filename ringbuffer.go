@@ -8,7 +8,7 @@ import (
 /// TODO there is room for improvement, i'm pretty sure i can get 30M messages per seconds with some optimizations
 /// TODO maybe keep `(atomic.LoadInt64(&rb.tail) - atomic.LoadInt64(&rb.head)) >= int64(rb.throughput)` but with a new condition with a timeout to release the data if the buffer is not filled in time
 
-type RingBuffer[T any] struct {
+type ringBuffer[T any] struct {
 	buffer        []T
 	size          int
 	capacity      int
@@ -19,8 +19,8 @@ type RingBuffer[T any] struct {
 	throughput    int
 }
 
-func NewRingBuffer[T any](initialSize int, expandable bool, throughput int) *RingBuffer[T] {
-	return &RingBuffer[T]{
+func newRingBuffer[T any](initialSize int, expandable bool, throughput int) *ringBuffer[T] {
+	return &ringBuffer[T]{
 		buffer:        make([]T, initialSize),
 		size:          initialSize,
 		capacity:      initialSize,
@@ -30,7 +30,7 @@ func NewRingBuffer[T any](initialSize int, expandable bool, throughput int) *Rin
 	}
 }
 
-func (rb *RingBuffer[T]) Close() {
+func (rb *ringBuffer[T]) Close() {
 	rb.buffer = nil
 	rb.size = 0
 	rb.capacity = 0
@@ -39,7 +39,7 @@ func (rb *RingBuffer[T]) Close() {
 	close(rb.dataAvailable)
 }
 
-func (rb *RingBuffer[T]) Push(value T) error {
+func (rb *ringBuffer[T]) Push(value T) error {
 	currentTail := atomic.LoadInt64(&rb.tail)
 	nextTail := currentTail + 1
 	if nextTail-atomic.LoadInt64(&rb.head) > int64(rb.size) {
@@ -59,11 +59,11 @@ func (rb *RingBuffer[T]) Push(value T) error {
 }
 
 // GetDataAvailableChannel returns a read-only view of the data available channel.
-func (rb *RingBuffer[T]) GetDataAvailableChannel() <-chan []T {
+func (rb *ringBuffer[T]) GetDataAvailableChannel() <-chan []T {
 	return rb.dataAvailable
 }
 
-func (rb *RingBuffer[T]) PushN(values []T) error {
+func (rb *ringBuffer[T]) PushN(values []T) error {
 	for _, value := range values {
 		if err := rb.Push(value); err != nil {
 			return err
@@ -72,7 +72,7 @@ func (rb *RingBuffer[T]) PushN(values []T) error {
 	return nil
 }
 
-func (rb *RingBuffer[T]) maybeNotify() {
+func (rb *ringBuffer[T]) maybeNotify() {
 	// TODO make a better throughput mechanism
 	// if (atomic.LoadInt64(&rb.tail) - atomic.LoadInt64(&rb.head)) >= int64(rb.throughput) {
 	// runtime.Gosched()
@@ -80,7 +80,7 @@ func (rb *RingBuffer[T]) maybeNotify() {
 	// }
 }
 
-func (rb *RingBuffer[T]) notify() {
+func (rb *ringBuffer[T]) notify() {
 	currentHead := atomic.LoadInt64(&rb.head)
 	currentTail := atomic.LoadInt64(&rb.tail)
 	if currentHead == currentTail {
@@ -106,7 +106,7 @@ func (rb *RingBuffer[T]) notify() {
 	}
 }
 
-func (rb *RingBuffer[T]) resize() {
+func (rb *ringBuffer[T]) resize() {
 	newSize := 2 * rb.size
 	newBuffer := make([]T, newSize)
 	oldSize := rb.size
@@ -125,21 +125,21 @@ func (rb *RingBuffer[T]) resize() {
 	atomic.StoreInt64(&rb.tail, int64(oldSize))
 }
 
-func (rb *RingBuffer[T]) IsFull() bool {
+func (rb *ringBuffer[T]) IsFull() bool {
 	return (atomic.LoadInt64(&rb.tail) - atomic.LoadInt64(&rb.head)) >= int64(rb.size)
 }
 
-func (rb *RingBuffer[T]) IsEmpty() bool {
+func (rb *ringBuffer[T]) IsEmpty() bool {
 	return atomic.LoadInt64(&rb.head) == atomic.LoadInt64(&rb.tail)
 }
 
-func (rb *RingBuffer[T]) IsHigherPercentage(percentage int) bool {
+func (rb *ringBuffer[T]) IsHigherPercentage(percentage int) bool {
 	currentUsage := float64(atomic.LoadInt64(&rb.tail) - atomic.LoadInt64(&rb.head))
 	currentCapacity := float64(rb.size)
 	return (currentUsage / currentCapacity) > float64(percentage)/100
 }
 
-func (rb *RingBuffer[T]) IsLowerPercentage(percentage int) bool {
+func (rb *ringBuffer[T]) IsLowerPercentage(percentage int) bool {
 	currentUsage := float64(atomic.LoadInt64(&rb.tail) - atomic.LoadInt64(&rb.head))
 	currentCapacity := float64(rb.size)
 	return (currentUsage / currentCapacity) < float64(percentage)/100

@@ -9,7 +9,7 @@ import (
 
 // TestSelectWithDataChannel tests the RingBuffer's interaction with a select statement.
 func TestSelectWithDataChannel(t *testing.T) {
-	rb := NewRingBuffer[int](5, true, 3)
+	rb := newRingBuffer[int](5, true, 3)
 	totalItems := 6
 	mockEventTriggered := false
 	mockEvent := make(chan bool, 1) // Non-blocking channel for a mock event
@@ -67,7 +67,7 @@ func TestSelectWithDataChannel(t *testing.T) {
 }
 
 func TestExpandableRingBuffer(t *testing.T) {
-	rb := NewRingBuffer[int](2, true, 1) // small initial size to trigger expansion
+	rb := newRingBuffer[int](2, true, 1) // small initial size to trigger expansion
 	go func() {
 		for i := 0; i < 10; i++ { // Push enough items to require expansion
 			if err := rb.Push(i); err != nil {
@@ -83,7 +83,7 @@ func TestExpandableRingBuffer(t *testing.T) {
 }
 
 func TestUnexpandableRingBuffer(t *testing.T) {
-	rb := NewRingBuffer[int](2, false, 1) // Capacity for 2 items, not expandable
+	rb := newRingBuffer[int](2, false, 1) // Capacity for 2 items, not expandable
 
 	// Fill buffer to capacity
 	if err := rb.Push(1); err != nil {
@@ -104,7 +104,7 @@ func TestUnexpandableRingBuffer(t *testing.T) {
 
 // go test -v -timeout=10s -run ^BenchmarkRingBufferThroughput$  -bench=BenchmarkRingBufferThroughput -benchtime=20s
 func BenchmarkRingBufferThroughput(b *testing.B) {
-	rb := NewRingBuffer[int](1024*8, true, 1024) // Large initial size to reduce resizing impact
+	rb := newRingBuffer[int](1024*8, true, 1024) // Large initial size to reduce resizing impact
 	totalMessages := 1000 * 1                    // 10 million messages
 	b.ResetTimer()
 
@@ -142,7 +142,7 @@ func BenchmarkRingBufferThroughput(b *testing.B) {
 
 // go test -v -timeout=10s -run ^TestThroughput$
 func TestThroughput(t *testing.T) {
-	rb := NewRingBuffer[int](1024*8, true, 1024*4) // Large initial size to reduce resizing impact
+	rb := newRingBuffer[int](1024*8, true, 1024*4) // Large initial size to reduce resizing impact
 	totalMessages := 1000000 * 3                   // 10 million messages
 
 	var wg sync.WaitGroup

@@ -18,7 +18,7 @@ import (
 /// - basic runtimes functions
 /// - play/pause context
 /// - communication between runtimes
-/// -
+/// - router that dispatch and analyze messages
 
 // TODO Replace API with ID and use string for names
 // allowing both ID and name
@@ -41,63 +41,7 @@ import (
 /// Exchanging messages within a runtime or between applications of the same fleet should be easy to do and configure.
 /// Ideally, it would be up to the person that want to deploy the app to decide how to split the workloads and how to communicate between them with which third-party (sql, redis or rabbitmq).
 
-type playPauseContext struct {
-	context.Context
-	done   chan struct{}
-	pause  chan struct{}
-	resume chan struct{}
-}
-
-type Pause <-chan struct{}
-type Play <-chan struct{}
-
 type gronosKey string
-
-var getIDKey gronosKey = gronosKey("getID")
-var pauseKey gronosKey = gronosKey("pause")
-
-func WithPlayPause(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(parent)
-	done := make(chan struct{})
-	pause := make(chan struct{}, 1)
-	resume := make(chan struct{}, 1)
-
-	playPauseCtx := &playPauseContext{ctx, done, pause, resume}
-	ctx = context.WithValue(ctx, pauseKey, playPauseCtx)
-
-	return ctx, cancel
-}
-
-func Paused(ctx context.Context) (Pause, Play, bool) {
-	playPauseCtx, ok := ctx.Value(pauseKey).(*playPauseContext)
-	if !ok {
-		return nil, nil, false
-	}
-	return Pause(playPauseCtx.pause), Play(playPauseCtx.resume), true
-}
-
-func PlayPauseOperations(ctx context.Context) (func(), func(), bool) {
-	playPauseCtx, ok := ctx.Value(pauseKey).(*playPauseContext)
-	if !ok {
-		return nil, nil, false
-	}
-
-	pauseFunc := func() {
-		select {
-		case playPauseCtx.pause <- struct{}{}:
-		default:
-		}
-	}
-
-	resumeFunc := func() {
-		select {
-		case playPauseCtx.resume <- struct{}{}:
-		default:
-		}
-	}
-
-	return pauseFunc, resumeFunc, true
-}
 
 type FlipID struct {
 	current uint
@@ -233,9 +177,9 @@ func newSignal() *Signal {
 type Gronos struct {
 	shutdownMode Shutdown
 	// runtimesNames map[string]uint
-	runtimesNames *safeMap[string, uint]
+	runtimesNames *safeMapPtr[string, uint]
 	// runtimes      map[uint]RuntimeStation
-	runtimes  *safeMap[uint, RuntimeStation]
+	runtimes  *safeMapPtr[uint, RuntimeStation]
 	shutdown  *Signal
 	wg        sync.WaitGroup
 	finished  bool
@@ -389,51 +333,58 @@ func (c *Gronos) Named(msg Message, name string) error {
 }
 
 func (c *Gronos) Broadcast(msg Message) {
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		runtime.courier.Deliver(envelope{to: id, Msg: msg})
+		return nil
 	})
 }
 
 func (c *Gronos) Transmit(err error, to uint) {
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		runtime.courier.Transmit(err)
+		return nil
 	})
 }
 
 // Cancel will stop the runtime immediately, your runtime will eventually trigger it's own shutdown
 func (c *Gronos) Cancel(id uint) {
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		runtime.cancel()
+		return nil
 	})
 }
 
 func (c *Gronos) CancelAll() {
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		runtime.cancel()
+		return nil
 	})
 }
 
 func (c *Gronos) DirectPause(id uint) {
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		pause, _, ok := PlayPauseOperations(runtime.ctx)
 		if ok {
 			pause()
 		}
+		return nil
 	})
 }
 
 func (c *Gronos) DirectResume(id uint) {
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		_, resume, ok := PlayPauseOperations(runtime.ctx)
 		if ok {
 			resume()
 		}
+		return nil
 	})
 }
 
 func (c *Gronos) DirectComplete(id uint) {
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		runtime.signal.Complete()
+		return nil
 	})
 }
 
@@ -450,8 +401,8 @@ func (c *Gronos) DirectPhasingOut(id uint) {
 
 func New(opts ...Option) (*Gronos, error) {
 	ctx := &Gronos{
-		runtimes:      newSafeMap[uint, RuntimeStation](), // faster usage - dev could use only that to be faster
-		runtimesNames: newSafeMap[string, uint](),         // convienient usage - dev could use that to be more readable
+		runtimes:      newSafeMapPtr[uint, RuntimeStation](), // faster usage - dev could use only that to be faster
+		runtimesNames: newSafeMapPtr[string, uint](),         // convienient usage - dev could use that to be more readable
 
 		shutdown:     newSignal(),
 		finished:     false,
@@ -507,7 +458,7 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 		c.toggleLog = false
 	}
 
-	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) {
+	c.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
 		c.accumuluate()
 		go func(r *RuntimeStation) {
 
@@ -564,6 +515,7 @@ func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
 				}
 			}
 		}(runtime)
+		return nil
 	})
 
 	sigCh := make(chan os.Signal, 1)

@@ -4,7 +4,7 @@ package gronos
 type Mailbox struct {
 	closed bool
 	// r      chan envelope
-	r *RingBuffer[envelope]
+	r *ringBuffer[envelope]
 	// TODO: add optional circular buffer
 }
 
@@ -66,7 +66,7 @@ func newMailbox(opts ...MailboxOption) *Mailbox {
 		opts[i](c)
 	}
 	m := &Mailbox{
-		r: NewRingBuffer[envelope](c.initialSize, c.expandable, c.throughput),
+		r: newRingBuffer[envelope](c.initialSize, c.expandable, c.throughput),
 	}
 	return m
 }
