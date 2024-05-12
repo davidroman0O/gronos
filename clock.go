@@ -1,4 +1,4 @@
-package ringbuffer
+package gronos
 
 import (
 	"time"
@@ -38,25 +38,29 @@ func WithDynamicInterval(dynamicInterval func(elapsedTime time.Duration) time.Du
 	}
 }
 
-// RingClock is a simple ticker to give you control on when to trigger the sub(s)
-type RingClock struct {
+// Clock is a simple ticker to give you control on when to trigger the sub(s).
+// Observation shown that one goroutine to trigger multiple other tickers is more efficient than multiple goroutines.
+type Clock struct {
 	ticker   *time.Ticker
 	stopCh   chan struct{}
 	subs     []TickerSubscriber
 	interval time.Duration
 }
 
-func NewRingClock(interval time.Duration) *RingClock {
-	tm := &RingClock{
+func NewClock(interval time.Duration) *Clock {
+	tm := &Clock{
 		ticker:   time.NewTicker(interval),
 		stopCh:   make(chan struct{}),
 		interval: interval,
 	}
-	go tm.dispatchTicks()
 	return tm
 }
 
-func (tm *RingClock) Add(rb Ticker, mode ExecutionMode, opts ...TickerSubscriberOption) {
+func (tm *Clock) Start() {
+	go tm.dispatchTicks()
+}
+
+func (tm *Clock) Add(rb Ticker, mode ExecutionMode, opts ...TickerSubscriberOption) {
 	sub := TickerSubscriber{
 		Ticker: rb,
 		Mode:   mode,
@@ -69,8 +73,7 @@ func (tm *RingClock) Add(rb Ticker, mode ExecutionMode, opts ...TickerSubscriber
 	tm.subs = append(tm.subs, sub)
 }
 
-func (tm *RingClock) dispatchTicks() {
-
+func (tm *Clock) dispatchTicks() {
 	for {
 		select {
 		case <-tm.ticker.C:
@@ -109,6 +112,6 @@ func (tm *RingClock) dispatchTicks() {
 	}
 }
 
-func (tm *RingClock) Stop() {
+func (tm *Clock) Stop() {
 	close(tm.stopCh)
 }
