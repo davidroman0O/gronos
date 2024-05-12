@@ -41,7 +41,7 @@ func TestRuntimeLifecycleBasicTimeout(t *testing.T) {
 		RuntimeWithRuntime(testLifecycle(nil, waitingContext, nil)), // on purpose, i rather panic
 		RuntimeWithTimeout(durationTimeout))
 
-	<-runtime.Start(RuntimeCallbacks{}).Await() // blocking until started
+	<-runtime.Start().Await() // blocking until started
 	slog.Info("runtime started")
 	now := time.Now()
 
@@ -62,7 +62,7 @@ func TestRuntimeLifecycleBasicShutdown(t *testing.T) {
 		"lifecycle",
 		RuntimeWithRuntime(testLifecycle(nil, nil, waitingShutdown)))
 
-	<-runtime.Start(RuntimeCallbacks{}).Await() // blocking until started
+	<-runtime.Start().Await() // blocking until started
 	slog.Info("runtime started")
 	now := time.Now()
 
@@ -111,12 +111,12 @@ func TestRuntimeLifecyclePanic(t *testing.T) {
 
 	listener := make(chan struct{})
 
-	<-runtime.Start(RuntimeCallbacks{
-		Panic: func(recover interface{}) {
+	<-runtime.Start(
+		WithPanic(func(recover interface{}) {
 			slog.Info("panic: ", slog.Any("recover", recover))
 			close(listener)
-		},
-	}).Await() // blocking until started
+		}),
+	).Await() // blocking until started
 	slog.Info("runtime started")
 	now := time.Now()
 

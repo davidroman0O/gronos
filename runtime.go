@@ -49,15 +49,6 @@ func RuntimeWithValue(key, value interface{}) OptionRuntime {
 	}
 }
 
-// func WithCancel() OptionRuntime {
-// 	return func(r *RuntimeStation) error {
-// 		ctx, cnfn := context.WithCancel(r.ctx)
-// 		r.cancel = cnfn
-// 		r.ctx = ctx
-// 		return nil
-// 	}
-// }
-
 func RuntimeWithDeadline(d time.Time) OptionRuntime {
 	return func(r *Runtime) error {
 		ctx, cfn := context.WithDeadline(r.ctx, d)
@@ -106,8 +97,56 @@ type RuntimeCallbacks struct {
 	Panic       func(recover interface{})
 }
 
+type OptionCallbacks func(*RuntimeCallbacks) error
+
+func WithBeforeStart(cb func()) OptionCallbacks {
+	return func(r *RuntimeCallbacks) error {
+		runtime := r
+		runtime.BeforeStart = cb
+		return nil
+	}
+}
+
+func WithAfterStart(cb func()) OptionCallbacks {
+	return func(r *RuntimeCallbacks) error {
+		runtime := r
+		runtime.AfterStart = cb
+		return nil
+	}
+}
+
+func WithBeforeStop(cb func()) OptionCallbacks {
+	return func(r *RuntimeCallbacks) error {
+		runtime := r
+		runtime.BeforeStop = cb
+		return nil
+	}
+}
+
+func WithAfterStop(cb func()) OptionCallbacks {
+	return func(r *RuntimeCallbacks) error {
+		runtime := r
+		runtime.AfterStop = cb
+		return nil
+	}
+}
+
+func WithPanic(cb func(recover interface{})) OptionCallbacks {
+	return func(r *RuntimeCallbacks) error {
+		runtime := r
+		runtime.Panic = cb
+		return nil
+	}
+}
+
 // Owning the start of the runtime
-func (r *Runtime) Start(cbs RuntimeCallbacks) *Signal {
+// I moved that piece of code countless amount of time before figuring out that i had to group it all under a Runtime struct to make the code lighter to read and easier to control
+func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
+	cbs := &RuntimeCallbacks{}
+	for _, opt := range opts {
+		opt(cbs)
+	}
+
 	signal := newSignal()
 	go func() {
 		defer func() {
