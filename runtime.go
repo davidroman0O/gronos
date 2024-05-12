@@ -146,7 +146,6 @@ func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
 	for _, opt := range opts {
 		opt(cbs)
 	}
-
 	signal := newSignal()
 	go func() {
 		defer func() {
@@ -178,11 +177,15 @@ func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
 
 // Trigger it's cancel context function
 func (r *Runtime) Cancel() {
-	r.cancel() // interruption trigger, not real shutdown, mught be trigger due to take too much time or else
+	r.courier.Complete() // interrupt all communication
+	r.mailbox.Complete() // interrupt message reception
+	r.cancel()           // interruption trigger, not real shutdown, mught be trigger due to take too much time or else
 }
 
 // Gracefully shutdon the runtime
 func (r *Runtime) GracefulShutdown() <-chan struct{} {
-	r.signal.Complete() // trigger real end, application stopping
-	return r.done       // waiting for the real end
+	r.courier.Complete() // interrupt all communication
+	r.mailbox.Complete() // interrupt message reception
+	r.signal.Complete()  // trigger real end, application stopping
+	return r.done        // waiting for the real end
 }

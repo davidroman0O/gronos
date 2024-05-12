@@ -14,6 +14,7 @@ func testLifecycle(read chan envelope, done chan struct{}, shut chan struct{}) f
 			select {
 			case msg := <-mailbox.Read():
 				slog.Info("lifecycle: runtime msg: ", slog.Any("msg", msg))
+				read <- msg
 				close(read)
 			case <-ctx.Done():
 				slog.Info("lifecycle: runtime ctx.Done()")
@@ -125,4 +126,64 @@ func TestRuntimeLifecyclePanic(t *testing.T) {
 	if time.Since(now) > (time.Second*2)+time.Millisecond*100 {
 		t.Fatal("shutdown should have been triggered")
 	}
+}
+
+// Supposed to send a message to somewhere
+func TestRuntimeCourierBasic(t *testing.T) {
+
+	runtime := newRuntime(
+		"lifecycle",
+		RuntimeWithRuntime(testLifecycle(nil, nil, nil)))
+
+	<-runtime.
+		Start().
+		Await() // blocking until started
+	slog.Info("runtime started")
+
+	received := make(chan envelope)
+	go func() {
+		msg := <-runtime.courier.e
+		received <- msg
+		close(received)
+	}()
+
+	// we should wait for the context
+	runtime.courier.Deliver(Envelope("destination", "test"))
+
+	msg := <-received // should have receive
+	if msg.Msg != "test" {
+		t.Fatal("msg should be test")
+	} else {
+		slog.Info("msg received: ", slog.Any("msg", msg))
+	}
+	<-runtime.GracefulShutdown()
+}
+
+func TestRuntimeMailboxBasic(t *testing.T) {
+
+	reading := make(chan envelope)
+
+	runtime := newRuntime(
+		"lifecycle",
+		RuntimeWithRuntime(testLifecycle(reading, nil, nil)))
+
+	<-runtime.
+		Start().
+		Await() // blocking until started
+
+	slog.Info("runtime started")
+
+	runtime.mailbox.post(Envelope("destination", "test"))
+
+	// Since we have no clock in this test, we will push it ourselves
+	runtime.mailbox.buffer.Tick() // process the mailbox
+
+	msg := <-reading // should have receive
+
+	if msg.Msg != "test" {
+		t.Fatal("msg should be test")
+	} else {
+		slog.Info("msg received: ", slog.Any("msg", msg))
+	}
+	<-runtime.GracefulShutdown()
 }
