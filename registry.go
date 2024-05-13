@@ -7,6 +7,20 @@ import (
 	"sync"
 )
 
+/// TODO Task based ticker to modify the state of runtimes
+/// TODO state should be handled ONCE per transition, that mean i need a transition controller somehow or my own fsm
+/// Each runtime will have their own fsm, each fsm will be plugged into the callbacks of the runtime to transitions all states
+
+type RegistryState uint
+
+const (
+	added RegistryState = iota
+	started
+	stopped
+	failed
+	panicked
+)
+
 // Control the state of the runtime functions
 type RuntimeRegistry struct {
 	ctx    context.Context
@@ -15,7 +29,7 @@ type RuntimeRegistry struct {
 	flipID        *FlipID
 	runtimesNames *safeMapPtr[string, uint]
 	runtimes      *safeMapPtr[uint, Runtime]
-	states        *safeMap[uint, runtimeState]
+	states        *safeMap[uint, RegistryState]
 
 	mailbox *RingBuffer[envelope]
 
@@ -28,7 +42,7 @@ func NewRuntimeRegistry() *RuntimeRegistry {
 		flipID:        NewFlipID(), // helper to assign ID without collision
 		runtimesNames: newSafeMapPtr[string, uint](),
 		runtimes:      newSafeMapPtr[uint, Runtime](),
-		states:        newSafeMap[uint, runtimeState](),
+		states:        newSafeMap[uint, RegistryState](),
 		mailbox:       NewRingBuffer[envelope](), // TODO make parameters
 		shutdown:      newSignal(),
 	}
@@ -100,7 +114,7 @@ func (r *RuntimeRegistry) Tick() {
 	// check the status of all runtimes
 	if err := r.runtimes.ForEach(func(k uint, v *Runtime) error {
 		slog.Info("checking runtime", slog.Any("id", k), slog.Any("name", v.name))
-		var state runtimeState
+		var state RegistryState
 		var err error
 		var ok bool
 		if state, ok = r.states.Get(k); !ok {
