@@ -20,6 +20,8 @@ type Runtime struct {
 	mailbox *Mailbox
 	signal  *Signal
 	done    chan struct{}
+	err     error
+	perr    interface{}
 }
 
 // not sure if i'm going to use the error here
@@ -160,6 +162,7 @@ func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
 		defer func() {
 			// might panic
 			if recov := recover(); recov != nil {
+				r.perr = recov
 				if cbs.Panic != nil {
 					cbs.Panic(recov)
 				}
@@ -181,6 +184,7 @@ func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
 		}
 		if err := r.runtime(r.ctx, r.mailbox, r.courier, r.signal); err != nil {
 			slog.Error("Gronos runtime error", slog.Any("id", r.id), slog.Any("error", err))
+			r.err = err
 			if cbs.Failed != nil {
 				cbs.Failed(err)
 			}
