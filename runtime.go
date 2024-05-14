@@ -92,6 +92,7 @@ func newRuntime(name string, opts ...OptionRuntime) *Runtime {
 type RuntimeCallbacks struct {
 	BeforeStart func()
 	AfterStart  func()
+	Failed      func(err error)
 	BeforeStop  func()
 	AfterStop   func()
 	Panic       func(recover interface{})
@@ -111,6 +112,14 @@ func WithAfterStart(cb func()) OptionCallbacks {
 	return func(r *RuntimeCallbacks) error {
 		runtime := r
 		runtime.AfterStart = cb
+		return nil
+	}
+}
+
+func WithFailed(cb func(err error)) OptionCallbacks {
+	return func(r *RuntimeCallbacks) error {
+		runtime := r
+		runtime.Failed = cb
 		return nil
 	}
 }
@@ -165,8 +174,16 @@ func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
 			cbs.BeforeStart()
 		}
 		signal.Complete() // signal the start
+		if cbs.AfterStart != nil {
+			go func() {
+				cbs.AfterStart()
+			}()
+		}
 		if err := r.runtime(r.ctx, r.mailbox, r.courier, r.signal); err != nil {
 			slog.Error("Gronos runtime error", slog.Any("id", r.id), slog.Any("error", err))
+			if cbs.Failed != nil {
+				cbs.Failed(err)
+			}
 		}
 		if cbs.BeforeStop != nil {
 			cbs.BeforeStop()

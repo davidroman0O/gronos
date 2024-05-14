@@ -5,20 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 )
-
-/// TODO Task based ticker to modify the state of runtimes
-/// TODO state should be handled ONCE per transition, that mean i need a transition controller somehow or my own fsm
-/// Each runtime will have their own fsm, each fsm will be plugged into the callbacks of the runtime to transitions all states
 
 type RegistryState uint
 
 const (
-	added RegistryState = iota
-	started
-	stopped
-	failed
-	panicked
+	stateAdded RegistryState = iota
+	stateStarted
+	stateStopped
+	stateFailed
+	statePanicked
 )
 
 // Control the state of the runtime functions
@@ -50,6 +47,22 @@ func NewRuntimeRegistry() *RuntimeRegistry {
 	registry.ctx, registry.cancel = context.WithCancel(context.Background())
 
 	return registry
+}
+
+func (r *RuntimeRegistry) WhenID(id uint, state RegistryState) <-chan struct{} {
+	waitc := make(chan struct{})
+
+	go func() {
+		ticker := time.NewTicker(time.Millisecond * 50)
+		for range ticker.C {
+			if s, ok := r.states.Get(id); ok && s == state {
+				close(waitc)
+				return
+			}
+		}
+	}()
+
+	return waitc
 }
 
 func (r *RuntimeRegistry) Tick() {
@@ -95,14 +108,6 @@ func (r *RuntimeRegistry) Tick() {
 			} else {
 				// TODO monitor that error
 				// TODO retry to send the message
-				{
-					counter := forward[i].Meta["$_gronosRetry"].(int)
-					if counter < 5 {
-						counter++
-						forward[i].Meta["$_gronosRetry"] = counter
-						r.mailbox.Push(forward[i])
-					}
-				}
 				fmt.Println("receiver not found")
 			}
 		}
@@ -111,33 +116,29 @@ func (r *RuntimeRegistry) Tick() {
 		fmt.Println("runtime nothing")
 	}
 
+	// TODO should no be there, should be event driven OR maybe it's ok
 	// check the status of all runtimes
 	if err := r.runtimes.ForEach(func(k uint, v *Runtime) error {
-		slog.Info("checking runtime", slog.Any("id", k), slog.Any("name", v.name))
 		var state RegistryState
 		var err error
 		var ok bool
 		if state, ok = r.states.Get(k); !ok {
 			return fmt.Errorf("runtime %d not found", k)
 		}
-		slog.Info("state runtime", slog.Any("id", k), slog.Any("name", v.name), slog.Any("state", state))
 		// i don't think we should manage transition in states
 		switch state {
-		case added:
+		case stateAdded:
 			slog.Info("starting runtime", slog.Any("id", k), slog.Any("name", v.name), slog.Any("state", state))
 			<-r.Start(k, v) // will change itself to failed or panicked
-		case started:
-		case stopped:
-		case failed:
-		case panicked:
-		default:
-			//
 		}
-
 		return err
 	}); err != nil {
 		fmt.Println("error foreach ", err)
 	}
+}
+
+func (e *RuntimeRegistry) Get(id uint) (*Runtime, bool) {
+	return e.runtimes.Get(id)
 }
 
 func (e *RuntimeRegistry) Add(name string, opts ...OptionRuntime) (uint, context.CancelFunc) {
@@ -148,7 +149,7 @@ func (e *RuntimeRegistry) Add(name string, opts ...OptionRuntime) (uint, context
 
 	// In this order so no system can access it until the last map
 	e.runtimesNames.Set(runtime.name, &runtime.id)
-	e.states.Set(runtime.id, added)
+	e.states.Set(runtime.id, stateAdded)
 	e.runtimes.Set(runtime.id, runtime)
 
 	return runtime.id, runtime.cancel
@@ -170,21 +171,28 @@ func (r *RuntimeRegistry) DeliverMany(to uint, msgs []envelope) {
 
 // Start a runtime, to be used on a goroutine
 func (r *RuntimeRegistry) Start(id uint, run *Runtime) <-chan struct{} {
+	// runtimes api is already a fsm, there is not need to build one
+	// TODO should have a context to be sure it started
 	return run.Start(
-		WithAfterStart(func() {
-			slog.Info("after start")
+		WithBeforeStart(func() {
+			slog.Info("before start")
 			r.wg.Add(1)
-			r.states.Set(id, started)
+			r.states.Set(id, stateStarted)
 		}),
 		WithPanic(func(recover interface{}) {
 			slog.Info("panic: ", slog.Any("recover", recover))
 			r.wg.Done()
-			r.states.Set(id, panicked)
+			r.states.Set(id, statePanicked)
 		}),
 		WithAfterStop(func() {
 			slog.Info("after stop")
 			r.wg.Done()
-			r.states.Set(id, stopped)
+			r.states.Set(id, stateStopped)
+		}),
+		WithFailed(func(err error) {
+			slog.Info("failed: ", slog.Any("error", err))
+			r.wg.Done()
+			r.states.Set(id, stateFailed)
 		}),
 	).Await()
 }
