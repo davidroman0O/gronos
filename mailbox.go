@@ -4,15 +4,17 @@ package gronos
 type Mailbox struct {
 	closed bool
 	// r      chan envelope
-	r *ringBuffer[envelope]
+	// r *ringBuffer[envelope]
+	buffer *RingBuffer[envelope]
 	// TODO: add optional circular buffer
 }
 
+// TODO change the <-chan envelope to <-chan []envelope
 func (s *Mailbox) Read() <-chan envelope {
 	out := make(chan envelope)
 	go func() {
 		defer close(out)
-		for msg := range s.r.GetDataAvailableChannel() {
+		for msg := range s.buffer.DataAvailable() {
 			for _, v := range msg {
 				out <- v
 			}
@@ -22,7 +24,7 @@ func (s *Mailbox) Read() <-chan envelope {
 }
 
 func (r *Mailbox) post(msg envelope) {
-	r.r.Push(msg)
+	r.buffer.Push(msg)
 }
 
 // todo check for unecessary close
@@ -30,14 +32,14 @@ func (s *Mailbox) Complete() {
 	if s.closed {
 		return
 	}
-	s.r.Close()
+	s.buffer.Close()
 	s.closed = true
 }
 
 type MailboxConfig struct {
 	initialSize int
 	expandable  bool
-	throughput  int
+	clock       *Clock
 }
 
 type MailboxOption func(*MailboxConfig)
@@ -54,19 +56,25 @@ func MailboxWithExpandable(expandable bool) MailboxOption {
 	}
 }
 
-func MailboxWithThroughput(throughput int) MailboxOption {
-	return func(c *MailboxConfig) {
-		c.throughput = throughput
-	}
-}
+// func MailboxWithThroughput(throughput int) MailboxOption {
+// 	return func(c *MailboxConfig) {
+// 		c.throughput = throughput
+// 	}
+// }
 
 func newMailbox(opts ...MailboxOption) *Mailbox {
-	c := &MailboxConfig{}
+	c := &MailboxConfig{
+		initialSize: 300,
+		expandable:  true,
+	}
 	for i := 0; i < len(opts); i++ {
 		opts[i](c)
 	}
 	m := &Mailbox{
-		r: newRingBuffer[envelope](c.initialSize, c.expandable, c.throughput),
+		buffer: NewRingBuffer[envelope](
+			WithInitialSize(c.initialSize),
+			WithExpandable(c.expandable),
+		),
 	}
 	return m
 }
