@@ -1,7 +1,7 @@
 package gronos
 
 type Payload interface{}
-type Metadata map[string]string
+type Metadata map[string]interface{}
 
 // Lowest form of message passing dedicated for runtime communication
 // Messages might be wrapped as envelopes when going on the network layer
@@ -14,33 +14,50 @@ type message struct {
 	noAck    chan struct{} // when closed, negative ackowledge is received (watermill inspiration)
 }
 
-type messageOption func(*message)
+type messageOption func(*message) error
 
-func (m *message) applyOptions(options ...messageOption) {
+func (m *message) applyOptions(options ...messageOption) error {
 	for _, option := range options {
-		option(m)
+		if err := option(m); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func WitName(name string) messageOption {
-	return func(m *message) {
+	return func(m *message) error {
 		m.name = name
+		return nil
 	}
 }
 
 func WithID(id uint) messageOption {
-	return func(m *message) {
+	return func(m *message) error {
 		m.to = id
+		return nil
 	}
 }
 
-func NewMessage(metadata map[string]string, payload interface{}) message {
-	return message{
+func NewMessage(payload interface{}, opts ...messageOption) (*message, error) {
+	m := message{
 		to:       0,
 		name:     "",
 		Payload:  payload,
-		Metadata: metadata,
+		Metadata: make(map[string]interface{}),
 		ack:      make(chan struct{}),
 		noAck:    make(chan struct{}),
+	}
+	if err := m.applyOptions(opts...); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func withGronos() messageOption {
+	return func(m *message) error {
+		m.Metadata["$_gronos"] = "" // just key exists to say we tagged it
+		m.Metadata["$_gronos::retries"] = 0
+		return nil
 	}
 }

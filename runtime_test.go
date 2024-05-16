@@ -147,10 +147,10 @@ func TestRuntimeCourierBasic(t *testing.T) {
 		close(received)
 	}()
 
-	devlieryMsg := NewMessage(map[string]string{}, "test")
+	devlieryMsg, _ := NewMessage("test")
 
 	// we should wait for the context
-	runtime.courier.Deliver(devlieryMsg)
+	runtime.courier.Deliver(*devlieryMsg)
 
 	msg := <-received // should have receive
 	if msg.Payload != "test" {
@@ -175,8 +175,8 @@ func TestRuntimeMailboxBasic(t *testing.T) {
 
 	slog.Info("runtime started")
 
-	devlieryMsg := NewMessage(map[string]string{}, "test")
-	runtime.mailbox.post(devlieryMsg)
+	devlieryMsg, _ := NewMessage("test")
+	runtime.mailbox.post(*devlieryMsg)
 
 	// Since we have no clock in this test, we will push it ourselves
 	runtime.mailbox.buffer.Tick() // process the mailbox

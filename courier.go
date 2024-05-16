@@ -1,6 +1,9 @@
 package gronos
 
-import "fmt"
+import (
+	"fmt"
+	"log/slog"
+)
 
 // Courier is responsible for delivering error messages. When an error occurs, it's like the Courier "picks up" the error and "delivers" to the central mail station.
 // It is a simple intermediary.
@@ -25,6 +28,7 @@ func (s *Courier) Deliver(env message) {
 		return
 	}
 	if env.Payload != nil {
+		slog.Info("Courier delivering", slog.Any("env", env))
 		s.e <- env
 	}
 }
@@ -60,6 +64,7 @@ func (s *Courier) Complete() {
 	close(s.es)
 }
 
+// TODO: should configure it
 func newCourier() *Courier {
 	c := make(chan error, 1)   // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
 	e := make(chan message, 1) // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals

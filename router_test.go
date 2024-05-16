@@ -1,40 +1,62 @@
 package gronos
 
 import (
+	"context"
+	"log/slog"
 	"testing"
+	"time"
 )
 
+// / The whole goal of this test is now to refine the whole communication between the router -> registry -> runtime
+// / For now, it is still the old system, and require to evolve
 func TestRouterBasic(t *testing.T) {
-	// router := newRouter()
+	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(ctx, time.Second*4)
+	defer cancel()
 
-	// router.Add("simple",
-	// 	RuntimeWithRuntime(
-	// 		func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error {
-	// 			for {
-	// 				select {
-	// 				case <-timer.C:
-	// 					panic("lifecycle panic: runtime panic")
-	// 				case msg := <-mailbox.Read():
-	// 					slog.Info("lifecycle panic: runtime msg: ", slog.Any("msg", msg))
-	// 					close(read)
-	// 				case <-ctx.Done():
-	// 					slog.Info("lifecycle panic: runtime ctx.Done()")
-	// 					close(done)
-	// 					return nil
-	// 				case <-shutdown.Await():
-	// 					slog.Info("lifecycle panic: runtime shutdown")
-	// 					close(shut)
-	// 					return nil
-	// 				}
-	// 			}
-	// 		}))
+	router := newRouter() // when starting, the registry will also start
+	router.clock.Start()  // which starts the RuntimeRegistry too
 
-	// // should start the runtime
-	// router.registry.Tick()
+	timer := time.NewTicker(time.Millisecond * 500)
+	id, _ := router.Add("simple",
+		RuntimeWithRuntime(
+			func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error {
+				slog.Info("runtime started")
+				for {
+					select {
+					case <-timer.C:
+						slog.Info("runtime tick")
+						continue
+					case msg := <-mailbox.Read():
+						slog.Info("runtime: runtime msg: ", slog.Any("msg", msg))
+						cancel()
+						continue
+					case <-ctx.Done():
+						slog.Info("runtime: runtime ctx.Done()")
+						continue
+					case <-shutdown.Await():
+						slog.Info("runtime: runtime shutdown")
+						continue
+					}
+				}
+			}))
 
-	// //
-	// router.Tick()
+	msg, _ := NewMessage("test")
 
+	// send message to the mailbox of the router (pre-process)
+	if err := router.Tell(id, *msg); err != nil {
+		t.Fatalf("Error telling: %v\n", err)
+	}
+
+	router.mailbox.Tick() // manually trigger the mailbox to process the message
+	router.Tick()         // manually trigger the router to pre-process the analysis
+
+	router.registry.mailbox.Tick() // manually trigger the registry mailbox to process the message
+	router.registry.Tick()         // manually trigger the registry to process the message
+
+	<-ctx.Done()
+	router.clock.Stop()
+	timer.Stop()
 }
 
 // func TestRouterWhenStarted(t *testing.T) {
