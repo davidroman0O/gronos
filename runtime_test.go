@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func testLifecycle(read chan envelope, done chan struct{}, shut chan struct{}) func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+func testLifecycle(read chan message, done chan struct{}, shut chan struct{}) func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		for {
 			select {
@@ -80,7 +80,7 @@ func TestRuntimeLifecycleBasicShutdown(t *testing.T) {
 	}
 }
 
-func testLifecyclePanicked(read chan envelope, done chan struct{}, shut chan struct{}) func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+func testLifecyclePanicked(read chan message, done chan struct{}, shut chan struct{}) func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
 		timer := time.NewTimer(time.Second * 2)
 		for {
@@ -140,18 +140,20 @@ func TestRuntimeCourierBasic(t *testing.T) {
 		Await() // blocking until started
 	slog.Info("runtime started")
 
-	received := make(chan envelope)
+	received := make(chan message)
 	go func() {
 		msg := <-runtime.courier.e
 		received <- msg
 		close(received)
 	}()
 
+	devlieryMsg := NewMessage(map[string]string{}, "test")
+
 	// we should wait for the context
-	runtime.courier.Deliver(Envelope("destination", "test"))
+	runtime.courier.Deliver(devlieryMsg)
 
 	msg := <-received // should have receive
-	if msg.Msg != "test" {
+	if msg.Payload != "test" {
 		t.Fatal("msg should be test")
 	} else {
 		slog.Info("msg received: ", slog.Any("msg", msg))
@@ -161,7 +163,7 @@ func TestRuntimeCourierBasic(t *testing.T) {
 
 func TestRuntimeMailboxBasic(t *testing.T) {
 
-	reading := make(chan envelope)
+	reading := make(chan message)
 
 	runtime := newRuntime(
 		"lifecycle",
@@ -173,14 +175,15 @@ func TestRuntimeMailboxBasic(t *testing.T) {
 
 	slog.Info("runtime started")
 
-	runtime.mailbox.post(Envelope("destination", "test"))
+	devlieryMsg := NewMessage(map[string]string{}, "test")
+	runtime.mailbox.post(devlieryMsg)
 
 	// Since we have no clock in this test, we will push it ourselves
 	runtime.mailbox.buffer.Tick() // process the mailbox
 
 	msg := <-reading // should have receive
 
-	if msg.Msg != "test" {
+	if msg.Payload != "test" {
 		t.Fatal("msg should be test")
 	} else {
 		slog.Info("msg received: ", slog.Any("msg", msg))

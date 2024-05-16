@@ -5,13 +5,13 @@ type Mailbox struct {
 	closed bool
 	// r      chan envelope
 	// r *ringBuffer[envelope]
-	buffer *RingBuffer[envelope]
+	buffer *RingBuffer[message]
 	// TODO: add optional circular buffer
 }
 
 // TODO change the <-chan envelope to <-chan []envelope
-func (s *Mailbox) Read() <-chan envelope {
-	out := make(chan envelope)
+func (s *Mailbox) Read() <-chan message {
+	out := make(chan message)
 	go func() {
 		defer close(out)
 		for msg := range s.buffer.DataAvailable() {
@@ -23,7 +23,7 @@ func (s *Mailbox) Read() <-chan envelope {
 	return out
 }
 
-func (r *Mailbox) post(msg envelope) {
+func (r *Mailbox) post(msg message) {
 	r.buffer.Push(msg)
 }
 
@@ -71,7 +71,7 @@ func newMailbox(opts ...MailboxOption) *Mailbox {
 		opts[i](c)
 	}
 	m := &Mailbox{
-		buffer: NewRingBuffer[envelope](
+		buffer: NewRingBuffer[message](
 			WithInitialSize(c.initialSize),
 			WithExpandable(c.expandable),
 		),

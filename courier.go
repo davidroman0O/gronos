@@ -7,29 +7,29 @@ import "fmt"
 type Courier struct {
 	closed bool
 	c      chan error
-	e      chan envelope
-	es     chan []envelope
+	e      chan message
+	es     chan []message
 }
 
 func (s *Courier) readNotices() <-chan error {
 	return s.c
 }
 
-func (s *Courier) readMails() <-chan envelope {
+func (s *Courier) readMails() <-chan message {
 	return s.e
 }
 
-func (s *Courier) Deliver(env envelope) {
+func (s *Courier) Deliver(env message) {
 	if s.closed {
 		fmt.Println("Courier closed")
 		return
 	}
-	if env.Msg != nil {
+	if env.Payload != nil {
 		s.e <- env
 	}
 }
 
-func (s *Courier) DeliverMany(envs []envelope) {
+func (s *Courier) DeliverMany(envs []message) {
 	if s.closed {
 		fmt.Println("Courier closed")
 		return
@@ -61,9 +61,9 @@ func (s *Courier) Complete() {
 }
 
 func newCourier() *Courier {
-	c := make(chan error, 1)    // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
-	e := make(chan envelope, 1) // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
-	es := make(chan []envelope, 1)
+	c := make(chan error, 1)   // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
+	e := make(chan message, 1) // should be 3 modes: unbuffered, buffered, with 1 buffered channel to prevent panic on multiple ctrl+c signals
+	es := make(chan []message, 1)
 	return &Courier{
 		closed: false,
 		c:      c,

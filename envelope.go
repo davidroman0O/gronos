@@ -1,30 +1,46 @@
 package gronos
 
-type Message interface{}
+type Payload interface{}
+type Metadata map[string]string
 
-type Metadata map[string]interface{}
-
-type envelope struct {
-	to   uint
-	name string
-	Msg  Message
-	Meta Metadata
+// Lowest form of message passing dedicated for runtime communication
+// Messages might be wrapped as envelopes when going on the network layer
+type message struct {
+	to       uint
+	name     string
+	Payload  Payload
+	Metadata Metadata
+	ack      chan struct{} // when closed, ackowledge is received (watermill inspiration)
+	noAck    chan struct{} // when closed, negative ackowledge is received (watermill inspiration)
 }
 
-func Envelope(name string, msg Message) envelope {
-	return envelope{
-		to:   0,
-		name: name,
-		Msg:  msg,
-		Meta: make(Metadata),
+type messageOption func(*message)
+
+func (m *message) applyOptions(options ...messageOption) {
+	for _, option := range options {
+		option(m)
 	}
 }
 
-func EnvelopeMetadata(name string, msg Message, metadata Metadata) envelope {
-	return envelope{
-		to:   0,
-		name: name,
-		Msg:  msg,
-		Meta: metadata,
+func WitName(name string) messageOption {
+	return func(m *message) {
+		m.name = name
+	}
+}
+
+func WithID(id uint) messageOption {
+	return func(m *message) {
+		m.to = id
+	}
+}
+
+func NewMessage(metadata map[string]string, payload interface{}) message {
+	return message{
+		to:       0,
+		name:     "",
+		Payload:  payload,
+		Metadata: metadata,
+		ack:      make(chan struct{}),
+		noAck:    make(chan struct{}),
 	}
 }
