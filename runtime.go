@@ -7,6 +7,7 @@ import (
 )
 
 // RuntimeFunc represents a function that runs a runtime.
+// TODO change it entirely to put all the things into the context like the play/pause, just `func(ctx) error`
 type RuntimeFunc func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error
 
 // One runtime can receive and send messages while performing it's own task
