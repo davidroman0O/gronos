@@ -8,7 +8,7 @@ type mailboxContext struct {
 
 var mailboxKey gronosKey = gronosKey("mailbox")
 
-func WithMailbox(parent context.Context) context.Context {
+func withMailbox(parent context.Context) context.Context {
 	ctx := context.WithValue(parent, mailboxKey, mailboxContext{
 		buffer: NewRingBuffer[message](
 			WithInitialSize(300),
@@ -18,10 +18,20 @@ func WithMailbox(parent context.Context) context.Context {
 	return ctx
 }
 
-func Messages(ctx context.Context) (<-chan []message, bool) {
+// Check messages when they are available
+func UseMailbox(ctx context.Context) (<-chan []message, bool) {
 	mailboxCtx, ok := ctx.Value(mailboxKey).(mailboxContext)
 	if !ok {
 		return nil, false
 	}
 	return mailboxCtx.buffer.DataAvailable(), true
+}
+
+// Private mailbox with full control, which is not part of the developer experience and not part of the control flow.
+func useMailbox(ctx context.Context) (*RingBuffer[message], bool) {
+	mailboxCtx, ok := ctx.Value(mailboxKey).(mailboxContext)
+	if !ok {
+		return nil, false
+	}
+	return mailboxCtx.buffer, true
 }

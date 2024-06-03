@@ -15,7 +15,7 @@ type Play <-chan struct{}
 var getIDKey gronosKey = gronosKey("getID")
 var pauseKey gronosKey = gronosKey("pause")
 
-func WithPlayPause(parent context.Context) (context.Context, context.CancelFunc) {
+func withPlayPause(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
 	pause := make(chan struct{}, 1)
@@ -27,7 +27,7 @@ func WithPlayPause(parent context.Context) (context.Context, context.CancelFunc)
 	return ctx, cancel
 }
 
-func Paused(ctx context.Context) (Pause, Play, bool) {
+func UsePaused(ctx context.Context) (Pause, Play, bool) {
 	playPauseCtx, ok := ctx.Value(pauseKey).(*playPauseContext)
 	if !ok {
 		return nil, nil, false
@@ -35,7 +35,7 @@ func Paused(ctx context.Context) (Pause, Play, bool) {
 	return Pause(playPauseCtx.pause), Play(playPauseCtx.resume), true
 }
 
-func PlayPauseOperations(ctx context.Context) (func(), func(), bool) {
+func UsePlayPause(ctx context.Context) (func(), func(), bool) {
 	playPauseCtx, ok := ctx.Value(pauseKey).(*playPauseContext)
 	if !ok {
 		return nil, nil, false

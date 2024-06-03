@@ -8,14 +8,14 @@ type shutdownContext struct {
 
 var shutdownKey gronosKey = gronosKey("shutdown")
 
-func WithSignals(parent context.Context) context.Context {
+func withShutdown(parent context.Context) context.Context {
 	ctx := context.WithValue(parent, shutdownKey, shutdownContext{
 		shutdown: newSignal(),
 	})
 	return ctx
 }
 
-func Shutdown(ctx context.Context) (shutdown *Signal, ok bool) {
+func UseShutdown(ctx context.Context) (shutdown *Signal, ok bool) {
 	signalCtx, ok := ctx.Value(shutdownKey).(shutdownContext)
 	if !ok {
 		return nil, false

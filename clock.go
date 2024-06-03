@@ -1,8 +1,12 @@
 package gronos
 
 import (
+	"fmt"
 	"time"
 )
+
+// By default, the ticking occurs every 100ms so give time to subscribers to accumulate messages and process them.
+var defaultClock = NewClock(ClockWithInterval(100 * time.Millisecond))
 
 type Ticker interface {
 	Tick()
@@ -41,23 +45,69 @@ func WithDynamicInterval(dynamicInterval func(elapsedTime time.Duration) time.Du
 // Clock is a simple ticker to give you control on when to trigger the sub(s).
 // Observation shown that one goroutine to trigger multiple other tickers is more efficient than multiple goroutines.
 type Clock struct {
+	name     string
+	interval time.Duration
 	ticker   *time.Ticker
 	stopCh   chan struct{}
 	subs     []TickerSubscriber
-	interval time.Duration
+	ticking  bool
+	started  bool
 }
 
-func NewClock(interval time.Duration) *Clock {
-	tm := &Clock{
-		ticker:   time.NewTicker(interval),
-		stopCh:   make(chan struct{}),
-		interval: interval,
+type ClockOption func(*Clock)
+
+func ClockWithName(name string) ClockOption {
+	return func(c *Clock) {
+		c.name = name
 	}
+}
+
+func ClockWithInterval(interval time.Duration) ClockOption {
+	return func(c *Clock) {
+		c.interval = interval
+	}
+}
+
+func NewClock(opts ...ClockOption) *Clock {
+	tm := &Clock{
+		// ticker:   time.NewTicker(interval),
+		stopCh: make(chan struct{}),
+		// interval: interval,
+		subs:    []TickerSubscriber{},
+		ticking: false,
+		started: false,
+	}
+	for _, opt := range opts {
+		opt(tm)
+	}
+	if tm.interval == 0 {
+		tm.interval = 100 * time.Millisecond
+	}
+	tm.ticker = time.NewTicker(tm.interval)
 	return tm
 }
 
 func (tm *Clock) Start() {
+	fmt.Println(tm.name, "=> a clock called to start")
+	if tm.started {
+		fmt.Println(tm.name, "==> Clock already started")
+		// it was a pause
+		if !tm.ticking {
+			fmt.Println(tm.name, "===> Clock was paused")
+			go tm.dispatchTicks()
+		}
+		return
+	}
+	if tm.stopCh == nil {
+		tm.stopCh = make(chan struct{})
+	}
+	fmt.Println(tm.name, "> Clock started")
+	tm.started = true
 	go tm.dispatchTicks()
+}
+
+func (tm *Clock) Clear() {
+	tm.subs = []TickerSubscriber{}
 }
 
 func (tm *Clock) Add(rb Ticker, mode ExecutionMode, opts ...TickerSubscriberOption) {
@@ -74,7 +124,12 @@ func (tm *Clock) Add(rb Ticker, mode ExecutionMode, opts ...TickerSubscriberOpti
 }
 
 func (tm *Clock) dispatchTicks() {
-	for {
+	defer func() {
+		fmt.Println(tm.name, "Clock stopped")
+	}()
+	tm.ticking = true
+	fmt.Println(tm.name, "====> Clock ticking")
+	for tm.ticking {
 		select {
 		case <-tm.ticker.C:
 			now := time.Now()
@@ -107,9 +162,15 @@ func (tm *Clock) dispatchTicks() {
 
 		case <-tm.stopCh:
 			tm.ticker.Stop()
+			tm.ticking = false
 			return
 		}
 	}
+}
+
+func (tm *Clock) Pause() {
+	tm.ticking = false
+	tm.ticker.Stop()
 }
 
 func (tm *Clock) Stop() {

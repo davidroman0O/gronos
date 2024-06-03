@@ -2,23 +2,24 @@ package gronos
 
 import "context"
 
+// The Courier is a proxy to write on the router ringbuffer to be dispatched
 type courierContext struct {
-	shutdown *Signal
+	courier *Courier
 }
 
 var courierKey gronosKey = gronosKey("courier")
 
-func WithCourier(parent context.Context) context.Context {
+func withCourier(parent context.Context) context.Context {
 	ctx := context.WithValue(parent, courierKey, courierContext{
-		shutdown: newSignal(),
+		courier: newCourier(),
 	})
 	return ctx
 }
 
-func Courrier(ctx context.Context) (shutdown *Signal, ok bool) {
+func UseCourier(ctx context.Context) (courier *Courier, ok bool) {
 	signalCtx, ok := ctx.Value(courierKey).(courierContext)
 	if !ok {
 		return nil, false
 	}
-	return signalCtx.shutdown, true
+	return signalCtx.courier, true
 }
