@@ -2,8 +2,16 @@ package gronos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/davidroman0O/gronos/clock"
+	"github.com/davidroman0O/gronos/ringbuffer"
+)
+
+var (
+	ErrMessageMetadataParse = errors.New("error message parsing metadata")
 )
 
 // Let's reduce the amount of code that manage messages and have a router that allocate one ringbuffer while analyzing the messages
@@ -18,10 +26,13 @@ type Router struct {
 	ctxFn    context.CancelFunc
 	shutdown *Signal
 
-	mailbox *RingBuffer[envelope] // we will get rid of all Mailbox thing and use ringBuffers instead
-	clock   *Clock
+	mailbox *ringbuffer.RingBuffer[message] // we will get rid of all Mailbox thing and use ringBuffers instead
+
+	clock *clock.Clock // clock of registry
 
 	registry *RuntimeRegistry
+
+	courier *Courier
 }
 
 type RouterConfig struct {
@@ -71,30 +82,32 @@ func newRouter(opts ...RouterOption) *Router {
 		throughput:  64,
 		ticker:      time.Second / 5,
 	}
+
 	// defaults first
 	r := &Router{
-		mailbox: NewRingBuffer[envelope](
-			WithInitialSize(config.initialSize),
-			WithExpandable(config.expandable),
+		mailbox: ringbuffer.New[message](
+			ringbuffer.WithInitialSize(config.initialSize),
+			ringbuffer.WithExpandable(config.expandable),
 		),
-		clock:    NewClock(config.ticker),
+		clock:    clock.New(clock.WithInterval(config.ticker)),
 		registry: NewRuntimeRegistry(),
 		shutdown: newSignal(),
-		// ticker:        time.NewTimer(config.ticker),
+		courier:  newCourier(),
 	}
+
 	for _, v := range opts {
 		v(config)
 	}
+
 	r.ctx, r.ctxFn = context.WithCancel(context.Background())
 	if config.timeout != nil {
 		r.ctx, r.ctxFn = context.WithTimeout(r.ctx, *config.timeout)
 	}
 
-	r.clock.Add(r.registry, ManagedTimeline)
+	// Router is responsible to start the registry
+	r.clock.Add(r.registry, clock.ManagedTimeline)
+	r.clock.Add(r.registry.mailbox, clock.ManagedTimeline)
 
-	// at the second iteration, i figure that it's better to split the two features
-	// go r.run()     // one manage the runtimes
-	// go r.process() // one process the messages
 	return r
 }
 
@@ -106,6 +119,7 @@ func (r *Router) Add(name string, opts ...OptionRuntime) (uint, context.CancelFu
 // - poison to another runtime
 func (r *Router) Tick() {
 	fmt.Println("router tick")
+	// var err error
 	select {
 	case msgs := <-r.mailbox.DataAvailable():
 		// if len(msgs) == 0 {
@@ -113,35 +127,50 @@ func (r *Router) Tick() {
 		// 	continue
 		// }
 
-		fmt.Printf("processing %v message(s)\n", len(msgs))
-		forward := []envelope{}
+		fmt.Printf("router processing %v message(s)\n", len(msgs))
+		forward := []message{}
 		for i := 0; i < len(msgs); i++ {
-			if msgs[i].Meta["$_gronosPoison"] != nil {
-				fmt.Println("poison msg", msgs[i])
+			if value, ok := msgs[i].Metadata["$_gronosPoison"]; ok {
+				fmt.Println("poison msg", value)
 				continue
 			}
 			forward = append(forward, msgs[i])
 		}
 
-		fmt.Println("forward", forward)
+		fmt.Println("router forward", forward)
 
 		for i := 0; i < len(forward); i++ {
-			if _, ok := forward[i].Meta["$_gronos"]; ok {
-				if counter, ok := forward[i].Meta["$_gronosRetry"].(int); ok {
-					if counter < 5 {
-						counter++
-						forward[i].Meta["$_gronosRetry"] = counter
-						r.mailbox.Push(forward[i])
-					}
-				}
-			} else {
-				r.registry.Deliver(forward[i])
-			}
+			// if _, ok := forward[i].Metadata["$_gronos"]; ok {
+			// 	var retries int
+			// 	if retries, ok = forward[i].Metadata["$_gronos::retries"].(int); !ok {
+			// 		slog.Error("error parsing retries", slog.Any("error", err))
+			// 		// TODO add message identifier so we can deal with it later
+			// 		r.courier.Transmit(errors.Join(ErrMessageMetadataParse, err)) // we don't care, someone else is going to manage it
+			// 		continue
+			// 	}
+			// 	if retries < 5 {
+			// 		retries++
+			// 		forward[i].Metadata["$$_gronos::retries"] = fmt.Sprintf("%d", retries)
+			// 		r.mailbox.Push(forward[i])
+			// 		continue
+			// 	}
+			// }
+
+			r.registry.Deliver(forward[i])
 		}
 
 	default:
 		fmt.Println("no messages")
 	}
+}
+
+func (r *Router) Tell(to uint, msg message) error {
+	if to == 0 {
+		return fmt.Errorf("missing receiver id")
+	}
+	msg.applyOptions(withGronos()) // our metadata
+	msg.to = to                    // tag to
+	return r.mailbox.Push(msg)
 }
 
 // // Complete close of the context of the runtimes, wait for shutdowns, then close the router

@@ -20,14 +20,17 @@ func TestRouterBasic(t *testing.T) {
 	timer := time.NewTicker(time.Millisecond * 500)
 	id, _ := router.Add("simple",
 		RuntimeWithRuntime(
-			func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error {
+			func(ctx context.Context) error {
+
+				mailbox, _ := UseMailbox(ctx)
+				shutdown, _ := UseShutdown(ctx)
 				slog.Info("runtime started")
 				for {
 					select {
 					case <-timer.C:
 						slog.Info("runtime tick")
 						continue
-					case msg := <-mailbox.Read():
+					case msg := <-mailbox:
 						slog.Info("runtime: runtime msg: ", slog.Any("msg", msg))
 						cancel()
 						continue

@@ -1,4 +1,4 @@
-package gronos
+package ringbuffer
 
 import (
 	"errors"
@@ -20,6 +20,7 @@ type RingBuffer[T any] struct {
 	expandable    bool
 	dataAvailable chan []T
 	stopCh        chan struct{}
+	activation    func(T) bool
 }
 
 type ringBufferConfig struct {
@@ -41,7 +42,7 @@ func WithExpandable(expandable bool) ringBufferOption {
 	}
 }
 
-func NewRingBuffer[T any](opts ...ringBufferOption) *RingBuffer[T] {
+func New[T any](opts ...ringBufferOption) *RingBuffer[T] {
 	c := ringBufferConfig{}
 	for i := 0; i < len(opts); i++ {
 		opts[i](&c)
@@ -53,6 +54,23 @@ func NewRingBuffer[T any](opts ...ringBufferOption) *RingBuffer[T] {
 		expandable:    c.expandable,
 		dataAvailable: make(chan []T, 1),
 		stopCh:        make(chan struct{}),
+	}
+	return rb
+}
+
+func NewActivation[T any](activation func(T) bool, opts ...ringBufferOption) *RingBuffer[T] {
+	c := ringBufferConfig{}
+	for i := 0; i < len(opts); i++ {
+		opts[i](&c)
+	}
+	rb := &RingBuffer[T]{
+		buffer:        make([]T, c.initialSize),
+		size:          c.initialSize,
+		capacity:      c.initialSize,
+		expandable:    c.expandable,
+		dataAvailable: make(chan []T, 1),
+		stopCh:        make(chan struct{}),
+		activation:    activation,
 	}
 	return rb
 }
@@ -111,16 +129,52 @@ func (rb *RingBuffer[T]) Tick() {
 	}
 
 	size := int(currentTail - currentHead)
-	data := make([]T, size)
+	tmpData := make([]T, size)
+
+	// Copy data from buffer to tmpData while removing it from the buffer
 	for i := 0; i < size; i++ {
-		data[i] = rb.buffer[(currentHead+int64(i))%int64(rb.size)]
+		tmpData[i] = rb.buffer[currentHead%int64(rb.size)]
+		currentHead++
+	}
+	atomic.StoreInt64(&rb.head, currentHead)
+
+	activatedData := make([]T, 0, size)
+	nonActivatedData := make([]T, 0, size)
+
+	// Loop through tmpData, test each element with the activation function
+	// and push it into the corresponding temporary array
+	for _, element := range tmpData {
+		if rb.activation == nil || rb.activation(element) {
+			activatedData = append(activatedData, element)
+		} else {
+			nonActivatedData = append(nonActivatedData, element)
+		}
+	}
+
+	// Push non-activated data back into the buffer
+	for _, element := range nonActivatedData {
+		err := rb.Push(element)
+		if err != nil {
+			// Handle ring buffer full error
+			break
+		}
+	}
+
+	if len(activatedData) == 0 {
+		return // No activated data to send
 	}
 
 	select {
-	case rb.dataAvailable <- data:
-		atomic.AddInt64(&rb.head, int64(size))
+	case rb.dataAvailable <- activatedData:
 	default:
-		// If consumer is not ready, data is not sent.
+		// If consumer is not ready, push activated data back into the buffer
+		for _, element := range activatedData {
+			err := rb.Push(element)
+			if err != nil {
+				// Handle ring buffer full error
+				break
+			}
+		}
 	}
 }
 

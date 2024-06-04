@@ -8,13 +8,17 @@ import (
 	"time"
 )
 
-func testLifecycle(read chan message, done chan struct{}, shut chan struct{}) func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
-	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+func testLifecycle(read chan message, done chan struct{}, shut chan struct{}) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		mailbox, _ := UseMailbox(ctx)
+		shutdown, _ := UseShutdown(ctx)
 		for {
 			select {
-			case msg := <-mailbox.Read():
-				slog.Info("lifecycle: runtime msg: ", slog.Any("msg", msg))
-				read <- msg
+			case msgs := <-mailbox:
+				slog.Info("lifecycle: runtime msg: ", slog.Any("msg", msgs))
+				for i := 0; i < len(msgs); i++ {
+					read <- msgs[i]
+				}
 				close(read)
 			case <-ctx.Done():
 				slog.Info("lifecycle: runtime ctx.Done()")
@@ -80,14 +84,16 @@ func TestRuntimeLifecycleBasicShutdown(t *testing.T) {
 	}
 }
 
-func testLifecyclePanicked(read chan message, done chan struct{}, shut chan struct{}) func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
-	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+func testLifecyclePanicked(read chan message, done chan struct{}, shut chan struct{}) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
 		timer := time.NewTimer(time.Second * 2)
+		mailbox, _ := UseMailbox(ctx)
+		shutdown, _ := UseShutdown(ctx)
 		for {
 			select {
 			case <-timer.C:
 				panic("lifecycle panic: runtime panic")
-			case msg := <-mailbox.Read():
+			case msg := <-mailbox:
 				slog.Info("lifecycle panic: runtime msg: ", slog.Any("msg", msg))
 				close(read)
 			case <-ctx.Done():
@@ -138,27 +144,39 @@ func TestRuntimeCourierBasic(t *testing.T) {
 	<-runtime.
 		Start().
 		Await() // blocking until started
+
 	slog.Info("runtime started")
 
-	received := make(chan message)
+	received := make(chan []message)
 	go func() {
-		msg := <-runtime.courier.e
-		received <- msg
+		mailbox, ok := UseMailbox(runtime.ctx)
+		if !ok {
+			t.Fatal("mailbox not found")
+		}
+		msgs := <-mailbox
+		fmt.Println("received ", msgs)
+		received <- msgs
 		close(received)
 	}()
 
 	devlieryMsg, _ := NewMessage("test")
 
-	// we should wait for the context
-	runtime.courier.Deliver(*devlieryMsg)
+	courier, _ := UseCourier(runtime.ctx) // we should wait for the context
+	courier.Deliver(*devlieryMsg)
 
-	msg := <-received // should have receive
-	if msg.Payload != "test" {
-		t.Fatal("msg should be test")
-	} else {
-		slog.Info("msg received: ", slog.Any("msg", msg))
+	receivedMessage := false
+	for _, msg := range <-received {
+		if msg.Payload != "test" {
+			t.Fatal("msg should be test")
+		} else {
+			receivedMessage = true
+			slog.Info("msg received: ", slog.Any("msg", msg))
+		}
 	}
 	<-runtime.GracefulShutdown()
+	if !receivedMessage {
+		t.Fatal("should have received a message")
+	}
 }
 
 func TestRuntimeMailboxBasic(t *testing.T) {
@@ -175,11 +193,11 @@ func TestRuntimeMailboxBasic(t *testing.T) {
 
 	slog.Info("runtime started")
 
-	devlieryMsg, _ := NewMessage("test")
-	runtime.mailbox.post(*devlieryMsg)
+	// devlieryMsg, _ := NewMessage("test")
+	// runtime.mailbox.Publish(*devlieryMsg)
 
 	// Since we have no clock in this test, we will push it ourselves
-	runtime.mailbox.buffer.Tick() // process the mailbox
+	// runtime.mailbox.buffer.Tick() // process the mailbox
 
 	msg := <-reading // should have receive
 

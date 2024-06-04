@@ -6,9 +6,10 @@ import (
 	"time"
 )
 
+/// TODO make a runtime builder `builder.With(runtime, ...).Then(runtime, ...).Parallel(runtime, ...).Wait().Sequential(runtime, ...)` while allowing messages to be stored into the router waiting for the next runtime to process it
+
 // RuntimeFunc represents a function that runs a runtime.
-// TODO change it entirely to put all the things into the context like the play/pause, just `func(ctx) error`
-type RuntimeFunc func(ctx context.Context, mailbox *Mailbox, courrier *Courier, shutdown *Signal) error
+type RuntimeFunc func(ctx context.Context) error
 
 // One runtime can receive and send messages while performing it's own task
 type Runtime struct {
@@ -17,9 +18,6 @@ type Runtime struct {
 	ctx     context.Context
 	runtime RuntimeFunc
 	cancel  context.CancelFunc
-	courier *Courier
-	mailbox *Mailbox
-	signal  *Signal
 	done    chan struct{}
 	err     error
 	perr    interface{}
@@ -77,15 +75,15 @@ func RuntimeWithID(id uint) OptionRuntime {
 
 func newRuntime(name string, opts ...OptionRuntime) *Runtime {
 	r := Runtime{
-		name:    name,
-		courier: newCourier(),
-		mailbox: newMailbox(),
-		signal:  newSignal(),
-		done:    make(chan struct{}),
+		name: name,
+		done: make(chan struct{}),
 	}
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, getIDKey, r.id)
-	r.ctx, r.cancel = WithPlayPause(ctx) // all should support it
+	r.ctx, r.cancel = withPlayPause(ctx) // all should support it
+	r.ctx = withMailbox(r.ctx)           // TODO: add paramters
+	r.ctx = withCourier(r.ctx)           // TODO: add parameters
+	r.ctx = withShutdown(r.ctx)          // TODO: add parameters
 	for _, opt := range opts {
 		opt(&r)
 	}
@@ -183,7 +181,7 @@ func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
 				cbs.AfterStart()
 			}()
 		}
-		if err := r.runtime(r.ctx, r.mailbox, r.courier, r.signal); err != nil {
+		if err := r.runtime(r.ctx); err != nil {
 			slog.Error("Gronos runtime error", slog.Any("id", r.id), slog.Any("error", err))
 			r.err = err
 			if cbs.Failed != nil {
@@ -199,15 +197,22 @@ func (r *Runtime) Start(opts ...OptionCallbacks) *Signal {
 
 // Trigger it's cancel context function
 func (r *Runtime) Cancel() {
-	r.courier.Complete() // interrupt all communication
-	r.mailbox.Complete() // interrupt message reception
-	r.cancel()           // interruption trigger, not real shutdown, mught be trigger due to take too much time or else
+	courier, _ := UseCourier(r.ctx)
+	courier.Complete() // interrupt all communication
+	// We're using the full privately controlled mailbox
+	mailbox, _ := useMailbox(r.ctx)
+	mailbox.Close() // interrupt message reception
+	r.cancel()      // interruption trigger, not real shutdown, mught be trigger due to take too much time or else
 }
 
 // Gracefully shutdon the runtime
 func (r *Runtime) GracefulShutdown() <-chan struct{} {
-	r.courier.Complete() // interrupt all communication
-	r.mailbox.Complete() // interrupt message reception
-	r.signal.Complete()  // trigger real end, application stopping
-	return r.done        // waiting for the real end
+	courier, _ := UseCourier(r.ctx)
+	courier.Complete() // interrupt all communication
+	// We're using the full privately controlled mailbox
+	mailbox, _ := useMailbox(r.ctx)
+	mailbox.Close() // interrupt message reception
+	shutdown, _ := UseShutdown(r.ctx)
+	shutdown.Complete() // trigger real end, application stopping
+	return r.done       // waiting for the real end
 }
