@@ -1,4 +1,4 @@
-package gronos
+package clock
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 )
 
 // By default, the ticking occurs every 100ms so give time to subscribers to accumulate messages and process them.
-var defaultClock = NewClock(ClockWithInterval(100 * time.Millisecond))
+var DefaultClock = New(WithInterval(100 * time.Millisecond))
 
 type Ticker interface {
 	Tick()
@@ -54,21 +54,25 @@ type Clock struct {
 	started  bool
 }
 
+func (tm *Clock) Ticking() bool {
+	return tm.ticking
+}
+
 type ClockOption func(*Clock)
 
-func ClockWithName(name string) ClockOption {
+func WithName(name string) ClockOption {
 	return func(c *Clock) {
 		c.name = name
 	}
 }
 
-func ClockWithInterval(interval time.Duration) ClockOption {
+func WithInterval(interval time.Duration) ClockOption {
 	return func(c *Clock) {
 		c.interval = interval
 	}
 }
 
-func NewClock(opts ...ClockOption) *Clock {
+func New(opts ...ClockOption) *Clock {
 	tm := &Clock{
 		// ticker:   time.NewTicker(interval),
 		stopCh: make(chan struct{}),
