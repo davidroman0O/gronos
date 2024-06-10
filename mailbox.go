@@ -1,11 +1,16 @@
 package gronos
 
+import (
+	"github.com/davidroman0O/gronos/clock"
+	"github.com/davidroman0O/gronos/ringbuffer"
+)
+
 // It's a Mailbox
 type Mailbox struct {
 	closed bool
 	// r      chan envelope
 	// r *ringBuffer[envelope]
-	buffer *RingBuffer[message]
+	buffer *ringbuffer.RingBuffer[message]
 	// TODO: add optional circular buffer
 }
 
@@ -23,7 +28,7 @@ func (s *Mailbox) Read() <-chan message {
 	return out
 }
 
-func (r *Mailbox) post(msg message) {
+func (r *Mailbox) Publish(msg message) {
 	r.buffer.Push(msg)
 }
 
@@ -39,7 +44,7 @@ func (s *Mailbox) Complete() {
 type MailboxConfig struct {
 	initialSize int
 	expandable  bool
-	clock       *Clock
+	clock       *clock.Clock
 }
 
 type MailboxOption func(*MailboxConfig)
@@ -71,9 +76,9 @@ func newMailbox(opts ...MailboxOption) *Mailbox {
 		opts[i](c)
 	}
 	m := &Mailbox{
-		buffer: NewRingBuffer[message](
-			WithInitialSize(c.initialSize),
-			WithExpandable(c.expandable),
+		buffer: ringbuffer.New[message](
+			ringbuffer.WithInitialSize(c.initialSize),
+			ringbuffer.WithExpandable(c.expandable),
 		),
 	}
 	return m

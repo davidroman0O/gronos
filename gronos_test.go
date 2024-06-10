@@ -10,27 +10,30 @@ import (
 
 // TODO Gronos talking to other Gronos
 
-func testRuntime(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+func testRuntime(ctx context.Context) error {
 	slog.Info("test runtime ")
 	fmt.Println("test runtime  value", ctx.Value("testRuntime"))
 
+	// courier, _ := UseCourier(ctx)
+	shutdown, _ := UseShutdown(ctx)
+	mailbox, _ := UseMailbox(ctx)
 	// courier.Deliver(Envelope{
 	// 	To:  0,
 	// 	Msg: "hello myself",
 	// })
-	devlieryMsg, _ := NewMessage("hello myself")
-	courier.Deliver(*devlieryMsg)
+	// devlieryMsg, _ := NewMessage("hello myself")
+	// courier.Deliver(*devlieryMsg)
 
 	for {
 		select {
-		case msg := <-mailbox.Read():
+		case msg := <-mailbox:
 			slog.Info("test runtime msg: ", slog.Any("msg", msg))
 		case <-ctx.Done():
 			slog.Info("test runtime ctx.Done()")
 			return nil
 		case <-shutdown.Await():
 			slog.Info("test runtime shutdown")
-			courier.Transmit(fmt.Errorf("shutdown"))
+			// courier.Transmit(fmt.Errorf("shutdown"))
 			return nil
 		}
 	}

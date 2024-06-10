@@ -43,7 +43,7 @@ test-registry-basic:
 test-registry-panic:
 	go test -v -timeout 5s -run ^TestRegistryPanic$$
 
-test-runtime: test-runtime-timeout test-runtime-shutdown test-runtime-panic
+test-runtime: test-runtime-timeout test-runtime-shutdown test-runtime-panic test-runtime-courier-basic test-runtime-mailbox-basic
 
 test-simple:
 	go test -v -timeout 5s -run ^TestSimple$$
@@ -62,7 +62,6 @@ test-router-timeout:
 
 test-router: test-router-started test-router-pingpong
 
-
 test-queue-basic:
 	go test -v -timeout 5s -run ^TestQueue$$
 test-queue-putGet:
@@ -80,3 +79,10 @@ test-queue: test-queue-basic test-queue-putGet test-queue-general test-queue-put
 
 test:
 	go test -v -count=1 ./...
+
+
+test-watchmaker-simple:
+	go test -v -timeout 5s -run ^TestWatchMakerSimple$$
+
+test-watchmaker-lifecycle:
+	go test -v -timeout 5s -run ^TestWatchMakerLifecycle$$

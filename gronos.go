@@ -4,6 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/davidroman0O/gronos/clock"
+	"github.com/davidroman0O/gronos/logging"
 )
 
 /// Gronos organize the lifecycle of runtimes to help you compose your applications.
@@ -46,7 +49,7 @@ const (
 
 // Centralized place that manage the lifecycle of runtimes
 type Gronos struct {
-	logger Logger
+	logger logging.Logger
 
 	router *Router
 
@@ -61,7 +64,7 @@ type Gronos struct {
 	// Clock of the router
 	// The router will have the clock of the registry
 	// It's a hierarchy of clocks, each system control the next one
-	clock *Clock
+	clock *clock.Clock
 }
 
 type Option func(*Gronos) error
@@ -74,7 +77,7 @@ func WithImmediateShutdown() Option {
 	}
 }
 
-func WithLogger(logger Logger) Option {
+func WithLogger(logger logging.Logger) Option {
 	return func(c *Gronos) error {
 		c.logger = logger
 		return nil
@@ -83,14 +86,14 @@ func WithLogger(logger Logger) Option {
 
 func WithSlogLogger() Option {
 	return func(c *Gronos) error {
-		c.logger = NewSlog()
+		c.logger = logging.NewSlog()
 		return nil
 	}
 }
 
 func WithFmtLogger() Option {
 	return func(c *Gronos) error {
-		c.logger = NewFmt()
+		c.logger = logging.NewFmt()
 		return nil
 	}
 }
@@ -158,8 +161,8 @@ func New(opts ...Option) (*Gronos, error) {
 		shutdownMode: Gracefull,
 		shutdown:     newSignal(),
 		finished:     false,
-		logger:       NoopLogger{},
-		clock:        NewClock(time.Millisecond * 100),
+		logger:       logging.NoopLogger{},
+		clock:        clock.New(clock.WithInterval(time.Millisecond * 100)),
 
 		// flipID: NewFlipID(),
 
@@ -175,7 +178,7 @@ func New(opts ...Option) (*Gronos, error) {
 	}
 
 	// the Gronos clock will trigger the router ticker
-	ctx.clock.Add(ctx.router, ManagedTimeline)
+	ctx.clock.Add(ctx.router, clock.ManagedTimeline)
 
 	return ctx, nil
 }
