@@ -2,10 +2,10 @@ package events
 
 import "testing"
 
-type testKeyRegistry int
+type testUserDefinedEventLoopKey int
 
 const (
-	testKey1 testKeyRegistry = iota
+	testKey1 testUserDefinedEventLoopKey = iota
 	testKey2
 	testKey3
 )
@@ -16,7 +16,8 @@ type testMessage3 struct{}
 
 func TestBasic(t *testing.T) {
 
-	registry := New(
+	// The event loop must be able to define its own key type so the user can define all keys to get back it's own ports
+	eventLoop, _ := New[testUserDefinedEventLoopKey](
 		NewPort(
 			testKey1,
 			Register[testMessage1](),
@@ -29,6 +30,5 @@ func TestBasic(t *testing.T) {
 		),
 	)
 
-	_ = registry
-
+	eventLoop.Tick()
 }

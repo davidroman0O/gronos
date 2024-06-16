@@ -8,7 +8,7 @@ import (
 
 // Verify that received messages are of the correct type
 type Port[Key comparable] struct {
-	gateway Key
+	portKey Key
 	inout   map[MessageType]reflect.Type
 	clock   *clock.Clock
 }
@@ -25,7 +25,7 @@ type GatewayOption[Key comparable] func(*Port[Key])
 
 func NewPort[Key comparable](gateway Key, fn ...registration) Port[Key] {
 	g := Port[Key]{
-		gateway: gateway,
+		portKey: gateway,
 		inout:   make(map[MessageType]reflect.Type),
 	}
 

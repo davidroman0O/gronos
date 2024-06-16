@@ -1,6 +1,9 @@
 package events
 
 import (
+	"sync"
+	"time"
+
 	"github.com/davidroman0O/gronos/clock"
 	"github.com/davidroman0O/gronos/ringbuffer"
 )
@@ -12,25 +15,37 @@ import (
 type MessageType string
 
 type Loop[Key comparable] struct {
-	ports  map[Key]Port[Key] // We only have a finite amount of gateway that will have a finite amount of message types.
+	syncPorts sync.Map
+	// ports     map[Key]Port[Key] // We only have a finite amount of gateway that will have a finite amount of message types.
 	buffer ringbuffer.RingBuffer[interface{}]
 	clock  *clock.Clock
 }
 
-func New[Key comparable](gateways ...Port[Key]) *Loop[Key] {
+func New[Key comparable](gateways ...Port[Key]) (*Loop[Key], error) {
 	r := &Loop[Key]{
-		ports: make(map[Key]Port[Key]),
+		syncPorts: sync.Map{},
+		clock: clock.New(
+			clock.WithInterval(1 * time.Millisecond),
+		),
 	}
 	for _, g := range gateways {
-		r.ports[g.gateway] = g
+		r.syncPorts.Store(g.portKey, g)
 	}
-	return r
+	r.clock.Add(r, clock.ManagedTimeline)
+	go r.clock.Start() // TODO: you have to close it
+	return r, nil
 }
 
-func (r *Loop[Key]) Tick() {
-
+func (l *Loop[Key]) Tick() {
+	l.buffer.Tick()
+	// msgs := <-l.buffer.DataAvailable()
+	// for _, v := range msgs {
+	// 	if value, ok := l.syncPorts.Load(v); ok {
+	// 		value.(Port[Key]).Handle(v)
+	// 	}
+	// }
 }
 
-func (r *Loop[Key]) Add(g Port[Key]) {
-	r.ports[g.gateway] = g
+func (l *Loop[Key]) Store(g Port[Key]) {
+	l.syncPorts.Store(g.portKey, g)
 }
