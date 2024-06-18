@@ -10,3 +10,8 @@ I think that each gateway need to accumulate messages like my ringbuffer and a c
 
 
 Event loop that pull messages from ports to router
+
+---
+
+Just manage lock-free or concurrency safe ports in/out that leverage ringbuffer, the context and gronos will do the rest. Gronos will instanciate the event loop.
+
