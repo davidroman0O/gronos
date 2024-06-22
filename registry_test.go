@@ -6,27 +6,31 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/davidroman0O/gronos/clock"
 )
 
 func TestRuntimeBasic(t *testing.T) {
 	registry := NewRuntimeRegistry()
 
-	clock := NewClock(time.Millisecond * 100)
+	ck := clock.New(clock.WithInterval(time.Millisecond * 100))
 
 	// continous execution
-	clock.Add(registry, ManagedTimeline)
-	defer clock.Stop()
+	ck.Add(registry, clock.ManagedTimeline)
+	defer ck.Stop()
 
 	// nothing will run without that
-	clock.Start()
+	ck.Start()
 
 	aID, _ := registry.Add(
 		"a",
 		RuntimeWithRuntime(
-			func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+			func(ctx context.Context) error {
+				mailbox, _ := UseMailbox(ctx)
+				shutdown, _ := UseShutdown(ctx)
 				for {
 					select {
-					case msg := <-mailbox.Read():
+					case msg := <-mailbox:
 						slog.Info("a runtime msg: ", slog.Any("msg", msg))
 					case <-ctx.Done():
 						slog.Info("a runtime ctx.Done()")
@@ -43,10 +47,12 @@ func TestRuntimeBasic(t *testing.T) {
 	bID, _ := registry.Add(
 		"b",
 		RuntimeWithRuntime(
-			func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+			func(ctx context.Context) error {
+				mailbox, _ := UseMailbox(ctx)
+				shutdown, _ := UseShutdown(ctx)
 				for {
 					select {
-					case msg := <-mailbox.Read():
+					case msg := <-mailbox:
 						slog.Info("b runtime msg: ", slog.Any("msg", msg))
 					case <-ctx.Done():
 						slog.Info("b runtime ctx.Done()")
@@ -91,20 +97,22 @@ func TestRegistryPanic(t *testing.T) {
 
 	registry := NewRuntimeRegistry()
 
-	clock := NewClock(time.Millisecond * 100)
+	ck := clock.New(clock.WithInterval(time.Millisecond * 100))
 
 	// continous execution
-	clock.Add(registry, ManagedTimeline)
-	defer clock.Stop()
+	ck.Add(registry, clock.ManagedTimeline)
+	defer ck.Stop()
 
 	aID, _ := registry.Add(
 		"a",
 		RuntimeWithTimeout(time.Second*1),
 		RuntimeWithRuntime(
-			func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
+			func(ctx context.Context) error {
+				mailbox, _ := UseMailbox(ctx)
+				shutdown, _ := UseShutdown(ctx)
 				for {
 					select {
-					case msg := <-mailbox.Read():
+					case msg := <-mailbox:
 						slog.Info("a runtime msg: ", slog.Any("msg", msg))
 					case <-ctx.Done():
 						panic("aaaaaah")
@@ -120,7 +128,7 @@ func TestRegistryPanic(t *testing.T) {
 	)
 
 	// nothing will run without that
-	clock.Start()
+	ck.Start()
 	<-registry.WhenID(aID, stateStarted)
 	fmt.Println("started")
 	<-registry.WhenID(aID, statePanicked)

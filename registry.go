@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/davidroman0O/gronos/ringbuffer"
 )
 
 type RegistryState uint
@@ -23,12 +25,12 @@ type RuntimeRegistry struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	flipID        *FlipID
+	flipID        *flipID
 	runtimesNames *safeMapPtr[string, uint]
 	runtimes      *safeMapPtr[uint, Runtime]
 	states        *safeMap[uint, RegistryState]
 
-	mailbox *RingBuffer[envelope]
+	mailbox *ringbuffer.RingBuffer[message]
 
 	shutdown *Signal
 	wg       sync.WaitGroup
@@ -36,12 +38,15 @@ type RuntimeRegistry struct {
 
 func NewRuntimeRegistry() *RuntimeRegistry {
 	registry := &RuntimeRegistry{
-		flipID:        NewFlipID(), // helper to assign ID without collision
+		flipID:        newFlipID(), // helper to assign ID without collision
 		runtimesNames: newSafeMapPtr[string, uint](),
 		runtimes:      newSafeMapPtr[uint, Runtime](),
 		states:        newSafeMap[uint, RegistryState](),
-		mailbox:       NewRingBuffer[envelope](), // TODO make parameters
-		shutdown:      newSignal(),
+		mailbox: ringbuffer.New[message](
+			ringbuffer.WithInitialSize(300),
+			ringbuffer.WithExpandable(true),
+		), // TODO make parameters
+		shutdown: newSignal(),
 	}
 
 	registry.ctx, registry.cancel = context.WithCancel(context.Background())
@@ -66,6 +71,7 @@ func (r *RuntimeRegistry) WhenID(id uint, state RegistryState) <-chan struct{} {
 }
 
 func (r *RuntimeRegistry) Tick() {
+
 	select {
 
 	case <-r.ctx.Done():
@@ -77,7 +83,8 @@ func (r *RuntimeRegistry) Tick() {
 			slog.Info("cancelling runtime", slog.Any("id", k), slog.Any("name", v.name))
 			v.cancel()
 			slog.Info("waiting runtime", slog.Any("id", k), slog.Any("name", v.name))
-			<-v.signal.Await()
+			shutdown, _ := UseShutdown(v.ctx)
+			<-shutdown.Await()
 			return nil
 		}); err != nil {
 			fmt.Println("error foreach ", err)
@@ -91,20 +98,21 @@ func (r *RuntimeRegistry) Tick() {
 		// 	fmt.Println("no messages")
 		// 	continue
 		// }
-		fmt.Printf("processing %v message(s)\n", len(msgs))
-		forward := []envelope{}
+		fmt.Printf("registry processing %v message(s)\n", len(msgs))
+		forward := []message{}
 		for i := 0; i < len(msgs); i++ {
-			if msgs[i].Meta["$_gronosPoison"] != nil {
-				fmt.Println("poison msg", msgs[i])
+			if value, ok := msgs[i].Metadata["$_gronosPoison"]; ok {
+				fmt.Println("poison msg", value)
 				continue
 			}
 			forward = append(forward, msgs[i])
 		}
-		fmt.Println("forward", forward)
+		fmt.Println("registry forward", forward)
 		for i := 0; i < len(forward); i++ {
 			if runtime, ok := r.runtimes.Get(forward[i].to); ok {
 				fmt.Println("sending msg to ", runtime.name)
-				runtime.courier.Deliver(forward[i])
+				courier, _ := UseCourier(runtime.ctx)
+				courier.DeliverMany(forward)
 			} else {
 				// TODO monitor that error
 				// TODO retry to send the message
@@ -113,7 +121,7 @@ func (r *RuntimeRegistry) Tick() {
 		}
 
 	default:
-		fmt.Println("runtime nothing")
+		slog.Info("Registry nothing tick")
 	}
 
 	// TODO should no be there, should be event driven OR maybe it's ok
@@ -130,6 +138,8 @@ func (r *RuntimeRegistry) Tick() {
 		case stateAdded:
 			slog.Info("starting runtime", slog.Any("id", k), slog.Any("name", v.name), slog.Any("state", state))
 			<-r.Start(k, v) // will change itself to failed or panicked
+		default:
+			// v.mailbox.buffer.Tick() // TODO we need a clock management for all
 		}
 		return err
 	}); err != nil {
@@ -155,17 +165,25 @@ func (e *RuntimeRegistry) Add(name string, opts ...OptionRuntime) (uint, context
 	return runtime.id, runtime.cancel
 }
 
-func (r *RuntimeRegistry) Deliver(msg envelope) {
-	if runtime, ok := r.runtimes.Get(msg.to); ok {
-		slog.Info("Delivery", slog.String("system", "runtime registry"), slog.String("to", msg.name))
-		runtime.courier.Deliver(msg)
+func (r *RuntimeRegistry) Deliver(msg message) {
+	// if runtime, ok := r.runtimes.Get(msg.to); ok {
+	// 	runtime.courier.Deliver(msg)
+	// }
+	if _, ok := r.runtimes.Get(msg.to); ok {
+		slog.Info("Registry Delivery", slog.String("system", "runtime registry"), slog.Any("to", msg.to))
+		r.mailbox.Push(msg)
 	}
 }
 
-func (r *RuntimeRegistry) DeliverMany(to uint, msgs []envelope) {
-	if runtime, ok := r.runtimes.Get(to); ok {
-		slog.Info("Delivery", slog.String("system", "runtime registry"), slog.Any("to", to))
-		runtime.courier.DeliverMany(msgs)
+func (r *RuntimeRegistry) DeliverMany(to uint, msgs []message) {
+	// if runtime, ok := r.runtimes.Get(to); ok {
+	// 	runtime.courier.DeliverMany(msgs)
+	// }
+	if _, ok := r.runtimes.Get(to); ok {
+		for _, v := range msgs {
+			slog.Info("Registry Delivery", slog.String("system", "runtime registry"), slog.Any("to", to))
+			r.mailbox.Push(v)
+		}
 	}
 }
 

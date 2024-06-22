@@ -1,4 +1,4 @@
-package gronos
+package logging
 
 import (
 	"fmt"

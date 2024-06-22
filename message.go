@@ -1,5 +1,8 @@
 package gronos
 
+/// Refactor the messaging system, we should be able to have a registry of messages
+/// that will be wrapped as evelopes if going outside the application
+
 type Payload interface{}
 type Metadata map[string]interface{}
 
@@ -39,6 +42,7 @@ func WithID(id uint) messageOption {
 	}
 }
 
+// TODO: the reflect.Type should be detected somehow and added to the metadata
 func NewMessage(payload interface{}, opts ...messageOption) (*message, error) {
 	m := message{
 		to:       0,

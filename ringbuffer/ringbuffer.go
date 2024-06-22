@@ -2,6 +2,7 @@ package ringbuffer
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 )
 
@@ -10,8 +11,12 @@ import (
 /// We should have messages passed in batches to the ring buffer and then dispatched at a regular interval. This would allow for a more predictable system.
 /// The developer can then chose what would be the timing and chose if it want to share it with other ring buffers.
 
+const hasData int64 = 1
+const hasNoData int64 = 0
+
 // A ring buffer will do nothing until it is notified by a clock.
 type RingBuffer[T any] struct {
+	name          string
 	buffer        []T
 	size          int
 	capacity      int
@@ -21,14 +26,22 @@ type RingBuffer[T any] struct {
 	dataAvailable chan []T
 	stopCh        chan struct{}
 	activation    func(T) bool
+	avaialble     int64
 }
 
 type ringBufferConfig struct {
+	name        string
 	initialSize int
 	expandable  bool
 }
 
 type ringBufferOption func(*ringBufferConfig)
+
+func WithName(name string) ringBufferOption {
+	return func(c *ringBufferConfig) {
+		c.name = name
+	}
+}
 
 func WithInitialSize(size int) ringBufferOption {
 	return func(c *ringBufferConfig) {
@@ -48,6 +61,7 @@ func New[T any](opts ...ringBufferOption) *RingBuffer[T] {
 		opts[i](&c)
 	}
 	rb := &RingBuffer[T]{
+		name:          c.name,
 		buffer:        make([]T, c.initialSize),
 		size:          c.initialSize,
 		capacity:      c.initialSize,
@@ -64,6 +78,7 @@ func NewActivation[T any](activation func(T) bool, opts ...ringBufferOption) *Ri
 		opts[i](&c)
 	}
 	rb := &RingBuffer[T]{
+		name:          c.name,
 		buffer:        make([]T, c.initialSize),
 		size:          c.initialSize,
 		capacity:      c.initialSize,
@@ -75,7 +90,16 @@ func NewActivation[T any](activation func(T) bool, opts ...ringBufferOption) *Ri
 	return rb
 }
 
+func (rb *RingBuffer[T]) String() string {
+	return rb.name
+}
+
+func (rb *RingBuffer[T]) HasData() bool {
+	return (atomic.LoadInt64(&rb.head) != atomic.LoadInt64(&rb.tail)) || atomic.LoadInt64(&rb.avaialble) == hasData
+}
+
 func (rb *RingBuffer[T]) DataAvailable() <-chan []T {
+	defer atomic.StoreInt64(&rb.avaialble, hasNoData)
 	return rb.dataAvailable
 }
 
@@ -102,6 +126,7 @@ func (rb *RingBuffer[T]) Push(value T) error {
 
 	rb.buffer[currentTail%int64(rb.size)] = value
 	atomic.StoreInt64(&rb.tail, nextTail)
+	// fmt.Println("tail", rb.name, atomic.LoadInt64(&rb.tail), rb.HasData())
 
 	return nil
 }
@@ -124,6 +149,7 @@ func (rb *RingBuffer[T]) resize() {
 func (rb *RingBuffer[T]) Tick() {
 	currentHead := atomic.LoadInt64(&rb.head)
 	currentTail := atomic.LoadInt64(&rb.tail)
+	// fmt.Println("tick", rb.name, currentHead, currentTail, currentHead == currentTail)
 	if currentHead == currentTail {
 		return // No data to send
 	}
@@ -138,6 +164,8 @@ func (rb *RingBuffer[T]) Tick() {
 	}
 	atomic.StoreInt64(&rb.head, currentHead)
 
+	// fmt.Println("head", rb.name, atomic.LoadInt64(&rb.head), len(tmpData))
+
 	activatedData := make([]T, 0, size)
 	nonActivatedData := make([]T, 0, size)
 
@@ -151,6 +179,8 @@ func (rb *RingBuffer[T]) Tick() {
 		}
 	}
 
+	// fmt.Println("activated", rb.name, len(activatedData))
+
 	// Push non-activated data back into the buffer
 	for _, element := range nonActivatedData {
 		err := rb.Push(element)
@@ -161,12 +191,17 @@ func (rb *RingBuffer[T]) Tick() {
 	}
 
 	if len(activatedData) == 0 {
+		fmt.Println("no activated data", rb.name)
 		return // No activated data to send
 	}
 
+	// fmt.Println("data available", rb.name, len(activatedData))
+	defer atomic.StoreInt64(&rb.avaialble, hasData)
+
 	select {
-	case rb.dataAvailable <- activatedData:
+	case rb.dataAvailable <- activatedData: // TODO: might be blocking
 	default:
+		fmt.Println("data available channel is full", rb.name, len(activatedData))
 		// If consumer is not ready, push activated data back into the buffer
 		for _, element := range activatedData {
 			err := rb.Push(element)
