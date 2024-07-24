@@ -1,4 +1,3 @@
-// Package gronos provides tools for managing runtime applications and periodic tasks.
 package gronos
 
 import (
@@ -186,7 +185,8 @@ func NewAppManager[Key RuntimeKey](shutdownTimer time.Duration) *AppManager[Key]
 // It initializes a context and shutdown channel for the application and starts it in a new goroutine.
 // If an application with the same name already exists, it returns an error.
 func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) error {
-	appCtx, cancelFunc := context.WithCancel(am.ctx)
+	appCtx := context.WithValue(am.ctx, appManagerKey, am)
+	appCtx, cancelFunc := context.WithCancel(appCtx)
 	shutdownCh := make(chan struct{})
 
 	_, loaded := am.apps.LoadOrStore(name, struct {
@@ -324,6 +324,15 @@ func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, 
 	}()
 
 	return shutdownChan, am.errChan
+}
+
+type contextKey string
+
+const appManagerKey contextKey = "appManager"
+
+func FromContext[Key RuntimeKey](ctx context.Context) (*AppManager[Key], bool) {
+	am, ok := ctx.Value(appManagerKey).(*AppManager[Key])
+	return am, ok
 }
 
 // NonBlockingMiddleware creates a middleware that runs the application in NonBlocking mode.

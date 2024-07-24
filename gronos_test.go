@@ -119,9 +119,7 @@ func TestMiddlewaresWithAppManager(t *testing.T) {
 
 			wrappedApp := tc.middleware(50*time.Millisecond, app)
 
-			err := am.AddApplication(tc.name, func(appCtx context.Context, appShutdown chan struct{}) error {
-				return wrappedApp(appCtx, appShutdown)
-			})
+			err := am.AddApplication(tc.name, wrappedApp)
 			require.NoError(t, err)
 
 			shutdownChan, errChan := am.Run(nil)
@@ -363,6 +361,7 @@ func TestMiddlewareTickFrequency(t *testing.T) {
 	finalCount := executionCount.Load()
 	assert.GreaterOrEqual(t, finalCount, int64(8), "Expected at least 8 ticks within 500ms")
 }
+
 func TestAppManagerApplicationShutdownHandling(t *testing.T) {
 	am := NewAppManager[string](5 * time.Second)
 	appName := "testApp"
@@ -390,5 +389,146 @@ func TestAppManagerApplicationShutdownHandling(t *testing.T) {
 		// Success
 	case <-time.After(2 * time.Second): // Increased timeout
 		t.Fatal("Timeout waiting for shutdown to be handled")
+	}
+}
+
+func TestApplicationAddingOtherApplications(t *testing.T) {
+	am := NewAppManager[string](5 * time.Second)
+	appName := "parentApp"
+	childAppName := "childApp"
+
+	childAppStarted := make(chan struct{})
+	parentAppShutdown := make(chan struct{})
+
+	childApp := func(ctx context.Context, shutdown chan struct{}) error {
+		close(childAppStarted)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-shutdown:
+			return nil
+		}
+	}
+
+	parentApp := func(ctx context.Context, shutdown chan struct{}) error {
+		defer close(parentAppShutdown)
+		am, ok := FromContext[string](ctx)
+		require.True(t, ok)
+
+		err := am.AddApplication(childAppName, childApp)
+		if err != nil {
+			return err
+		}
+
+		// Wait for the child app to signal it has started
+		select {
+		case <-childAppStarted:
+		case <-time.After(1 * time.Second):
+			return fmt.Errorf("child app did not start in time")
+		}
+
+		<-ctx.Done()
+		return nil
+	}
+
+	err := am.AddApplication(appName, parentApp)
+	require.NoError(t, err)
+
+	shutdownChan, errChan := am.Run(nil)
+	time.Sleep(100 * time.Millisecond)
+
+	close(shutdownChan)
+
+	select {
+	case err, ok := <-errChan:
+		if ok {
+			t.Fatalf("Error received: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+	}
+
+	select {
+	case <-parentAppShutdown:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for parent app shutdown to be handled")
+	}
+
+	// Ensure the child application is also shutdown
+	err = am.ShutdownApplication(childAppName)
+	require.NoError(t, err)
+}
+
+func TestApplicationShuttingDownOtherApplications(t *testing.T) {
+	am := NewAppManager[string](5 * time.Second)
+	appName := "parentApp"
+	childAppName := "childApp"
+
+	childAppStarted := make(chan struct{})
+	shutdownHandled := make(chan struct{})
+	parentAppShutdown := make(chan struct{})
+
+	childApp := func(ctx context.Context, shutdown chan struct{}) error {
+		close(childAppStarted)
+		select {
+		case <-shutdown:
+			close(shutdownHandled)
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
+	}
+
+	parentApp := func(ctx context.Context, shutdown chan struct{}) error {
+		defer close(parentAppShutdown)
+		am, ok := FromContext[string](ctx)
+		require.True(t, ok)
+
+		err := am.AddApplication(childAppName, childApp)
+		if err != nil {
+			return err
+		}
+
+		// Wait for the child app to signal it has started
+		select {
+		case <-childAppStarted:
+		case <-time.After(1 * time.Second):
+			return fmt.Errorf("child app did not start in time")
+		}
+
+		err = am.ShutdownApplication(childAppName)
+		if err != nil {
+			return err
+		}
+
+		<-ctx.Done()
+		return nil
+	}
+
+	err := am.AddApplication(appName, parentApp)
+	require.NoError(t, err)
+
+	shutdownChan, errChan := am.Run(nil)
+	time.Sleep(100 * time.Millisecond)
+
+	close(shutdownChan)
+	select {
+	case err, ok := <-errChan:
+		if ok {
+			t.Fatalf("Error received: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+	}
+
+	select {
+	case <-shutdownHandled:
+		// Success
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for child app shutdown to be handled")
+	}
+
+	select {
+	case <-parentAppShutdown:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for parent app shutdown to be handled")
 	}
 }
