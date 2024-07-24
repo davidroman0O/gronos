@@ -2,433 +2,366 @@ package gronos
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
-
-	"github.com/davidroman0O/gronos/clock"
-	"github.com/davidroman0O/gronos/logging"
 )
 
-/// Gronos organize the lifecycle of runtimes to help you compose your applications.
-/// See runtimes and channels as gears, we're building a digital machine
+type RuntimeKey comparable
 
-/// Features
-/// - basic runtimes functions
-/// - play/pause context
-/// - communication between runtimes
-/// - router that dispatch and analyze messages
+type RuntimeApplication func(ctx context.Context, shutdown chan struct{}) (<-chan error, error)
 
-// TODO Replace API with ID and use string for names
-// allowing both ID and name
-// TODO ONE mainly Circular buffer for all message analysis, when publishing a message then analyze them in batches and then eventually push them back to other runtimes
-// TODO we should send messages like `Send("namespace.name", msg)`
-// TODO gronos should check if the namespace is its own, otherwise try to send it to a middleman
-// TODO gronos to gronos with namespaces
-// TODO increase i/o with circular buffers and configurable channel sizes (how to manage full buffer?)
-// TODO make a good documentation
+type Ticker interface {
+	Tick()
+}
 
-// TODO: use watermill's message router to send messages to other gronos instances
-// Eventually, we could configure `gronos` with external pubsub if necessary
-
-/// My general idea is to be able to split the application into smaller parts that can be managed independently.
-/// I want to compose my application in a DDD way (with my opinions on it) while not conflicting domains.
-
-/// I think that a runtime could be splitted into multiple runtime and even on different machines.
-/// Eventually, you might want to have your application running different workloads for different types of processing on different hardware.
-/// Exchanging messages within a runtime or between applications of the same fleet should be easy to do and configure.
-/// Ideally, it would be up to the person that want to deploy the app to decide how to split the workloads and how to communicate between them with which third-party (sql, redis or rabbitmq).
-
-type gronosKey string
-
-type ShutdownMode uint
+type ExecutionMode int
 
 const (
-	Gracefull ShutdownMode = iota
-	Immediate
+	NonBlocking ExecutionMode = iota
+	ManagedTimeline
+	BestEffort
 )
 
-// Centralized place that manage the lifecycle of runtimes
-type Gronos struct {
-	logger logging.Logger
-
-	router *Router
-
-	shutdown     *Signal
-	shutdownMode ShutdownMode
-	finished     bool
-
-	courier *Courier // someone might want to send messages to all runtimes
-
-	toggleLog bool
-
-	// Clock of the router
-	// The router will have the clock of the registry
-	// It's a hierarchy of clocks, each system control the next one
-	clock *clock.Clock
+type TickerSubscriber struct {
+	Ticker          Ticker
+	Mode            ExecutionMode
+	lastExecTime    atomic.Value // Use atomic.Value for thread-safe access
+	Priority        int
+	DynamicInterval func(elapsedTime time.Duration) time.Duration
 }
 
-type Option func(*Gronos) error
-
-// Interuption won't wait for runtimes to gracefully finish
-func WithImmediateShutdown() Option {
-	return func(c *Gronos) error {
-		c.shutdownMode = Immediate
-		return nil
-	}
+type Clock struct {
+	name     string
+	interval time.Duration
+	ticker   *time.Ticker
+	stopCh   chan struct{}
+	subs     sync.Map
+	ticking  bool
+	started  bool
+	mu       sync.Mutex
 }
 
-func WithLogger(logger logging.Logger) Option {
-	return func(c *Gronos) error {
-		c.logger = logger
-		return nil
-	}
-}
-
-func WithSlogLogger() Option {
-	return func(c *Gronos) error {
-		c.logger = logging.NewSlog()
-		return nil
-	}
-}
-
-func WithFmtLogger() Option {
-	return func(c *Gronos) error {
-		c.logger = logging.NewFmt()
-		return nil
-	}
-}
-
-// Interuption will wait for runtimes to gracefully finish
-func WithGracefullShutdown() Option {
-	return func(c *Gronos) error {
-		c.shutdownMode = Gracefull
-		return nil
-	}
-}
-
-func (c *Gronos) Add(name string, opts ...OptionRuntime) (uint, context.CancelFunc) {
-	return c.router.Add(name, opts...)
-}
-
-// // `Direct` require the ID of the runtime, faster but less readable
-// func (c *Gronos) Direct(msg Message, to uint) error {
-// 	return c.router.Direct(msg, to)
-// }
-
-// // `Delivery` require the name of the runtime, more readable but slower
-// func (c *Gronos) Named(msg Message, name string) error {
-// 	return c.router.named(msg, name)
-// }
-
-// func (c *Gronos) Broadcast(msg Message) error {
-// 	return c.router.broadcast(msg)
-// }
-
-// func (c *Gronos) Transmit(err error, to uint) error {
-// 	return c.router.transmit(err, to)
-// }
-
-// // Cancel will stop the runtime immediately, your runtime will eventually trigger it's own shutdown
-// func (c *Gronos) Cancel(id uint) error {
-// 	return c.router.cancel(id)
-// }
-
-// func (c *Gronos) CancelAll() error {
-// 	return c.router.cancelAll()
-// }
-
-// func (c *Gronos) DirectPause(id uint) error {
-// 	return c.router.directPause(id)
-// }
-
-// func (c *Gronos) DirectResume(id uint) error {
-// 	return c.router.directResume(id)
-// }
-
-// func (c *Gronos) DirectComplete(id uint) error {
-// 	return c.router.directComplete(id)
-// }
-
-// func (c *Gronos) DirectPhasingOut(id uint) error {
-// 	return c.router.directPhasingOut(id)
-// }
-
-func New(opts ...Option) (*Gronos, error) {
-	ctx := &Gronos{
-		// runtimes:      newSafeMapPtr[uint, RuntimeStation](), // faster usage - dev could use only that to be faster
-		// runtimesNames: newSafeMapPtr[string, uint](),         // convienient usage - dev could use that to be more readable
-
-		shutdownMode: Gracefull,
-		shutdown:     newSignal(),
-		finished:     false,
-		logger:       logging.NoopLogger{},
-		clock:        clock.New(clock.WithInterval(time.Millisecond * 100)),
-
-		// flipID: NewFlipID(),
-
-		router: newRouter(), // todo pass options
-
-		// courier: newCourier(),
-		// mailbox: newMailbox(),
+func NewClock(opts ...ClockOption) *Clock {
+	c := &Clock{
+		interval: 100 * time.Millisecond,
+		stopCh:   make(chan struct{}),
+		ticking:  false,
+		started:  false,
 	}
 	for _, opt := range opts {
-		if err := opt(ctx); err != nil {
-			return nil, err
-		}
+		opt(c)
 	}
-
-	// the Gronos clock will trigger the router ticker
-	ctx.clock.Add(ctx.router, clock.ManagedTimeline)
-
-	return ctx, nil
+	c.ticker = time.NewTicker(c.interval)
+	return c
 }
 
-func (g *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
+type ClockOption func(*Clock)
 
-	g.clock.Start()        // start the clock of the router
-	g.router.clock.Start() // start the clock of the runtime form the router
+func WithName(name string) ClockOption {
+	return func(c *Clock) {
+		c.name = name
+	}
+}
+
+func WithInterval(interval time.Duration) ClockOption {
+	return func(c *Clock) {
+		c.interval = interval
+	}
+}
+
+func (c *Clock) Add(ticker Ticker, mode ExecutionMode) {
+	sub := &TickerSubscriber{
+		Ticker:   ticker,
+		Mode:     mode,
+		Priority: 0,
+		DynamicInterval: func(elapsedTime time.Duration) time.Duration {
+			return c.interval
+		},
+	}
+	sub.lastExecTime.Store(time.Now())
+	c.subs.Store(ticker, sub)
+}
+
+func (c *Clock) Start() {
+	c.mu.Lock()
+	if c.started {
+		c.mu.Unlock()
+		return
+	}
+	c.started = true
+	c.ticking = true
+	c.mu.Unlock()
+	go c.dispatchTicks()
+}
+
+func (c *Clock) Stop() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.ticking {
+		return
+	}
+	close(c.stopCh)
+	c.ticking = false
+	c.started = false
+}
+
+func (c *Clock) dispatchTicks() {
+	for {
+		select {
+		case <-c.ticker.C:
+			now := time.Now()
+			c.subs.Range(func(key, value interface{}) bool {
+				sub := value.(*TickerSubscriber)
+				lastExecTime := sub.lastExecTime.Load().(time.Time)
+				if now.Sub(lastExecTime) >= sub.DynamicInterval(now.Sub(lastExecTime)) {
+					switch sub.Mode {
+					case NonBlocking:
+						go c.executeTick(key, sub, now)
+					case ManagedTimeline:
+						c.executeTick(key, sub, now)
+					case BestEffort:
+						go c.executeTick(key, sub, now)
+					}
+				}
+				return true
+			})
+		case <-c.stopCh:
+			c.ticker.Stop()
+			return
+		}
+	}
+}
+
+func (c *Clock) executeTick(key interface{}, sub *TickerSubscriber, now time.Time) {
+	sub.Ticker.Tick()
+	sub.lastExecTime.Store(now)
+	c.subs.Store(key, sub)
+}
+
+type AppManager[Key RuntimeKey] struct {
+	apps map[Key]struct {
+		app        RuntimeApplication
+		cancelFunc context.CancelFunc
+		shutdownCh chan struct{}
+	}
+	ctx           context.Context
+	cancel        context.CancelFunc
+	errChan       chan error
+	mu            sync.RWMutex
+	shutdownTimer time.Duration
+}
+
+func NewAppManager[Key RuntimeKey](shutdownTimer time.Duration) *AppManager[Key] {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &AppManager[Key]{
+		apps: make(map[Key]struct {
+			app        RuntimeApplication
+			cancelFunc context.CancelFunc
+			shutdownCh chan struct{}
+		}),
+		ctx:           ctx,
+		cancel:        cancel,
+		errChan:       make(chan error),
+		shutdownTimer: shutdownTimer,
+	}
+}
+
+func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) error {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	if _, exists := am.apps[name]; exists {
+		return fmt.Errorf("application with name %v already exists", name)
+	}
+
+	appCtx, cancelFunc := context.WithCancel(am.ctx)
+	shutdownCh := make(chan struct{})
+
+	am.apps[name] = struct {
+		app        RuntimeApplication
+		cancelFunc context.CancelFunc
+		shutdownCh chan struct{}
+	}{app, cancelFunc, shutdownCh}
 
 	go func() {
-		select {
-		case <-ctx.Done():
-			slog.Info("shutting down gronos")
-			<-g.router.registry.shutdown.Await()
-			<-g.router.shutdown.Await()
-			// todo stop everything else
-			g.clock.Stop()
-			g.router.clock.Stop()
-			g.shutdown.Complete()
+		appErrChan, err := app(appCtx, shutdownCh)
+		if err != nil {
+			am.errChan <- fmt.Errorf("error starting application %v: %w", name, err)
+			return
+		}
+		for err := range appErrChan {
+			am.errChan <- fmt.Errorf("error from application %v: %w", name, err)
 		}
 	}()
 
-	return g.shutdown, nil
+	return nil
 }
 
-func (g *Gronos) GracefullWait() <-chan struct{} {
-	return g.shutdown.Await()
+func (am *AppManager[Key]) ShutdownApplication(name Key) error {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	app, exists := am.apps[name]
+	if !exists {
+		return fmt.Errorf("application with name %v not found", name)
+	}
+
+	app.cancelFunc()
+	close(app.shutdownCh)
+
+	delete(am.apps, name)
+
+	slog.Info("Application shut down", "name", name)
+	return nil
 }
 
-// func (c *Gronos) done() {
-// 	// c.wg.Done()
-// 	// c.running--
-// 	// if c.running == 0 {
-// 	// 	c.finished = true
-// 	// }
-// }
+func (am *AppManager[Key]) GracefulShutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), am.shutdownTimer)
+	defer cancel()
 
-// func (c *Gronos) accumuluate() {
-// 	// c.wg.Add(1)
-// 	// c.running++
-// }
+	var wg sync.WaitGroup
+	am.mu.RLock()
+	for name, app := range am.apps {
+		wg.Add(1)
+		go func(name Key, app struct {
+			app        RuntimeApplication
+			cancelFunc context.CancelFunc
+			shutdownCh chan struct{}
+		}) {
+			defer wg.Done()
+			app.cancelFunc()
+			close(app.shutdownCh)
+			slog.Info("Shutting down application", "name", name)
+		}(name, app)
+	}
+	am.mu.RUnlock()
 
-// Run is the bootstrapping function that manages the lifecycle of the application.
-// TODO replace with Router
-// func (c *Gronos) Run(ctx context.Context) (*Signal, <-chan error) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-// 	c.toggleLog = true
-// 	// > but but but why are you doing that?!
-// 	// cause i just want to avoid a stupid instruction interruption
-// 	// if only we had pre-processor directives ¯\_(ツ)_/¯
-// 	if _, ok := c.logger.(NoopLogger); ok {
-// 		c.toggleLog = false
-// 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
+}
 
-// 	c.router.runtimes.ForEach(func(id uint, runtime *RuntimeStation) error {
-// 		c.accumuluate()
-// 		go func(r *RuntimeStation) {
+func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, <-chan error) {
+	for name, app := range apps {
+		if err := am.AddApplication(name, app); err != nil {
+			slog.Error("Failed to add application", "name", name, "error", err)
+		}
+	}
 
-// 			var innerWg sync.WaitGroup
+	shutdownChan := make(chan struct{})
+	go func() {
+		<-shutdownChan
+		if err := am.GracefulShutdown(); err != nil {
+			slog.Error("Error during graceful shutdown", "error", err)
+		}
+		am.cancel() // Cancel the main context after graceful shutdown attempt
+	}()
 
-// 			defer func() {
-// 				innerWg.Done()
-// 				r.courier.Complete()
-// 				r.mailbox.Complete()
-// 				if c.toggleLog {
-// 					c.logger.Info("Gronos runtime wait", slog.Any("id", r.id))
-// 				}
-// 				c.done()
-// 				c.router.remove(r.id)
-// 				innerWg.Wait()
-// 			}()
+	return shutdownChan, am.errChan
+}
 
-// 			innerWg.Add(1)
-// 			go func() {
-// 				if err := r.runtime(r.ctx, r.mailbox, r.courier, r.signal); err != nil {
-// 					slog.Error("Gronos runtime error", slog.Any("id", r.id), slog.Any("error", err))
-// 					c.courier.Transmit(err)
-// 				}
-// 				if c.toggleLog {
-// 					c.logger.Info("Gronos runtime done", slog.Any("id", r.id))
-// 				}
-// 			}()
+func createMiddleware(interval time.Duration, mode ExecutionMode, app RuntimeApplication) RuntimeApplication {
+	return func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
+		clock := NewClock(WithInterval(interval))
+		errChan := make(chan error)
 
-// 			for {
-// 				select {
-// 				case notice := <-r.courier.readNotices():
-// 					c.courier.Transmit(notice)
-// 					if c.toggleLog {
-// 						c.logger.Info("gronos received runtime notice: ", slog.Any("notice", notice))
-// 					}
-// 				case msg := <-r.courier.readMails():
-// 					if c.toggleLog {
-// 						c.logger.Info("gronos received runtime msg: ", slog.Any("msg", msg))
-// 					}
-// 					c.courier.Deliver(msg)
-// 				case <-r.ctx.Done():
-// 					if c.toggleLog {
-// 						c.logger.Info("Gronos context runtime done", slog.Any("id", r.id))
-// 					}
-// 					return
-// 				case <-r.signal.c:
-// 					return
-// 				case <-c.shutdown.Await():
-// 					if c.toggleLog {
-// 						c.logger.Info("Gronos shutdown runtime", slog.Any("id", r.id))
-// 					}
-// 					r.signal.Complete()
-// 					return
-// 				}
-// 			}
-// 		}(runtime)
-// 		return nil
-// 	})
+		wrapper := &tickerWrapper{
+			app:      app,
+			ctx:      ctx,
+			shutdown: shutdown,
+			errChan:  errChan,
+		}
 
-// 	sigCh := make(chan os.Signal, 1)
-// 	signal.Notify(sigCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+		clock.Add(wrapper, mode)
+		clock.Start()
 
-// 	go func() {
-// 		// run all the time
-// 		for {
-// 			select {
-// 			case <-ctx.Done():
-// 				if c.toggleLog {
-// 					c.logger.Info("gronos context done")
-// 				}
-// 				sigCh <- syscall.SIGINT
-// 			case msg := <-c.courier.readMails():
-// 				if c.toggleLog {
-// 					c.logger.Info("gronos deliverying msg: ", slog.Any("msg", msg))
-// 				}
-// 				if runtime, ok := c.router.runtimes.Get(msg.to); ok {
-// 					runtime.mailbox.post(msg)
-// 				} else {
-// 					if c.toggleLog {
-// 						c.logger.Info("gronos deliverying msg: ", slog.Any("msg", msg), slog.Any("error", "receiver not found"))
-// 					}
-// 				}
-// 			case <-c.shutdown.Await():
-// 				if c.toggleLog {
-// 					c.logger.Info("gronos courrier shutdown")
-// 				}
-// 				c.courier.Complete()
-// 				return
-// 			}
-// 		}
-// 	}()
+		go func() {
+			defer close(errChan)
+			for {
+				select {
+				case <-ctx.Done():
+					clock.Stop()
+					return
+				case <-shutdown:
+					clock.Stop()
+					return
+				case err := <-wrapper.errChan:
+					if err != nil {
+						errChan <- err
+						clock.Stop()
+						close(shutdown)
+						return
+					}
+				}
+			}
+		}()
 
-// 	// gracefull shutdown
-// 	go func() {
-// 		<-sigCh
-// 		switch c.shutdownMode {
-// 		case Gracefull:
-// 			if c.toggleLog {
-// 				c.logger.Info("Gracefull shutdown")
-// 			}
-// 			c.Kill()
-// 			c.Cut()
-// 			c.Wait()
-// 		case Immediate:
-// 			if c.toggleLog {
-// 				c.logger.Info("Immediate shutdown")
-// 			}
-// 			c.Kill()
-// 			c.Cut()
-// 		}
-// 	}()
+		select {
+		case <-ctx.Done():
+		case <-shutdown:
+		}
 
-// 	return c.shutdown, c.courier.c
-// }
+		return errChan, nil
+	}
+}
 
-// Close all lifelines while waiting
-// func (c *Gronos) Shutdown() {
-// 	c.Kill()
-// 	c.Cut()
-// 	c.Wait()
-// }
+func NonBlockingMiddleware(interval time.Duration, app RuntimeApplication) RuntimeApplication {
+	return createMiddleware(interval, NonBlocking, app)
+}
 
-// // Close lifeline
-// func (c *Gronos) Kill() {
-// 	c.shutdown.Complete()
-// }
+func ManagedTimelineMiddleware(interval time.Duration, app RuntimeApplication) RuntimeApplication {
+	return createMiddleware(interval, ManagedTimeline, app)
+}
 
-// // Close receiver
-// func (c *Gronos) Cut() {
-// 	c.courier.Complete()
-// }
+func BestEffortMiddleware(interval time.Duration, app RuntimeApplication) RuntimeApplication {
+	return createMiddleware(interval, BestEffort, app)
+}
 
-// // Gracefully wait for the end
-// func (c *Gronos) Wait() {
-// 	// c.wg.Wait()
-// }
+type tickerWrapper struct {
+	app      RuntimeApplication
+	ctx      context.Context
+	shutdown chan struct{}
+	errChan  chan error
+	running  atomic.Bool
+}
 
-/// TODO: since a terminology for sending errors instead of "Notify"
+func (tw *tickerWrapper) Tick() {
+	if !tw.running.CompareAndSwap(false, true) {
+		return // Already running
+	}
+	defer tw.running.Store(false)
 
-// func (c *Gronos) NotifyAll(err error) {
-// 	for _, runtime := range c.runtimes {
-// 		runtime.courier.Transmit(err)
-// 	}
-// }
+	appErrChan, err := tw.app(tw.ctx, tw.shutdown)
+	if err != nil {
+		select {
+		case tw.errChan <- err:
+		case <-tw.ctx.Done():
+		}
+		return
+	}
 
-// func (c *Gronos) NotifyAllExcept(err error, except uint) {
-// 	for _, runtime := range c.runtimes {
-// 		if runtime.id != except {
-// 			runtime.courier.Transmit(err)
-// 		}
-// 	}
-// }
-
-// func (c *Gronos) NotifyAllExceptAll(err error, excepts ...uint) {
-// 	for _, runtime := range c.runtimes {
-// 		for _, except := range excepts {
-// 			if runtime.id != except {
-// 				runtime.courier.Transmit(err)
-// 			}
-// 		}
-// 	}
-// }
-
-// func (c *Gronos) SendBroadcastExcept(msg Message, except uint) {
-// 	for _, runtime := range c.runtimes {
-// 		if runtime.id != except {
-// 			runtime.courier.Deliver(envelope{to: runtime.id, Msg: msg})
-// 		}
-// 	}
-// }
-
-// func (c *Gronos) SendBroadcastExceptAll(msg Message, excepts ...uint) {
-// 	for _, runtime := range c.runtimes {
-// 		for _, except := range excepts {
-// 			if runtime.id != except {
-// 				runtime.courier.Deliver(envelope{to: runtime.id, Msg: msg})
-// 			}
-// 		}
-// 	}
-// }
-
-// func (c *Gronos) CancelAllExcept(except uint) {
-// 	for _, runtime := range c.runtimes {
-// 		if runtime.id != except {
-// 			runtime.cancel()
-// 		}
-// 	}
-// }
-
-// func (c *Gronos) CancelAllExceptAll(excepts ...uint) {
-// 	for _, runtime := range c.runtimes {
-// 		for _, except := range excepts {
-// 			if runtime.id != except {
-// 				runtime.cancel()
-// 			}
-// 		}
-// 	}
-// }
+	select {
+	case err := <-appErrChan:
+		if err != nil {
+			select {
+			case tw.errChan <- err:
+			case <-tw.ctx.Done():
+			}
+		}
+	case <-tw.ctx.Done():
+	default:
+		// For BestEffort, we don't wait for the app to complete
+	}
+}

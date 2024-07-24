@@ -3,320 +3,220 @@ package gronos
 import (
 	"context"
 	"fmt"
-	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TODO Gronos talking to other Gronos
+type mockTicker struct {
+	tickCount atomic.Int64
+}
 
-func testRuntime(ctx context.Context) error {
-	slog.Info("test runtime ")
-	fmt.Println("test runtime  value", ctx.Value("testRuntime"))
+func (mt *mockTicker) Tick() {
+	mt.tickCount.Add(1)
+}
 
-	// courier, _ := UseCourier(ctx)
-	shutdown, _ := UseShutdown(ctx)
-	mailbox, _ := UseMailbox(ctx)
-	// courier.Deliver(Envelope{
-	// 	To:  0,
-	// 	Msg: "hello myself",
-	// })
-	// devlieryMsg, _ := NewMessage("hello myself")
-	// courier.Deliver(*devlieryMsg)
+func TestClock(t *testing.T) {
+	t.Run("AddAndDispatchTicks", func(t *testing.T) {
+		clock := NewClock(WithInterval(10 * time.Millisecond))
+		ticker := &mockTicker{}
+		clock.Add(ticker, NonBlocking)
 
-	for {
-		select {
-		case msg := <-mailbox:
-			slog.Info("test runtime msg: ", slog.Any("msg", msg))
-		case <-ctx.Done():
-			slog.Info("test runtime ctx.Done()")
-			return nil
-		case <-shutdown.Await():
-			slog.Info("test runtime shutdown")
-			// courier.Transmit(fmt.Errorf("shutdown"))
-			return nil
+		clock.Start()
+		time.Sleep(100 * time.Millisecond)
+		clock.Stop()
+
+		assert.GreaterOrEqual(t, ticker.tickCount.Load(), int64(4), "Expected at least 4 ticks")
+	})
+
+	t.Run("MultipleTickerModes", func(t *testing.T) {
+		clock := NewClock(WithInterval(10 * time.Millisecond))
+		nonBlockingTicker := &mockTicker{}
+		managedTicker := &mockTicker{}
+		bestEffortTicker := &mockTicker{}
+
+		clock.Add(nonBlockingTicker, NonBlocking)
+		clock.Add(managedTicker, ManagedTimeline)
+		clock.Add(bestEffortTicker, BestEffort)
+
+		clock.Start()
+		time.Sleep(100 * time.Millisecond)
+		clock.Stop()
+
+		assert.GreaterOrEqual(t, nonBlockingTicker.tickCount.Load(), int64(4), "Expected at least 4 ticks for NonBlocking")
+		assert.GreaterOrEqual(t, managedTicker.tickCount.Load(), int64(4), "Expected at least 4 ticks for ManagedTimeline")
+		assert.GreaterOrEqual(t, bestEffortTicker.tickCount.Load(), int64(4), "Expected at least 4 ticks for BestEffort")
+	})
+}
+
+func TestAppManager(t *testing.T) {
+	t.Run("AddAndShutdownApplication", func(t *testing.T) {
+		am := NewAppManager[string](5 * time.Second)
+		appName := "testApp"
+
+		app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
+			errChan := make(chan error)
+			go func() {
+				<-ctx.Done()
+				close(errChan)
+			}()
+			return errChan, nil
 		}
-	}
 
-	return fmt.Errorf("test runtime error")
+		err := am.AddApplication(appName, app)
+		require.NoError(t, err)
+
+		err = am.ShutdownApplication(appName)
+		require.NoError(t, err)
+	})
+
+	t.Run("GracefulShutdown", func(t *testing.T) {
+		am := NewAppManager[string](1 * time.Second)
+
+		app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
+			errChan := make(chan error)
+			go func() {
+				<-ctx.Done()
+				time.Sleep(500 * time.Millisecond)
+				close(errChan)
+			}()
+			return errChan, nil
+		}
+
+		err := am.AddApplication("app1", app)
+		require.NoError(t, err)
+		err = am.AddApplication("app2", app)
+		require.NoError(t, err)
+
+		err = am.GracefulShutdown()
+		require.NoError(t, err)
+	})
 }
 
-// go test -v -timeout 5s -run ^TestSimple$
-// The test is supposed to last 4s, 3s of runtime then timeout, the gronos runtime should last 4s and stop
-func TestSimple(t *testing.T) {
-
-	// the constructor should not start anything yet
-	g, err := New()
-	if err != nil {
-		t.Errorf("Error creating new context: %v", err)
+func TestMiddlewaresWithAppManager(t *testing.T) {
+	testCases := []struct {
+		name             string
+		middleware       func(time.Duration, RuntimeApplication) RuntimeApplication
+		expectedMinExecs int64
+	}{
+		{"NonBlockingMiddleware", NonBlockingMiddleware, 5},
+		{"ManagedTimelineMiddleware", ManagedTimelineMiddleware, 3},
+		{"BestEffortMiddleware", BestEffortMiddleware, 5},
 	}
 
-	// we should be able to add runtimes easily before anything run
-	// even if we could add things dynamically
-	g.Add(
-		"simple",
-		RuntimeWithRuntime(testRuntime),
-		RuntimeWithTimeout(time.Second*3),
-		RuntimeWithValue("testRuntime", "testRuntime"))
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			am := NewAppManager[string](5 * time.Second)
+			executionCount := atomic.Int64{}
+			errorReceived := make(chan struct{}, 1)
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-	defer cancel()
+			app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
+				errChan := make(chan error, 1)
+				go func() {
+					defer close(errChan)
+					for i := 0; i < 10; i++ {
+						select {
+						case <-ctx.Done():
+							return
+						case <-shutdown:
+							return
+						case <-time.After(10 * time.Millisecond):
+							executionCount.Add(1)
+							if i == 5 {
+								errChan <- fmt.Errorf("test error")
+								close(errorReceived)
+								return
+							}
+						}
+					}
+				}()
+				return errChan, nil
+			}
 
-	// the run will start the clocks
-	signal, receiver := g.Run(ctx)
+			wrappedApp := tc.middleware(50*time.Millisecond, app)
 
-	select {
-	case <-signal.Await():
-		slog.Info("signal")
-	case err := <-receiver:
-		slog.Info("error: ", err)
-	case <-ctx.Done():
-		slog.Info("ctx.Done()")
-		cancel()
+			err := am.AddApplication(tc.name, wrappedApp)
+			require.NoError(t, err)
+
+			shutdownChan, errChan := am.Run(nil)
+
+			select {
+			case <-errorReceived:
+				// Error was sent, now wait for it to propagate through AppManager
+			case <-time.After(1 * time.Second):
+				t.Fatal("Timeout waiting for error to be triggered")
+			}
+
+			select {
+			case err := <-errChan:
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "test error")
+			case <-time.After(1 * time.Second):
+				t.Fatal("Timeout waiting for error from AppManager")
+			}
+
+			close(shutdownChan)
+			// Drain the remaining errors to avoid closing a closed channel
+			for range errChan {
+			}
+
+			assert.GreaterOrEqual(t, executionCount.Load(), tc.expectedMinExecs,
+				"Expected at least %d executions before error", tc.expectedMinExecs)
+		})
 	}
-
-	<-g.GracefullWait()
 }
 
-// func TestTimed(t *testing.T) {
+func TestDataRaceFreedom(t *testing.T) {
+	t.Run("ClockConcurrency", func(t *testing.T) {
+		clock := NewClock(WithInterval(1 * time.Millisecond))
+		var wg sync.WaitGroup
 
-// 	g, err := New()
-// 	if err != nil {
-// 		t.Errorf("Error creating new context: %v", err)
-// 	}
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ticker := &mockTicker{}
+				clock.Add(ticker, NonBlocking)
+			}()
+		}
 
-// 	_, clfn := g.Add(
-// 		"ticker",
-// 		RuntimeWithRuntime(
-// 			// it should manage middlewares
-// 			Timed(1*time.Second, func() error {
-// 				slog.Info("tick")
-// 				return nil
-// 			})),
-// 		RuntimeWithTimeout(time.Second*5),
-// 		RuntimeWithValue("testRuntime", "testRuntime"))
+		clock.Start()
+		wg.Wait()
+		clock.Stop()
+	})
 
-// 	ctx := context.Background()
-// 	ctx, _ = context.WithTimeout(ctx, 7*time.Second)
+	t.Run("AppManagerConcurrency", func(t *testing.T) {
+		am := NewAppManager[string](5 * time.Second)
+		var wg sync.WaitGroup
 
-// 	signal, receiver := g.Run(ctx) // todo we should have a general context
+		app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
+			return make(chan error), nil
+		}
 
-// 	select {
-// 	case <-signal.Await():
-// 		slog.Info("signal")
-// 	case err := <-receiver:
-// 		slog.Info("error: ", err)
-// 	case <-ctx.Done():
-// 		slog.Info("ctx.Done()")
-// 		clfn()
-// 		g.Shutdown()
-// 	}
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				err := am.AddApplication(fmt.Sprintf("app%d", i), app)
+				require.NoError(t, err)
+			}(i)
+		}
 
-// 	g.Wait()
-// }
+		wg.Wait()
 
-// func testPing(counter *int) RuntimeFunc {
-// 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
-// 		fmt.Println("ping")
-// 		for {
-// 			select {
-// 			case <-mailbox.Read():
-// 				(*counter)++
-// 				// slog.Info("ping msg: ", slog.Any("msg", msg))
-// 				slog.Info("ping msg")
-// 				// courier.Deliver(Envelope{
-// 				// 	To:  pongID,
-// 				// 	Msg: "ping",
-// 				// })
-// 				courier.Deliver(Envelope("pong", "ping"))
-// 			case <-ctx.Done():
-// 				slog.Info("ping ctx.Done()")
-// 				return nil
-// 			case <-shutdown.Await():
-// 				slog.Info("ping shutdown")
-// 				courier.Transmit(fmt.Errorf("shutdown"))
-// 				return nil
-// 			}
-// 		}
-// 	}
-// }
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				err := am.ShutdownApplication(fmt.Sprintf("app%d", i))
+				require.NoError(t, err)
+			}(i)
+		}
 
-// func testPong(counter *int) RuntimeFunc {
-// 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
-// 		fmt.Println("pong")
-// 		for {
-// 			select {
-// 			case <-mailbox.Read():
-// 				(*counter)++
-// 				// slog.Info("pong msg: ", slog.Any("msg", msg))
-// 				slog.Info("pong msg")
-// 				// courier.Deliver(Envelope{
-// 				// 	To:  pingID,
-// 				// 	Msg: "pong",
-// 				// })
-// 				courier.Deliver(Envelope("ping", "pong"))
-// 			case <-ctx.Done():
-// 				slog.Info("pong ctx.Done()")
-// 				return nil
-// 			case <-shutdown.Await():
-// 				slog.Info("pong shutdown")
-// 				courier.Transmit(fmt.Errorf("shutdown"))
-// 				return nil
-// 			}
-// 		}
-// 	}
-// }
-
-// func TestCom(t *testing.T) {
-
-// 	g, err := New()
-// 	if err != nil {
-// 		t.Errorf("Error creating new context: %v", err)
-// 	}
-
-// 	counter := 0
-
-// 	// pingID := g.AddFuture()
-// 	// pongID := g.AddFuture()
-
-// 	g.Add("ping", RuntimeWithRuntime(testPing(&counter)))
-// 	g.Add("pong", RuntimeWithRuntime(testPong(&counter)))
-
-// 	if err = g.Named("pong", "ping"); err != nil {
-// 		t.Errorf("Error naming pong: %v", err)
-// 	}
-
-// 	ctx := context.Background()
-// 	ctx, cl := context.WithTimeout(ctx, 1*time.Second)
-// 	defer cl()
-
-// 	signal, receiver := g.Run(ctx) // todo we should have a general context
-
-// 	select {
-// 	case <-signal.Await():
-// 		slog.Info("signal ended")
-// 		cl()
-// 	case err := <-receiver:
-// 		slog.Info("error: ", err)
-// 	case <-ctx.Done():
-// 		slog.Info("ctx.Done()")
-// 		g.Shutdown()
-// 		cl()
-// 	}
-
-// 	g.Wait()
-// 	fmt.Println("counter", counter)
-// }
-
-// func testNamedWorker(name string) RuntimeFunc {
-// 	return func(ctx context.Context, mailbox *Mailbox, courier *Courier, shutdown *Signal) error {
-
-// 		fmt.Println(name + " test worker")
-// 		pause, resume, ok := Paused(ctx)
-// 		if !ok {
-// 			pp.Println(ctx)
-// 			return fmt.Errorf(name + " unsupported context type")
-// 		}
-// 		fmt.Println(name + " goroutine")
-
-// 		go func() {
-// 			for {
-// 				select {
-// 				// never forget ctx.Done()
-// 				case <-ctx.Done():
-// 					return
-// 				// never forget shutdown signal
-// 				case <-shutdown.Await():
-// 					return
-// 				// that's how you pause and resume
-// 				case <-pause:
-// 					fmt.Println(name + " )Worker paused")
-// 					<-resume
-// 					fmt.Println(name + " )Worker resumed")
-// 				// default case is the actual work
-// 				default:
-// 					fmt.Println(name + " )Worker doing work...")
-// 					time.Sleep(time.Second / 5)
-// 				}
-// 			}
-// 		}()
-
-// 		<-shutdown.Await()
-// 		fmt.Println(name + " )shutdown runtime")
-
-// 		return nil
-// 	}
-// }
-
-// func TestPlay(t *testing.T) {
-// 	g, err := New()
-// 	if err != nil {
-// 		t.Errorf("Error creating new context: %v", err)
-// 	}
-
-// 	id, _ := g.Add("worker", RuntimeWithRuntime(testNamedWorker("testPlayPause")))
-
-// 	ctx := context.Background()
-// 	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
-// 	defer cl()
-// 	signal, receiver := g.Run(ctx) // todo we should have a general context
-
-// 	go func() {
-// 		time.Sleep(1 * time.Second)
-// 		g.DirectPause(id)
-// 		fmt.Println("paused")
-// 		time.Sleep(2 * time.Second)
-// 		g.DirectResume(id)
-// 		fmt.Println("resume")
-// 	}()
-
-// 	select {
-// 	case <-signal.Await():
-// 		slog.Info("signal ended")
-// 		cl()
-// 	case err := <-receiver:
-// 		slog.Info("error: ", err)
-// 	case <-ctx.Done():
-// 		slog.Info("ctx.Done()")
-// 		g.Shutdown()
-// 		cl()
-// 	}
-
-// 	g.Wait()
-// 	time.Sleep(1 * time.Second)
-// }
-
-// func TestPhasingOut(t *testing.T) {
-// 	g, err := New()
-// 	if err != nil {
-// 		t.Errorf("Error creating new context: %v", err)
-// 	}
-
-// 	id, _ := g.Add("worker", RuntimeWithRuntime(testNamedWorker("testPhasingOut")))
-
-// 	ctx := context.Background()
-// 	ctx, cl := context.WithTimeout(ctx, 5*time.Second)
-// 	defer cl()
-// 	signal, receiver := g.Run(ctx) // todo we should have a general context
-
-// 	go func() {
-// 		time.Sleep(1 * time.Second)
-// 		g.DirectPhasingOut(id)
-// 		time.Sleep(2 * time.Second)
-// 	}()
-
-// 	select {
-// 	case <-signal.Await():
-// 		slog.Info("signal ended")
-// 		cl()
-// 	case err := <-receiver:
-// 		slog.Info("error: ", err)
-// 	case <-ctx.Done():
-// 		slog.Info("ctx.Done()")
-// 		g.Shutdown()
-// 		cl()
-// 	}
-
-// 	g.Wait()
-// }
+		wg.Wait()
+	})
+}
