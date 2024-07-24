@@ -122,19 +122,16 @@ func (c *Clock) Stop() {
 func (c *Clock) dispatchTicks() {
 	for {
 		select {
-		case <-c.ticker.C:
-			now := time.Now()
+		case now := <-c.ticker.C:
 			c.subs.Range(func(key, value interface{}) bool {
 				sub := value.(*TickerSubscriber)
 				lastExecTime := sub.lastExecTime.Load().(time.Time)
 				if now.Sub(lastExecTime) >= sub.DynamicInterval(now.Sub(lastExecTime)) {
 					switch sub.Mode {
-					case NonBlocking:
+					case NonBlocking, BestEffort:
 						go c.executeTick(key, sub, now)
 					case ManagedTimeline:
 						c.executeTick(key, sub, now)
-					case BestEffort:
-						go c.executeTick(key, sub, now)
 					}
 				}
 				return true
@@ -154,6 +151,11 @@ func (c *Clock) executeTick(key interface{}, sub *TickerSubscriber, now time.Tim
 	c.subs.Store(key, sub)
 }
 
+type AppManagerMsg[Key RuntimeKey] struct {
+	name Key
+	app  RuntimeApplication
+}
+
 // AppManager manages the lifecycle of runtime applications.
 // It uses a sync.Map to store applications and their associated cancellation functions and channels.
 // The generic type Key is used to uniquely identify applications.
@@ -166,18 +168,36 @@ type AppManager[Key RuntimeKey] struct {
 	once          sync.Once
 	mu            sync.Mutex
 	closed        bool
+	useAddChan    chan AppManagerMsg[Key]
+	useWaitChan   chan struct{}
 }
 
 // NewAppManager creates a new AppManager with the specified shutdown timeout.
 // The shutdown timer specifies the duration to wait for applications to shut down gracefully.
 func NewAppManager[Key RuntimeKey](shutdownTimer time.Duration) *AppManager[Key] {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &AppManager[Key]{
+	am := &AppManager[Key]{
 		ctx:           ctx,
 		cancel:        cancel,
 		errChan:       make(chan error, 1),
 		shutdownTimer: shutdownTimer,
 		closed:        false,
+		useAddChan:    make(chan AppManagerMsg[Key]),
+		useWaitChan:   make(chan struct{}),
+	}
+
+	go am.listenForAdd()
+	return am
+}
+
+func (am *AppManager[Key]) listenForAdd() {
+	for {
+		select {
+		case msg := <-am.useAddChan:
+			_ = am.AddApplication(msg.name, msg.app)
+		case <-am.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -300,6 +320,14 @@ func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, 
 
 	shutdownChan := make(chan struct{})
 	go func() {
+		for msg := range am.useAddChan {
+			if err := am.AddApplication(msg.name, msg.app); err != nil {
+				slog.Error("Failed to add application via UseAdd", "name", msg.name, "error", err)
+			}
+		}
+	}()
+
+	go func() {
 		<-shutdownChan
 		if err := am.GracefulShutdown(); err != nil {
 			am.mu.Lock()
@@ -330,9 +358,61 @@ type contextKey string
 
 const appManagerKey contextKey = "appManager"
 
-func FromContext[Key RuntimeKey](ctx context.Context) (*AppManager[Key], bool) {
-	am, ok := ctx.Value(appManagerKey).(*AppManager[Key])
-	return am, ok
+// UseAdd returns a channel to send a RuntimeApplication function and its name to the AppManager for adding.
+func (am *AppManager[Key]) UseAdd() chan<- AppManagerMsg[Key] {
+	return am.useAddChan
+}
+
+// UseWait returns a channel depending on the state of the specified application.
+func (am *AppManager[Key]) UseWait(name Key, state string) <-chan struct{} {
+	waitChan := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// handle panic if channel is already closed
+			}
+		}()
+		defer close(waitChan)
+		for {
+			app, loaded := am.apps.Load(name)
+			if !loaded {
+				return
+			}
+			appData := app.(struct {
+				app        RuntimeApplication
+				cancelFunc context.CancelFunc
+				shutdownCh chan struct{}
+			})
+
+			switch state {
+			case "started":
+				if am.ctx.Err() == nil {
+					return
+				}
+			case "running":
+				if am.ctx.Err() == nil && appData.shutdownCh != nil {
+					return
+				}
+			case "completed":
+				select {
+				case <-appData.shutdownCh:
+					return
+				default:
+				}
+			case "error":
+				select {
+				case err := <-am.errChan:
+					if err != nil {
+						return
+					}
+				default:
+				}
+			}
+
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+	return waitChan
 }
 
 // NonBlockingMiddleware creates a middleware that runs the application in NonBlocking mode.
