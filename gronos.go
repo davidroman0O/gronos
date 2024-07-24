@@ -41,7 +41,6 @@ type Clock struct {
 	subs     sync.Map
 	ticking  atomic.Bool
 	started  atomic.Bool
-	mu       sync.Mutex
 }
 
 func NewClock(opts ...ClockOption) *Clock {
