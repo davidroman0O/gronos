@@ -11,7 +11,7 @@ import (
 
 type RuntimeKey comparable
 
-type RuntimeApplication func(ctx context.Context, shutdown chan struct{}) (<-chan error, error)
+type RuntimeApplication func(ctx context.Context, shutdown chan struct{}) error
 
 type Ticker interface {
 	Tick()
@@ -28,7 +28,7 @@ const (
 type TickerSubscriber struct {
 	Ticker          Ticker
 	Mode            ExecutionMode
-	lastExecTime    atomic.Value // Use atomic.Value for thread-safe access
+	lastExecTime    atomic.Value
 	Priority        int
 	DynamicInterval func(elapsedTime time.Duration) time.Duration
 }
@@ -39,8 +39,8 @@ type Clock struct {
 	ticker   *time.Ticker
 	stopCh   chan struct{}
 	subs     sync.Map
-	ticking  bool
-	started  bool
+	ticking  atomic.Bool
+	started  atomic.Bool
 	mu       sync.Mutex
 }
 
@@ -48,8 +48,6 @@ func NewClock(opts ...ClockOption) *Clock {
 	c := &Clock{
 		interval: 100 * time.Millisecond,
 		stopCh:   make(chan struct{}),
-		ticking:  false,
-		started:  false,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -86,26 +84,19 @@ func (c *Clock) Add(ticker Ticker, mode ExecutionMode) {
 }
 
 func (c *Clock) Start() {
-	c.mu.Lock()
-	if c.started {
-		c.mu.Unlock()
+	if !c.started.CompareAndSwap(false, true) {
 		return
 	}
-	c.started = true
-	c.ticking = true
-	c.mu.Unlock()
+	c.ticking.Store(true)
 	go c.dispatchTicks()
 }
 
 func (c *Clock) Stop() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.ticking {
+	if !c.ticking.CompareAndSwap(true, false) {
 		return
 	}
 	close(c.stopCh)
-	c.ticking = false
-	c.started = false
+	c.started.Store(false)
 }
 
 func (c *Clock) dispatchTicks() {
@@ -142,58 +133,47 @@ func (c *Clock) executeTick(key interface{}, sub *TickerSubscriber, now time.Tim
 }
 
 type AppManager[Key RuntimeKey] struct {
-	apps map[Key]struct {
-		app        RuntimeApplication
-		cancelFunc context.CancelFunc
-		shutdownCh chan struct{}
-	}
+	apps          sync.Map
 	ctx           context.Context
 	cancel        context.CancelFunc
 	errChan       chan error
-	mu            sync.RWMutex
 	shutdownTimer time.Duration
 }
 
 func NewAppManager[Key RuntimeKey](shutdownTimer time.Duration) *AppManager[Key] {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &AppManager[Key]{
-		apps: make(map[Key]struct {
-			app        RuntimeApplication
-			cancelFunc context.CancelFunc
-			shutdownCh chan struct{}
-		}),
 		ctx:           ctx,
 		cancel:        cancel,
-		errChan:       make(chan error),
+		errChan:       make(chan error, 1),
 		shutdownTimer: shutdownTimer,
 	}
 }
 
 func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) error {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	if _, exists := am.apps[name]; exists {
-		return fmt.Errorf("application with name %v already exists", name)
-	}
-
 	appCtx, cancelFunc := context.WithCancel(am.ctx)
 	shutdownCh := make(chan struct{})
 
-	am.apps[name] = struct {
+	_, loaded := am.apps.LoadOrStore(name, struct {
 		app        RuntimeApplication
 		cancelFunc context.CancelFunc
 		shutdownCh chan struct{}
-	}{app, cancelFunc, shutdownCh}
+	}{app, cancelFunc, shutdownCh})
+
+	if loaded {
+		cancelFunc()
+		return fmt.Errorf("application with name %v already exists", name)
+	}
 
 	go func() {
-		appErrChan, err := app(appCtx, shutdownCh)
-		if err != nil {
-			am.errChan <- fmt.Errorf("error starting application %v: %w", name, err)
-			return
-		}
-		for err := range appErrChan {
-			am.errChan <- fmt.Errorf("error from application %v: %w", name, err)
+		defer am.ShutdownApplication(name)
+		if err := app(appCtx, shutdownCh); err != nil {
+			select {
+			case am.errChan <- fmt.Errorf("error from application %v: %w", name, err):
+			default:
+				// Error channel is full or closed, log the error
+				slog.Error("Failed to send error to channel", "name", name, "error", err)
+			}
 		}
 	}()
 
@@ -201,18 +181,25 @@ func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) erro
 }
 
 func (am *AppManager[Key]) ShutdownApplication(name Key) error {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	app, exists := am.apps[name]
-	if !exists {
+	value, loaded := am.apps.LoadAndDelete(name)
+	if !loaded {
 		return fmt.Errorf("application with name %v not found", name)
 	}
 
-	app.cancelFunc()
-	close(app.shutdownCh)
+	app := value.(struct {
+		app        RuntimeApplication
+		cancelFunc context.CancelFunc
+		shutdownCh chan struct{}
+	})
 
-	delete(am.apps, name)
+	app.cancelFunc()
+
+	select {
+	case <-app.shutdownCh:
+		// Channel is already closed, do nothing
+	default:
+		close(app.shutdownCh)
+	}
 
 	slog.Info("Application shut down", "name", name)
 	return nil
@@ -223,8 +210,7 @@ func (am *AppManager[Key]) GracefulShutdown() error {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	am.mu.RLock()
-	for name, app := range am.apps {
+	am.apps.Range(func(key, value interface{}) bool {
 		wg.Add(1)
 		go func(name Key, app struct {
 			app        RuntimeApplication
@@ -235,9 +221,13 @@ func (am *AppManager[Key]) GracefulShutdown() error {
 			app.cancelFunc()
 			close(app.shutdownCh)
 			slog.Info("Shutting down application", "name", name)
-		}(name, app)
-	}
-	am.mu.RUnlock()
+		}(key.(Key), value.(struct {
+			app        RuntimeApplication
+			cancelFunc context.CancelFunc
+			shutdownCh chan struct{}
+		}))
+		return true
+	})
 
 	done := make(chan struct{})
 	go func() {
@@ -266,55 +256,11 @@ func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, 
 		if err := am.GracefulShutdown(); err != nil {
 			slog.Error("Error during graceful shutdown", "error", err)
 		}
-		am.cancel() // Cancel the main context after graceful shutdown attempt
+		am.cancel()
+		close(am.errChan)
 	}()
 
 	return shutdownChan, am.errChan
-}
-
-func createMiddleware(interval time.Duration, mode ExecutionMode, app RuntimeApplication) RuntimeApplication {
-	return func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
-		clock := NewClock(WithInterval(interval))
-		errChan := make(chan error)
-
-		wrapper := &tickerWrapper{
-			app:      app,
-			ctx:      ctx,
-			shutdown: shutdown,
-			errChan:  errChan,
-		}
-
-		clock.Add(wrapper, mode)
-		clock.Start()
-
-		go func() {
-			defer close(errChan)
-			for {
-				select {
-				case <-ctx.Done():
-					clock.Stop()
-					return
-				case <-shutdown:
-					clock.Stop()
-					return
-				case err := <-wrapper.errChan:
-					if err != nil {
-						errChan <- err
-						clock.Stop()
-						close(shutdown)
-						return
-					}
-				}
-			}
-		}()
-
-		select {
-		case <-ctx.Done():
-		case <-shutdown:
-		}
-
-		return errChan, nil
-	}
 }
 
 func NonBlockingMiddleware(interval time.Duration, app RuntimeApplication) RuntimeApplication {
@@ -329,39 +275,50 @@ func BestEffortMiddleware(interval time.Duration, app RuntimeApplication) Runtim
 	return createMiddleware(interval, BestEffort, app)
 }
 
+func createMiddleware(interval time.Duration, mode ExecutionMode, app RuntimeApplication) RuntimeApplication {
+	return func(ctx context.Context, shutdown chan struct{}) error {
+		ctx, cancel := context.WithCancel(ctx)
+		clock := NewClock(WithInterval(interval))
+		wrapper := &tickerWrapper{
+			app:      app,
+			ctx:      ctx,
+			shutdown: shutdown,
+			errCh:    make(chan error, 1),
+			cancel:   cancel,
+		}
+
+		clock.Add(wrapper, mode)
+		clock.Start()
+		defer clock.Stop()
+
+		// Wait for context cancellation, shutdown signal, or an application error
+		select {
+		case err := <-wrapper.errCh:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-shutdown:
+			return nil
+		}
+	}
+}
+
 type tickerWrapper struct {
 	app      RuntimeApplication
 	ctx      context.Context
 	shutdown chan struct{}
-	errChan  chan error
-	running  atomic.Bool
+	errCh    chan error
+	cancel   context.CancelFunc
 }
 
 func (tw *tickerWrapper) Tick() {
-	if !tw.running.CompareAndSwap(false, true) {
-		return // Already running
-	}
-	defer tw.running.Store(false)
-
-	appErrChan, err := tw.app(tw.ctx, tw.shutdown)
+	err := tw.app(tw.ctx, tw.shutdown)
 	if err != nil {
+		slog.Error("Application error", "error", err)
 		select {
-		case tw.errChan <- err:
-		case <-tw.ctx.Done():
+		case tw.errCh <- err:
+		default:
 		}
-		return
-	}
-
-	select {
-	case err := <-appErrChan:
-		if err != nil {
-			select {
-			case tw.errChan <- err:
-			case <-tw.ctx.Done():
-			}
-		}
-	case <-tw.ctx.Done():
-	default:
-		// For BestEffort, we don't wait for the app to complete
+		tw.cancel()
 	}
 }

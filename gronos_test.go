@@ -3,6 +3,7 @@ package gronos
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,14 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type mockTicker struct {
-	tickCount atomic.Int64
-}
-
-func (mt *mockTicker) Tick() {
-	mt.tickCount.Add(1)
-}
 
 func TestClock(t *testing.T) {
 	t.Run("AddAndDispatchTicks", func(t *testing.T) {
@@ -58,13 +51,9 @@ func TestAppManager(t *testing.T) {
 		am := NewAppManager[string](5 * time.Second)
 		appName := "testApp"
 
-		app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
-			errChan := make(chan error)
-			go func() {
-				<-ctx.Done()
-				close(errChan)
-			}()
-			return errChan, nil
+		app := func(ctx context.Context, shutdown chan struct{}) error {
+			<-ctx.Done()
+			return nil
 		}
 
 		err := am.AddApplication(appName, app)
@@ -77,14 +66,10 @@ func TestAppManager(t *testing.T) {
 	t.Run("GracefulShutdown", func(t *testing.T) {
 		am := NewAppManager[string](1 * time.Second)
 
-		app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
-			errChan := make(chan error)
-			go func() {
-				<-ctx.Done()
-				time.Sleep(500 * time.Millisecond)
-				close(errChan)
-			}()
-			return errChan, nil
+		app := func(ctx context.Context, shutdown chan struct{}) error {
+			<-ctx.Done()
+			time.Sleep(500 * time.Millisecond)
+			return nil
 		}
 
 		err := am.AddApplication("app1", app)
@@ -96,78 +81,98 @@ func TestAppManager(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
-
 func TestMiddlewaresWithAppManager(t *testing.T) {
 	testCases := []struct {
-		name             string
-		middleware       func(time.Duration, RuntimeApplication) RuntimeApplication
-		expectedMinExecs int64
+		name          string
+		middleware    func(time.Duration, RuntimeApplication) RuntimeApplication
+		expectedExecs int64
 	}{
-		{"NonBlockingMiddleware", NonBlockingMiddleware, 5},
-		{"ManagedTimelineMiddleware", ManagedTimelineMiddleware, 3},
-		{"BestEffortMiddleware", BestEffortMiddleware, 5},
+		{"NonBlockingMiddleware", NonBlockingMiddleware, 6},
+		{"ManagedTimelineMiddleware", ManagedTimelineMiddleware, 6},
+		{"BestEffortMiddleware", BestEffortMiddleware, 6},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			am := NewAppManager[string](5 * time.Second)
 			executionCount := atomic.Int64{}
-			errorReceived := make(chan struct{}, 1)
+			errorSent := make(chan struct{})
 
-			app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
-				errChan := make(chan error, 1)
-				go func() {
-					defer close(errChan)
-					for i := 0; i < 10; i++ {
-						select {
-						case <-ctx.Done():
-							return
-						case <-shutdown:
-							return
-						case <-time.After(10 * time.Millisecond):
-							executionCount.Add(1)
-							if i == 5 {
-								errChan <- fmt.Errorf("test error")
-								close(errorReceived)
-								return
-							}
-						}
-					}
-				}()
-				return errChan, nil
+			app := func(ctx context.Context, shutdown chan struct{}) error {
+				count := executionCount.Add(1)
+				log.Printf("Execution count: %d", count)
+				if count == tc.expectedExecs {
+					log.Printf("Sending test error")
+					close(errorSent)
+					return fmt.Errorf("test error")
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-shutdown:
+					return nil
+				case <-time.After(10 * time.Millisecond):
+					return nil
+				}
 			}
 
 			wrappedApp := tc.middleware(50*time.Millisecond, app)
 
-			err := am.AddApplication(tc.name, wrappedApp)
+			err := am.AddApplication(tc.name, func(appCtx context.Context, appShutdown chan struct{}) error {
+				return wrappedApp(appCtx, appShutdown)
+			})
 			require.NoError(t, err)
 
 			shutdownChan, errChan := am.Run(nil)
 
 			select {
-			case <-errorReceived:
-				// Error was sent, now wait for it to propagate through AppManager
-			case <-time.After(1 * time.Second):
-				t.Fatal("Timeout waiting for error to be triggered")
+			case <-errorSent:
+				log.Printf("Error sent, waiting for propagation")
+			case <-time.After(3 * time.Second):
+				t.Fatal("Timeout waiting for error to be sent")
 			}
 
+			var receivedErr error
 			select {
-			case err := <-errChan:
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "test error")
-			case <-time.After(1 * time.Second):
+			case err, ok := <-errChan:
+				if !ok {
+					t.Fatal("Error channel closed unexpectedly")
+				}
+				log.Printf("Received error from AppManager: %v", err)
+				receivedErr = err
+			case <-time.After(3 * time.Second):
 				t.Fatal("Timeout waiting for error from AppManager")
 			}
 
+			assert.Error(t, receivedErr)
+			assert.Contains(t, receivedErr.Error(), "test error")
+
 			close(shutdownChan)
-			// Drain the remaining errors to avoid closing a closed channel
-			for range errChan {
+
+			// Wait for shutdown to complete
+			select {
+			case _, ok := <-errChan:
+				if ok {
+					t.Fatal("Error channel not closed after shutdown")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Timeout waiting for error channel to close")
 			}
 
-			assert.GreaterOrEqual(t, executionCount.Load(), tc.expectedMinExecs,
-				"Expected at least %d executions before error", tc.expectedMinExecs)
+			finalCount := executionCount.Load()
+			log.Printf("Final execution count: %d", finalCount)
+			assert.Equal(t, tc.expectedExecs, finalCount,
+				"Expected exactly %d executions before error, got %d", tc.expectedExecs, finalCount)
 		})
 	}
+}
+
+type mockTicker struct {
+	tickCount atomic.Int64
+}
+
+func (mt *mockTicker) Tick() {
+	mt.tickCount.Add(1)
 }
 
 func TestDataRaceFreedom(t *testing.T) {
@@ -193,8 +198,13 @@ func TestDataRaceFreedom(t *testing.T) {
 		am := NewAppManager[string](5 * time.Second)
 		var wg sync.WaitGroup
 
-		app := func(ctx context.Context, shutdown chan struct{}) (<-chan error, error) {
-			return make(chan error), nil
+		app := func(ctx context.Context, shutdown chan struct{}) error {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-shutdown:
+				return nil
+			}
 		}
 
 		for i := 0; i < 100; i++ {
