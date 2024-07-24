@@ -138,6 +138,9 @@ type AppManager[Key RuntimeKey] struct {
 	cancel        context.CancelFunc
 	errChan       chan error
 	shutdownTimer time.Duration
+	once          sync.Once
+	mu            sync.Mutex
+	closed        bool
 }
 
 func NewAppManager[Key RuntimeKey](shutdownTimer time.Duration) *AppManager[Key] {
@@ -147,6 +150,7 @@ func NewAppManager[Key RuntimeKey](shutdownTimer time.Duration) *AppManager[Key]
 		cancel:        cancel,
 		errChan:       make(chan error, 1),
 		shutdownTimer: shutdownTimer,
+		closed:        false,
 	}
 }
 
@@ -168,11 +172,14 @@ func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) erro
 	go func() {
 		defer am.ShutdownApplication(name)
 		if err := app(appCtx, shutdownCh); err != nil {
-			select {
-			case am.errChan <- fmt.Errorf("error from application %v: %w", name, err):
-			default:
-				// Error channel is full or closed, log the error
-				slog.Error("Failed to send error to channel", "name", name, "error", err)
+			am.mu.Lock()
+			defer am.mu.Unlock()
+			if !am.closed {
+				select {
+				case am.errChan <- fmt.Errorf("error from application %v: %w", name, err):
+				default:
+					slog.Error("Failed to send error to channel", "name", name, "error", err)
+				}
 			}
 		}
 	}()
@@ -196,7 +203,6 @@ func (am *AppManager[Key]) ShutdownApplication(name Key) error {
 
 	select {
 	case <-app.shutdownCh:
-		// Channel is already closed, do nothing
 	default:
 		close(app.shutdownCh)
 	}
@@ -219,7 +225,12 @@ func (am *AppManager[Key]) GracefulShutdown() error {
 		}) {
 			defer wg.Done()
 			app.cancelFunc()
-			close(app.shutdownCh)
+			select {
+			case <-app.shutdownCh:
+				// Application already closed
+			default:
+				close(app.shutdownCh)
+			}
 			slog.Info("Shutting down application", "name", name)
 		}(key.(Key), value.(struct {
 			app        RuntimeApplication
@@ -254,10 +265,25 @@ func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, 
 	go func() {
 		<-shutdownChan
 		if err := am.GracefulShutdown(); err != nil {
-			slog.Error("Error during graceful shutdown", "error", err)
+			am.mu.Lock()
+			defer am.mu.Unlock()
+			if !am.closed {
+				select {
+				case am.errChan <- fmt.Errorf("error during graceful shutdown: %w", err):
+				default:
+					slog.Error("Failed to send shutdown error to channel", "error", err)
+				}
+			}
 		}
 		am.cancel()
-		close(am.errChan)
+		am.once.Do(func() {
+			am.mu.Lock()
+			defer am.mu.Unlock()
+			if !am.closed {
+				close(am.errChan)
+				am.closed = true
+			}
+		})
 	}()
 
 	return shutdownChan, am.errChan

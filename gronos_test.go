@@ -81,6 +81,7 @@ func TestAppManager(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
 func TestMiddlewaresWithAppManager(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -229,4 +230,165 @@ func TestDataRaceFreedom(t *testing.T) {
 
 		wg.Wait()
 	})
+}
+
+func TestTickerSubscriberDynamicInterval(t *testing.T) {
+	clock := NewClock(WithInterval(5 * time.Millisecond)) // Shortened the interval
+	ticker := &mockTicker{}
+	clock.Add(ticker, NonBlocking)
+
+	subscriber, _ := clock.subs.Load(ticker)
+	ts := subscriber.(*TickerSubscriber)
+
+	// Change dynamic interval
+	ts.DynamicInterval = func(elapsedTime time.Duration) time.Duration {
+		return 5 * time.Millisecond
+	}
+
+	clock.Start()
+	time.Sleep(150 * time.Millisecond) // Increased sleep duration
+	clock.Stop()
+
+	assert.GreaterOrEqual(t, ticker.tickCount.Load(), int64(10), "Expected at least 10 ticks with dynamic interval")
+}
+
+func TestAppManagerMultipleApplications(t *testing.T) {
+	am := NewAppManager[string](5 * time.Second)
+	appName1 := "testApp1"
+	appName2 := "testApp2"
+
+	app := func(ctx context.Context, shutdown chan struct{}) error {
+		<-ctx.Done()
+		return nil
+	}
+
+	err := am.AddApplication(appName1, app)
+	require.NoError(t, err)
+
+	err = am.AddApplication(appName2, app)
+	require.NoError(t, err)
+
+	err = am.ShutdownApplication(appName1)
+	require.NoError(t, err)
+
+	err = am.ShutdownApplication(appName2)
+	require.NoError(t, err)
+}
+
+func TestAppManagerGracefulShutdownWithLongRunningApps(t *testing.T) {
+	am := NewAppManager[string](2 * time.Second)
+
+	app := func(ctx context.Context, shutdown chan struct{}) error {
+		select {
+		case <-ctx.Done():
+			time.Sleep(1 * time.Second)
+			return nil
+		case <-shutdown:
+			return nil
+		}
+	}
+
+	err := am.AddApplication("app1", app)
+	require.NoError(t, err)
+	err = am.AddApplication("app2", app)
+	require.NoError(t, err)
+
+	start := time.Now()
+	err = am.GracefulShutdown()
+	require.NoError(t, err)
+
+	elapsed := time.Since(start)
+	assert.Less(t, elapsed, 3*time.Second, "Graceful shutdown should complete within 3 seconds")
+}
+
+func TestMiddlewareErrorHandling(t *testing.T) {
+	am := NewAppManager[string](5 * time.Second)
+	appName := "errorApp"
+
+	app := func(ctx context.Context, shutdown chan struct{}) error {
+		return fmt.Errorf("expected error")
+	}
+
+	wrappedApp := NonBlockingMiddleware(50*time.Millisecond, app)
+
+	err := am.AddApplication(appName, wrappedApp)
+	require.NoError(t, err)
+
+	shutdownChan, errChan := am.Run(nil)
+
+	var receivedErr error
+	select {
+	case err, ok := <-errChan:
+		if !ok {
+			t.Fatal("Error channel closed unexpectedly")
+		}
+		receivedErr = err
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for error from AppManager")
+	}
+
+	assert.Error(t, receivedErr)
+	assert.Contains(t, receivedErr.Error(), "expected error")
+
+	close(shutdownChan)
+}
+
+func TestMiddlewareTickFrequency(t *testing.T) {
+	am := NewAppManager[string](5 * time.Second)
+	executionCount := atomic.Int64{}
+	appName := "tickFreqApp"
+
+	app := func(ctx context.Context, shutdown chan struct{}) error {
+		executionCount.Add(1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-shutdown:
+			return nil
+		case <-time.After(10 * time.Millisecond):
+			return nil
+		}
+	}
+
+	wrappedApp := NonBlockingMiddleware(50*time.Millisecond, app)
+
+	err := am.AddApplication(appName, wrappedApp)
+	require.NoError(t, err)
+
+	shutdownChan, _ := am.Run(nil)
+
+	time.Sleep(700 * time.Millisecond) // Increased sleep duration to ensure more ticks
+	close(shutdownChan)
+
+	finalCount := executionCount.Load()
+	assert.GreaterOrEqual(t, finalCount, int64(8), "Expected at least 8 ticks within 500ms")
+}
+func TestAppManagerApplicationShutdownHandling(t *testing.T) {
+	am := NewAppManager[string](5 * time.Second)
+	appName := "testApp"
+
+	shutdownHandled := make(chan struct{})
+
+	app := func(ctx context.Context, shutdown chan struct{}) error {
+		select {
+		case <-shutdown:
+			close(shutdownHandled)
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
+	}
+
+	err := am.AddApplication(appName, app)
+	require.NoError(t, err)
+
+	err = am.ShutdownApplication(appName)
+	require.NoError(t, err)
+
+	select {
+	case <-shutdownHandled:
+		// Success
+	case <-time.After(2 * time.Second): // Increased timeout
+		t.Fatal("Timeout waiting for shutdown to be handled")
+	}
 }
