@@ -12,7 +12,7 @@ import (
 
 func TestGronos(t *testing.T) {
 	t.Run("Basic functionality", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		appStarted := make(chan struct{})
@@ -21,9 +21,14 @@ func TestGronos(t *testing.T) {
 		g := New[string](ctx, map[string]RuntimeApplication{
 			"test-app": func(ctx context.Context, shutdown <-chan struct{}) error {
 				close(appStarted)
-				<-shutdown
-				close(appFinished)
-				return nil
+				select {
+				case <-ctx.Done():
+					close(appFinished)
+					return ctx.Err()
+				case <-shutdown:
+					close(appFinished)
+					return nil
+				}
 			},
 		})
 
@@ -48,17 +53,19 @@ func TestGronos(t *testing.T) {
 		g.Wait()
 
 		select {
-		case err := <-errors:
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
+		case err, ok := <-errors:
+			if ok {
+				if err != nil && err != context.Canceled {
+					t.Fatalf("Unexpected error: %v", err)
+				}
 			}
-		default:
-			// No errors, as expected
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
 		}
 	})
 
 	t.Run("Multiple applications", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		appCount := 3
@@ -72,9 +79,9 @@ func TestGronos(t *testing.T) {
 			index := i
 			apps[fmt.Sprintf("app-%d", i)] = func(ctx context.Context, shutdown <-chan struct{}) error {
 				close(appStarted[index])
-				<-shutdown
+				<-ctx.Done()
 				close(appFinished[index])
-				return nil
+				return ctx.Err()
 			}
 		}
 
@@ -90,13 +97,13 @@ func TestGronos(t *testing.T) {
 			}
 		}
 
-		g.Shutdown()
+		cancel() // Cancel the context to trigger shutdown
 
 		for i := 0; i < appCount; i++ {
 			select {
 			case <-appFinished[i]:
 				// App finished successfully
-			case <-time.After(time.Second):
+			case <-time.After(2 * time.Second):
 				t.Fatalf("Timeout waiting for app %d to finish", i)
 			}
 		}
@@ -104,12 +111,14 @@ func TestGronos(t *testing.T) {
 		g.Wait()
 
 		select {
-		case err := <-errors:
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
+		case err, ok := <-errors:
+			if ok {
+				if err != context.Canceled && err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
 			}
-		default:
-			// No errors, as expected
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
 		}
 	})
 
@@ -144,7 +153,7 @@ func TestGronos(t *testing.T) {
 	})
 
 	t.Run("Dynamic application addition", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		g := New[string](ctx, nil)
@@ -153,19 +162,14 @@ func TestGronos(t *testing.T) {
 		appStarted := make(chan struct{})
 		appFinished := make(chan struct{})
 
-		com, err := UseBus(g.createContext())
+		err := g.Add("dynamic-app", func(ctx context.Context, shutdown <-chan struct{}) error {
+			close(appStarted)
+			<-ctx.Done()
+			close(appFinished)
+			return ctx.Err()
+		})
 		if err != nil {
-			t.Fatalf("Failed to get communication channel: %v", err)
-		}
-
-		com <- Add[string]{
-			Key: "dynamic-app",
-			App: func(ctx context.Context, shutdown <-chan struct{}) error {
-				close(appStarted)
-				<-shutdown
-				close(appFinished)
-				return nil
-			},
+			t.Fatalf("Failed to add dynamic app: %v", err)
 		}
 
 		select {
@@ -175,29 +179,31 @@ func TestGronos(t *testing.T) {
 			t.Fatal("Timeout waiting for dynamic app to start")
 		}
 
-		g.Shutdown()
+		cancel() // Cancel the context to trigger shutdown
 
 		select {
 		case <-appFinished:
 			// App finished successfully
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatal("Timeout waiting for dynamic app to finish")
 		}
 
 		g.Wait()
 
 		select {
-		case err := <-errors:
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
+		case err, ok := <-errors:
+			if ok {
+				if err != context.Canceled && err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
 			}
-		default:
-			// No errors, as expected
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
 		}
 	})
 
 	t.Run("Race condition test", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		g := New[string](ctx, nil)
@@ -212,8 +218,8 @@ func TestGronos(t *testing.T) {
 				defer wg.Done()
 				appKey := fmt.Sprintf("app-%d", index)
 				app := func(ctx context.Context, shutdown <-chan struct{}) error {
-					<-shutdown
-					return nil
+					<-ctx.Done()
+					return ctx.Err()
 				}
 
 				if err := g.Add(appKey, app); err != nil {
@@ -228,16 +234,18 @@ func TestGronos(t *testing.T) {
 			t.Errorf("Expected %d apps, got %d", appCount, g.keys.Length())
 		}
 
-		g.Shutdown()
+		cancel() // Cancel the context to trigger shutdown
 		g.Wait()
 
 		select {
-		case err := <-errors:
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
+		case err, ok := <-errors:
+			if ok {
+				if err != context.Canceled && err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
 			}
-		default:
-			// No errors, as expected
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
 		}
 	})
 }

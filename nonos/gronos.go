@@ -20,11 +20,22 @@ type gronos[K comparable] struct {
 	com          chan message
 	wait         sync.WaitGroup
 	ctx          context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
 }
 
 type DeadLetter[K comparable] struct {
 	Key    K
 	Reason error
+}
+
+type Terminated[K comparable] struct {
+	Key K
+}
+
+type ContextTerminated[K comparable] struct {
+	Key K
+	Err error
 }
 
 type Add[K comparable] struct {
@@ -42,14 +53,17 @@ type applicationContext[K comparable] struct {
 	reason   error
 	shutdown chan struct{}
 	closer   func() // proxy function to close the channel shutdown
+	cancel   func() // proxy function to cancel the context
 }
 
-// todo add options
 func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gronos[K] {
+	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
-		com:  make(chan message, 200), // todo add option
-		keys: ConcurrentArray[K]{},
-		ctx:  ctx,
+		com:    make(chan message, 200),
+		keys:   ConcurrentArray[K]{},
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 	for k, v := range init {
 		g.Add(k, v)
@@ -58,118 +72,146 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gron
 }
 
 func (g *gronos[K]) Start() chan error {
-	return g.run(g.ctx)
+	errChan := make(chan error, 1)
+	go g.run(errChan)
+	return errChan
 }
 
 func (g *gronos[K]) Shutdown() {
-	g.applications.Range(func(key, value any) bool {
-		app := value.(applicationContext[K])
-		if app.alive {
-			app.alive = false
-			g.com <- DeadLetter[K]{Key: key.(K), Reason: fmt.Errorf("shutdown")}
-		}
-		return true
-	})
+	g.cancel()
+	select {
+	case <-g.done:
+		// Shutdown completed successfully
+	case <-time.After(5 * time.Second):
+		// Timeout occurred, log a warning
+		fmt.Println("Warning: Shutdown timed out after 5 seconds")
+	}
 }
 
 func (g *gronos[K]) Wait() {
-	g.wait.Wait()
-	close(g.com) // Close the channel after all applications have finished
+	<-g.done
 }
 
-func (g *gronos[K]) run(ctx context.Context) chan error {
-	cerr := make(chan error)
-	go func() {
-		closer := sync.OnceFunc(func() {
-			close(cerr)
-		})
-		defer closer()
-		for {
-			select {
-			case <-ctx.Done():
-				g.drainMessages(cerr) // Drain remaining messages
+func (g *gronos[K]) run(errChan chan<- error) {
+	defer close(g.done)
+	defer close(errChan)
+
+	for {
+		select {
+		case <-g.ctx.Done():
+			g.shutdownApps()
+			errChan <- g.ctx.Err() // Propagate the context error
+			return
+		case m, ok := <-g.com:
+			if !ok {
 				return
-			case m, ok := <-g.com:
-				if !ok {
-					// Channel closed, exit the goroutine
-					return
-				}
-				g.handleMessage(m, cerr)
 			}
-			runtime.Gosched()
+			if err := g.handleMessage(m); err != nil {
+				errChan <- err
+			}
 		}
-	}()
-	return cerr
+		runtime.Gosched()
+	}
 }
 
-func (g *gronos[K]) handleMessage(m message, cerr chan<- error) {
+func (g *gronos[K]) shutdownApps() {
+	var wg sync.WaitGroup
+	g.applications.Range(func(key, value interface{}) bool {
+		app := value.(applicationContext[K])
+		if app.alive {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				app.cancel()
+				<-app.shutdown
+			}()
+		}
+		return true
+	})
+	wg.Wait()
+}
+
+func (g *gronos[K]) handleMessage(m message) error {
 	switch msg := m.(type) {
 	case DeadLetter[K]:
 		var value any
 		var app applicationContext[K]
 		var ok bool
 		if value, ok = g.applications.Load(msg.Key); !ok {
-			return
+			return nil
 		}
 		if app, ok = value.(applicationContext[K]); !ok {
-			return
+			return nil
 		}
 		app.alive = false
 		app.reason = msg.Reason
 		app.closer()
 		g.applications.Store(app.k, app)
-		g.wait.Done()
 		if msg.Reason != nil && msg.Reason.Error() != "shutdown" {
-			cerr <- fmt.Errorf("app error %v %v", msg.Key, msg.Reason)
+			return fmt.Errorf("app error %v %v", msg.Key, msg.Reason)
 		}
+	case Terminated[K]:
+		var value any
+		var app applicationContext[K]
+		var ok bool
+		if value, ok = g.applications.Load(msg.Key); !ok {
+			return nil
+		}
+		if app, ok = value.(applicationContext[K]); !ok {
+			return nil
+		}
+		app.alive = false
+		app.closer()
+		g.applications.Store(app.k, app)
+	case ContextTerminated[K]:
+		var value any
+		var app applicationContext[K]
+		var ok bool
+		if value, ok = g.applications.Load(msg.Key); !ok {
+			return nil
+		}
+		if app, ok = value.(applicationContext[K]); !ok {
+			return nil
+		}
+		app.alive = false
+		app.cancel()
+		g.applications.Store(app.k, app)
 	case Add[K]:
-		if err := g.Add(msg.Key, msg.App); err != nil {
-			cerr <- err
-		}
-	default:
+		return g.Add(msg.Key, msg.App)
 	}
-}
-
-func (g *gronos[K]) drainMessages(cerr chan<- error) {
-	for {
-		select {
-		case m, ok := <-g.com:
-			if !ok {
-				// Channel closed, all messages processed
-				return
-			}
-			g.handleMessage(m, cerr)
-		}
-	}
-}
-
-type ctxKey string
-
-var comKey ctxKey = "com"
-
-func (g *gronos[K]) createContext() context.Context {
-	ctx := context.Background()
-	ctx = context.WithValue(ctx, comKey, g.com)
-	return ctx
+	return nil
 }
 
 func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 	if _, ok := g.applications.Load(k); ok {
 		return fmt.Errorf("application with key %v already exists", k)
 	}
+	if g.ctx.Err() != nil {
+		return fmt.Errorf("context is already cancelled")
+	}
+
+	ctx, cancelFunc := context.WithCancel(g.ctx)
+	shutdown := make(chan struct{})
+
 	appCtx := applicationContext[K]{
 		k:        k,
 		app:      v,
-		ctx:      g.createContext(),
+		ctx:      ctx,
 		com:      g.com,
 		retries:  0,
-		shutdown: make(chan struct{}),
+		shutdown: shutdown,
 		reason:   nil,
 		alive:    true,
 	}
 
 	appCtx.closer = sync.OnceFunc(func() {
-		close(appCtx.shutdown)
+		close(shutdown)
+		g.wait.Done()
+	})
+
+	appCtx.cancel = sync.OnceFunc(func() {
+		cancelFunc()
+		appCtx.closer()
 	})
 
 	g.applications.Store(k, appCtx)
@@ -185,12 +227,35 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 				return ctx.app(ctx.ctx, ctx.shutdown)
 			}, retry.Attempts(ctx.retries))
 		}
-		if err != nil {
-			g.com <- DeadLetter[K]{Key: key, Reason: err}
+		if err != nil && err != context.Canceled {
+			select {
+			case g.com <- DeadLetter[K]{Key: key, Reason: err}:
+			case <-g.ctx.Done():
+			}
+		} else if err == context.Canceled {
+			select {
+			case g.com <- ContextTerminated[K]{Key: key, Err: ctx.ctx.Err()}:
+			case <-g.ctx.Done():
+			}
+		} else {
+			select {
+			case g.com <- Terminated[K]{Key: key}:
+			case <-g.ctx.Done():
+			}
 		}
 	}(k, appCtx)
 
 	return nil
+}
+
+type ctxKey string
+
+var comKey ctxKey = "com"
+
+func (g *gronos[K]) createContext() (context.Context, context.CancelFunc) {
+	ctx := context.WithValue(context.Background(), comKey, g.com)
+	ctx, cancel := context.WithCancel(ctx)
+	return ctx, cancel
 }
 
 func UseBus(ctx context.Context) (chan<- message, error) {
