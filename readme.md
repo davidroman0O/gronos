@@ -2,9 +2,9 @@
 
 Gronos is a minimalistic concurrent application management tool. 
 
-It manage multiple concurrent applications, with features like dynamic application addition, customizable execution modes, and built-in error handling.
+It manages multiple concurrent applications, with features like dynamic application addition, customizable execution modes, and built-in error handling.
 
-I was tired of writting the same boilerplates all the time so I wrote `gronos`, my now go-to for bootstrapping the runtime of my apps.
+I was tired of writing the same boilerplates all the time so I wrote `gronos`, my now go-to for bootstrapping the runtime of my apps.
 
 ## Features
 
@@ -153,6 +153,40 @@ clock := gronos.NewClock(
 clock.Add(&MyTicker{}, gronos.NonBlocking)
 clock.Start()
 ```
+
+### ExecutionMode
+
+Gronos supports different execution modes for workers and clock tickers. These modes define how tasks are scheduled and executed:
+
+1. **NonBlocking**
+   - Tasks are executed asynchronously in their own goroutine.
+   - Suitable for tasks that can run independently and don't need to maintain strict timing.
+   - Example use case: Background data processing that doesn't need precise scheduling.
+
+2. **ManagedTimeline**
+   - Tasks are executed sequentially, maintaining the order of scheduled executions.
+   - If a task takes longer than the scheduled interval, subsequent executions are delayed to maintain the timeline.
+   - Suitable for tasks where the order of execution is important and missed executions should be caught up.
+   - Example use case: Financial transactions that must be processed in order.
+
+3. **BestEffort**
+   - Tasks are scheduled to run as close to their intended time as possible.
+   - If a task is delayed (e.g., due to system load), the system will try to catch up, but may skip executions if too far behind.
+   - Strikes a balance between maintaining schedule and system performance.
+   - Example use case: Regular system health checks where occasional missed checks are acceptable.
+
+When using `Worker` or `Clock.Add()`, you can specify the execution mode:
+
+```go
+worker := gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
+    // This task will maintain its timeline, even if executions are delayed
+    return nil
+})
+
+clock.Add(&MyTicker{}, gronos.BestEffort)
+```
+
+Choose the appropriate execution mode based on your task's requirements for timing accuracy, order preservation, and system load considerations.
 
 ## Contributing
 
