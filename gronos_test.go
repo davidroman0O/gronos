@@ -1,460 +1,360 @@
-package gronos
+package nonos
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestClock(t *testing.T) {
-	t.Run("AddAndDispatchTicks", func(t *testing.T) {
-		clock := NewClock(WithInterval(10 * time.Millisecond))
-		ticker := &mockTicker{}
-		clock.Add(ticker, NonBlocking)
+func TestGronos(t *testing.T) {
+	t.Run("Basic functionality", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-		clock.Start()
-		time.Sleep(100 * time.Millisecond)
-		clock.Stop()
+		appStarted := make(chan struct{})
+		appFinished := make(chan struct{})
 
-		assert.GreaterOrEqual(t, ticker.tickCount.Load(), int64(4), "Expected at least 4 ticks")
-	})
-
-	t.Run("MultipleTickerModes", func(t *testing.T) {
-		clock := NewClock(WithInterval(10 * time.Millisecond))
-		nonBlockingTicker := &mockTicker{}
-		managedTicker := &mockTicker{}
-		bestEffortTicker := &mockTicker{}
-
-		clock.Add(nonBlockingTicker, NonBlocking)
-		clock.Add(managedTicker, ManagedTimeline)
-		clock.Add(bestEffortTicker, BestEffort)
-
-		clock.Start()
-		time.Sleep(100 * time.Millisecond)
-		clock.Stop()
-
-		assert.GreaterOrEqual(t, nonBlockingTicker.tickCount.Load(), int64(4), "Expected at least 4 ticks for NonBlocking")
-		assert.GreaterOrEqual(t, managedTicker.tickCount.Load(), int64(4), "Expected at least 4 ticks for ManagedTimeline")
-		assert.GreaterOrEqual(t, bestEffortTicker.tickCount.Load(), int64(4), "Expected at least 4 ticks for BestEffort")
-	})
-}
-
-func TestAppManager(t *testing.T) {
-	t.Run("AddAndShutdownApplication", func(t *testing.T) {
-		am := NewAppManager[string](5 * time.Second)
-		appName := "testApp"
-
-		app := func(ctx context.Context, shutdown chan struct{}) error {
-			<-ctx.Done()
-			return nil
-		}
-
-		err := am.AddApplication(appName, app)
-		require.NoError(t, err)
-
-		err = am.ShutdownApplication(appName)
-		require.NoError(t, err)
-	})
-
-	t.Run("GracefulShutdown", func(t *testing.T) {
-		am := NewAppManager[string](1 * time.Second)
-
-		app := func(ctx context.Context, shutdown chan struct{}) error {
-			<-ctx.Done()
-			time.Sleep(500 * time.Millisecond)
-			return nil
-		}
-
-		err := am.AddApplication("app1", app)
-		require.NoError(t, err)
-		err = am.AddApplication("app2", app)
-		require.NoError(t, err)
-
-		err = am.GracefulShutdown()
-		require.NoError(t, err)
-	})
-}
-
-func TestMiddlewaresWithAppManager(t *testing.T) {
-	tests := []struct {
-		name       string
-		middleware func(time.Duration, RuntimeApplication) RuntimeApplication
-	}{
-		{"NonBlockingMiddleware", NonBlockingMiddleware},
-		{"ManagedTimelineMiddleware", ManagedTimelineMiddleware},
-		{"BestEffortMiddleware", BestEffortMiddleware},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			am := NewAppManager[string](5 * time.Second)
-			shutdownChan, errChan := am.Run(nil)
-			defer close(shutdownChan)
-
-			executionCount := atomic.Int64{}
-			done := make(chan struct{})
-			middleware := tt.middleware(50*time.Millisecond, func(ctx context.Context, shutdown chan struct{}) error {
-				count := executionCount.Add(1)
-				t.Logf("Execution count: %d", count)
-				if count == 6 {
-					t.Log("Sending test error")
-					close(done)
-					return fmt.Errorf("test error")
-				}
-				return nil
-			})
-
-			err := am.AddApplication(tt.name, middleware)
-			require.NoError(t, err)
-
-			select {
-			case <-done:
-				// Wait for the error to be sent
+		g := New[string](ctx, map[string]RuntimeApplication{
+			"test-app": func(ctx context.Context, shutdown <-chan struct{}) error {
+				close(appStarted)
 				select {
-				case err := <-errChan:
-					require.Error(t, err)
-					require.Contains(t, err.Error(), "test error")
-				case <-time.After(1 * time.Second):
-					t.Fatal("Timeout waiting for error from AppManager")
+				case <-ctx.Done():
+					close(appFinished)
+					return ctx.Err()
+				case <-shutdown:
+					close(appFinished)
+					return nil
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("Timeout waiting for middleware to complete")
-			}
-
-			// Wait for the application to be removed
-			time.Sleep(100 * time.Millisecond)
-
-			// Check if the application has been removed
-			_, loaded := am.apps.Load(tt.name)
-			require.False(t, loaded, "Application should have been removed")
+			},
 		})
-	}
-}
 
-type mockTicker struct {
-	tickCount atomic.Int64
-}
+		errors := g.Start()
 
-func (mt *mockTicker) Tick() {
-	mt.tickCount.Add(1)
-}
-
-func TestDataRaceFreedom(t *testing.T) {
-	t.Run("ClockConcurrency", func(t *testing.T) {
-		clock := NewClock(WithInterval(1 * time.Millisecond))
-		var wg sync.WaitGroup
-
-		for i := 0; i < 100; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				ticker := &mockTicker{}
-				clock.Add(ticker, NonBlocking)
-			}()
+		select {
+		case <-appStarted:
+			// App started successfully
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for app to start")
 		}
 
-		clock.Start()
-		wg.Wait()
-		clock.Stop()
+		g.Shutdown()
+
+		select {
+		case <-appFinished:
+			// App finished successfully
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for app to finish")
+		}
+
+		g.Wait()
+
+		select {
+		case err, ok := <-errors:
+			if ok {
+				if err != nil && err != context.Canceled {
+					t.Fatalf("Unexpected error: %v", err)
+				}
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
+		}
 	})
 
-	t.Run("AppManagerConcurrency", func(t *testing.T) {
-		am := NewAppManager[string](5 * time.Second)
-		var wg sync.WaitGroup
+	t.Run("Multiple applications", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-		app := func(ctx context.Context, shutdown chan struct{}) error {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-shutdown:
-				return nil
+		appCount := 3
+		appStarted := make([]chan struct{}, appCount)
+		appFinished := make([]chan struct{}, appCount)
+
+		apps := make(map[string]RuntimeApplication)
+		for i := 0; i < appCount; i++ {
+			appStarted[i] = make(chan struct{})
+			appFinished[i] = make(chan struct{})
+			index := i
+			apps[fmt.Sprintf("app-%d", i)] = func(ctx context.Context, shutdown <-chan struct{}) error {
+				close(appStarted[index])
+				<-ctx.Done()
+				close(appFinished[index])
+				return ctx.Err()
 			}
 		}
 
-		for i := 0; i < 100; i++ {
+		g := New[string](ctx, apps)
+		errors := g.Start()
+
+		for i := 0; i < appCount; i++ {
+			select {
+			case <-appStarted[i]:
+				// App started successfully
+			case <-time.After(time.Second):
+				t.Fatalf("Timeout waiting for app %d to start", i)
+			}
+		}
+
+		cancel() // Cancel the context to trigger shutdown
+
+		for i := 0; i < appCount; i++ {
+			select {
+			case <-appFinished[i]:
+				// App finished successfully
+			case <-time.After(2 * time.Second):
+				t.Fatalf("Timeout waiting for app %d to finish", i)
+			}
+		}
+
+		g.Wait()
+
+		select {
+		case err, ok := <-errors:
+			if ok {
+				if err != context.Canceled && err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
+		}
+	})
+
+	t.Run("Application with error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		expectedError := fmt.Errorf("test error")
+
+		g := New[string](ctx, map[string]RuntimeApplication{
+			"error-app": func(ctx context.Context, shutdown <-chan struct{}) error {
+				return expectedError
+			},
+		})
+
+		errors := g.Start()
+
+		select {
+		case err := <-errors:
+			if err == nil {
+				t.Fatal("Expected an error, got nil")
+			}
+			if !strings.Contains(err.Error(), "test error") {
+				t.Fatalf("Expected error containing 'test error', got %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timeout waiting for error")
+		}
+
+		g.Shutdown()
+		g.Wait()
+	})
+
+	t.Run("Dynamic application addition", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		g := New[string](ctx, nil)
+		errors := g.Start()
+
+		appStarted := make(chan struct{})
+		appFinished := make(chan struct{})
+
+		err := g.Add("dynamic-app", func(ctx context.Context, shutdown <-chan struct{}) error {
+			close(appStarted)
+			<-ctx.Done()
+			close(appFinished)
+			return ctx.Err()
+		})
+		if err != nil {
+			t.Fatalf("Failed to add dynamic app: %v", err)
+		}
+
+		select {
+		case <-appStarted:
+			// App started successfully
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for dynamic app to start")
+		}
+
+		cancel() // Cancel the context to trigger shutdown
+
+		select {
+		case <-appFinished:
+			// App finished successfully
+		case <-time.After(2 * time.Second):
+			t.Fatal("Timeout waiting for dynamic app to finish")
+		}
+
+		g.Wait()
+
+		select {
+		case err, ok := <-errors:
+			if ok {
+				if err != context.Canceled && err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
+		}
+	})
+
+	t.Run("Race condition test", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		g := New[string](ctx, nil)
+		errors := g.Start()
+
+		var wg sync.WaitGroup
+		appCount := 100
+
+		for i := 0; i < appCount; i++ {
 			wg.Add(1)
-			go func(i int) {
+			go func(index int) {
 				defer wg.Done()
-				err := am.AddApplication(fmt.Sprintf("app%d", i), app)
-				require.NoError(t, err)
+				appKey := fmt.Sprintf("app-%d", index)
+				app := func(ctx context.Context, shutdown <-chan struct{}) error {
+					<-ctx.Done()
+					return ctx.Err()
+				}
+
+				if err := g.Add(appKey, app); err != nil {
+					t.Errorf("Failed to add app %s: %v", appKey, err)
+				}
 			}(i)
 		}
 
 		wg.Wait()
 
-		for i := 0; i < 100; i++ {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				err := am.ShutdownApplication(fmt.Sprintf("app%d", i))
-				require.NoError(t, err)
-			}(i)
+		if g.keys.Length() != appCount {
+			t.Errorf("Expected %d apps, got %d", appCount, g.keys.Length())
 		}
 
-		wg.Wait()
+		cancel() // Cancel the context to trigger shutdown
+		g.Wait()
+
+		select {
+		case err, ok := <-errors:
+			if ok {
+				if err != context.Canceled && err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for error channel to close")
+		}
 	})
 }
 
-func TestTickerSubscriberDynamicInterval(t *testing.T) {
-	clock := NewClock(WithInterval(5 * time.Millisecond))
-	ticker := &mockTicker{}
-	clock.Add(ticker, NonBlocking)
+func TestWorker(t *testing.T) {
+	t.Run("Basic worker functionality", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	subscriber, _ := clock.subs.Load(ticker)
-	ts := subscriber.(*TickerSubscriber)
-
-	ts.DynamicInterval = func(elapsedTime time.Duration) time.Duration {
-		return 5 * time.Millisecond
-	}
-
-	clock.Start()
-	time.Sleep(150 * time.Millisecond)
-	clock.Stop()
-
-	assert.GreaterOrEqual(t, ticker.tickCount.Load(), int64(10), "Expected at least 10 ticks with dynamic interval")
-}
-
-func TestAppManagerMultipleApplications(t *testing.T) {
-	am := NewAppManager[string](5 * time.Second)
-	appName1 := "testApp1"
-	appName2 := "testApp2"
-
-	app := func(ctx context.Context, shutdown chan struct{}) error {
-		<-shutdown
-		return nil
-	}
-
-	err := am.AddApplication(appName1, app)
-	require.NoError(t, err)
-
-	err = am.AddApplication(appName2, app)
-	require.NoError(t, err)
-
-	err = am.ShutdownApplication(appName1)
-	require.NoError(t, err)
-
-	err = am.ShutdownApplication(appName2)
-	require.NoError(t, err)
-}
-
-func TestAppManagerGracefulShutdownWithLongRunningApps(t *testing.T) {
-	am := NewAppManager[string](2 * time.Second)
-
-	app := func(ctx context.Context, shutdown chan struct{}) error {
-		select {
-		case <-ctx.Done():
-			time.Sleep(1 * time.Second)
+		var tickCount int32
+		interval := 100 * time.Millisecond
+		worker := Worker(interval, NonBlocking, func(ctx context.Context) error {
+			atomic.AddInt32(&tickCount, 1)
 			return nil
-		case <-shutdown:
-			return nil
+		})
+
+		shutdown := make(chan struct{})
+		done := make(chan struct{})
+
+		go func() {
+			err := worker(ctx, shutdown)
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			close(done)
+		}()
+
+		time.Sleep(550 * time.Millisecond) // Allow for 5 ticks (with some margin)
+		close(shutdown)
+
+		<-done
+
+		finalCount := atomic.LoadInt32(&tickCount)
+		if finalCount < 4 || finalCount > 6 {
+			t.Errorf("Expected around 5 ticks, got %d", finalCount)
 		}
-	}
+	})
 
-	err := am.AddApplication("app1", app)
-	require.NoError(t, err)
-	err = am.AddApplication("app2", app)
-	require.NoError(t, err)
+	t.Run("Worker with error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	start := time.Now()
-	err = am.GracefulShutdown()
-	require.NoError(t, err)
+		expectedError := fmt.Errorf("worker error")
+		interval := 100 * time.Millisecond
+		worker := Worker(interval, NonBlocking, func(ctx context.Context) error {
+			return expectedError
+		})
 
-	elapsed := time.Since(start)
-	assert.Less(t, elapsed, 3*time.Second, "Graceful shutdown should complete within 3 seconds")
-}
+		shutdown := make(chan struct{})
+		errChan := make(chan error, 1)
 
-func TestMiddlewareErrorHandling(t *testing.T) {
-	am := NewAppManager[string](5 * time.Second)
-	appName := "errorApp"
-
-	app := func(ctx context.Context, shutdown chan struct{}) error {
-		return fmt.Errorf("expected error")
-	}
-
-	wrappedApp := NonBlockingMiddleware(50*time.Millisecond, app)
-
-	err := am.AddApplication(appName, wrappedApp)
-	require.NoError(t, err)
-
-	shutdownChan, errChan := am.Run(nil)
-
-	var receivedErr error
-	select {
-	case err, ok := <-errChan:
-		if !ok {
-			t.Fatal("Error channel closed unexpectedly")
-		}
-		receivedErr = err
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for error from AppManager")
-	}
-
-	assert.Error(t, receivedErr)
-	assert.Contains(t, receivedErr.Error(), "expected error")
-
-	close(shutdownChan)
-}
-
-func TestMiddlewareTickFrequency(t *testing.T) {
-	am := NewAppManager[string](5 * time.Second)
-	executionCount := atomic.Int64{}
-	appName := "tickFreqApp"
-
-	app := func(ctx context.Context, shutdown chan struct{}) error {
-		executionCount.Add(1)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-shutdown:
-			return nil
-		case <-time.After(10 * time.Millisecond):
-			return nil
-		}
-	}
-
-	wrappedApp := NonBlockingMiddleware(50*time.Millisecond, app)
-
-	err := am.AddApplication(appName, wrappedApp)
-	require.NoError(t, err)
-
-	shutdownChan, _ := am.Run(nil)
-
-	time.Sleep(700 * time.Millisecond)
-	close(shutdownChan)
-
-	finalCount := executionCount.Load()
-	assert.GreaterOrEqual(t, finalCount, int64(8), "Expected at least 8 ticks within 500ms")
-}
-
-func TestApplicationShuttingDownOtherApplications(t *testing.T) {
-	am := NewAppManager[string](5 * time.Second)
-	shutdownChan, errChan := am.Run(nil)
-	defer close(shutdownChan)
-
-	appName := "shutdownTestApp"
-	err := am.AddApplication(appName, RuntimeApplication(func(ctx context.Context, shutdown chan struct{}) error {
-		select {
-		case <-time.After(1 * time.Second):
-			t.Logf("Sending shutdown signal for %s", appName)
-			return fmt.Errorf("test shutdown")
-		case <-shutdown:
-			t.Logf("Received shutdown signal for %s", appName)
-			return nil
-		}
-	}))
-	require.NoError(t, err)
-
-	select {
-	case err := <-errChan:
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "test shutdown")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timeout waiting for error from AppManager")
-	}
-
-	// Wait for the application to be removed
-	time.Sleep(100 * time.Millisecond)
-
-	// Check if the application has been removed
-	_, loaded := am.apps.Load(appName)
-	require.False(t, loaded, "Application should have been removed")
-}
-
-func TestApplicationAddingOtherApplications(t *testing.T) {
-	am := NewAppManager[string](5 * time.Second)
-
-	childAppName := "childApp"
-	parentAppName := "parentApp"
-
-	childAppAdded := make(chan struct{})
-	childAppShutdown := make(chan struct{})
-
-	childApp := func(ctx context.Context, shutdown chan struct{}) error {
-		close(childAppAdded)
-		t.Log("Child app started")
+		go func() {
+			errChan <- worker(ctx, shutdown)
+		}()
 
 		select {
-		case <-ctx.Done():
-			t.Log("Child app context done")
-			close(childAppShutdown)
-			return ctx.Err()
-		case <-shutdown:
-			t.Log("Child app received shutdown signal")
-			close(childAppShutdown)
-			return nil
+		case err := <-errChan:
+			if err != expectedError {
+				t.Errorf("Expected error %v, got %v", expectedError, err)
+			}
+		case <-time.After(1 * time.Second): // Increased timeout
+			t.Fatal("Timeout waiting for worker error")
 		}
-	}
+	})
 
-	parentAppAdded := make(chan struct{})
-	parentAppShutdown := make(chan struct{})
-
-	parentApp := func(ctx context.Context, shutdown chan struct{}) error {
-		close(parentAppAdded)
-		t.Log("Parent app started")
-
-		UseAdd(ctx, am.useAddChan, childAppName, childApp)
-
-		<-childAppAdded
-		t.Log("Child app is now running")
-
-		t.Log("Parent app initiating shutdown of child")
-		UseShutdown(ctx, am.useShutdownChan, childAppName)
-
-		<-childAppShutdown
-		t.Log("Child app has completed")
-
-		select {
-		case <-ctx.Done():
-			t.Log("Parent app context done")
-			close(parentAppShutdown)
-			return ctx.Err()
-		case <-shutdown:
-			t.Log("Parent app received shutdown signal")
-			close(parentAppShutdown)
-			return nil
+	t.Run("Worker with different execution modes", func(t *testing.T) {
+		testCases := []struct {
+			name string
+			mode ExecutionMode
+		}{
+			{"NonBlocking", NonBlocking},
+			{"ManagedTimeline", ManagedTimeline},
+			{"BestEffort", BestEffort},
 		}
-	}
 
-	err := am.AddApplication(parentAppName, parentApp)
-	require.NoError(t, err)
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 
-	shutdownMainChan, errChan := am.Run(nil)
+				var tickCount int32
+				interval := 100 * time.Millisecond
+				worker := Worker(interval, tc.mode, func(ctx context.Context) error {
+					atomic.AddInt32(&tickCount, 1)
+					time.Sleep(50 * time.Millisecond) // Simulate some work
+					return nil
+				})
 
-	<-parentAppAdded
-	t.Log("Parent app added")
+				shutdown := make(chan struct{})
+				done := make(chan struct{})
 
-	time.Sleep(100 * time.Millisecond) // Give some time for apps to start
+				go func() {
+					err := worker(ctx, shutdown)
+					if err != nil {
+						t.Errorf("Unexpected error: %v", err)
+					}
+					close(done)
+				}()
 
-	close(shutdownMainChan) // Initiate shutdown of all apps
+				time.Sleep(550 * time.Millisecond) // Allow for 5 ticks (with some margin)
+				close(shutdown)
 
-	select {
-	case <-parentAppShutdown:
-		t.Log("Parent app shut down")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timeout waiting for parent app to shut down")
-	}
+				<-done
 
-	// Check for any errors
-	select {
-	case err := <-errChan:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("Unexpected error: %v", err)
+				finalCount := atomic.LoadInt32(&tickCount)
+				if finalCount < 3 || finalCount > 6 {
+					t.Errorf("Expected 3-6 ticks for %s mode, got %d", tc.name, finalCount)
+				}
+			})
 		}
-	default:
-	}
-
-	// Verify both apps are removed
-	_, parentLoaded := am.apps.Load(parentAppName)
-	require.False(t, parentLoaded, "Parent app should be unloaded")
-	_, childLoaded := am.apps.Load(childAppName)
-	require.False(t, childLoaded, "Child app should be unloaded")
-
-	t.Log("Test completed successfully")
+	})
 }

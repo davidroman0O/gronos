@@ -1,264 +1,308 @@
-package gronos
+package nonos
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
+	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/avast/retry-go/v3"
 )
 
-type AppState int
+type RuntimeApplication func(ctx context.Context, shutdown <-chan struct{}) error
 
-const (
-	StateStarted AppState = iota
-	StateRunning
-	StateCompleted
-	StateError
-)
+type message interface{}
 
-type RuntimeKey comparable
-
-type RuntimeApplication func(ctx context.Context, shutdown chan struct{}) error
-
-type Ticker interface {
-	Tick()
+type gronos[K comparable] struct {
+	applications sync.Map
+	keys         ConcurrentArray[K]
+	com          chan message
+	wait         sync.WaitGroup
+	ctx          context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
 }
 
-type ExecutionMode int
-
-const (
-	NonBlocking ExecutionMode = iota
-	ManagedTimeline
-	BestEffort
-)
-
-type TickerSubscriber struct {
-	Ticker          Ticker
-	Mode            ExecutionMode
-	lastExecTime    atomic.Value
-	Priority        int
-	DynamicInterval func(elapsedTime time.Duration) time.Duration
+type DeadLetter[K comparable] struct {
+	Key    K
+	Reason error
 }
 
-type AppManagerMsg[Key RuntimeKey] struct {
-	name   Key
-	app    RuntimeApplication
-	parent Key
+type Terminated[K comparable] struct {
+	Key K
 }
 
-type AppManager[Key RuntimeKey] struct {
-	apps            sync.Map
-	errChan         chan error
-	ctx             context.Context
-	cancel          context.CancelFunc
-	useAddChan      chan AppManagerMsg[Key]
-	useShutdownChan chan Key
-	shutdownTimer   time.Duration
-	mu              sync.Mutex
-	closed          bool
-	once            sync.Once
-	childApps       map[Key][]Key
-	childAppsMutex  sync.RWMutex
+type ContextTerminated[K comparable] struct {
+	Key K
+	Err error
 }
 
-func NewAppManager[Key RuntimeKey](timeout time.Duration) *AppManager[Key] {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	return &AppManager[Key]{
-		errChan:         make(chan error),
-		ctx:             ctx,
-		cancel:          cancel,
-		useAddChan:      make(chan AppManagerMsg[Key]),
-		useShutdownChan: make(chan Key),
-		shutdownTimer:   timeout,
-		childApps:       make(map[Key][]Key),
+type Add[K comparable] struct {
+	Key K
+	App RuntimeApplication
+}
+
+type applicationContext[K comparable] struct {
+	k        K
+	app      RuntimeApplication
+	ctx      context.Context
+	com      chan message
+	retries  uint
+	alive    bool
+	reason   error
+	shutdown chan struct{}
+	closer   func() // proxy function to close the channel shutdown
+	cancel   func() // proxy function to cancel the context
+}
+
+func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gronos[K] {
+	ctx, cancel := context.WithCancel(ctx)
+	g := &gronos[K]{
+		com:    make(chan message, 200),
+		keys:   ConcurrentArray[K]{},
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
-}
-
-func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) error {
-	_, loaded := am.apps.LoadOrStore(name, struct {
-		app        RuntimeApplication
-		cancelFunc context.CancelFunc
-		shutdownCh chan struct{}
-	}{app: app, cancelFunc: nil, shutdownCh: make(chan struct{})})
-
-	if loaded {
-		return fmt.Errorf("application with name %v already exists", name)
+	for k, v := range init {
+		g.Add(k, v)
 	}
-
-	appCtx := context.WithValue(am.ctx, appManagerKey, am)
-	appCtx = context.WithValue(appCtx, currentAppKey, name)
-	appCtx, cancelFunc := context.WithCancel(appCtx)
-
-	value, _ := am.apps.Load(name)
-	appStruct := value.(struct {
-		app        RuntimeApplication
-		cancelFunc context.CancelFunc
-		shutdownCh chan struct{}
-	})
-	appStruct.cancelFunc = cancelFunc
-	am.apps.Store(name, appStruct)
-
-	am.childAppsMutex.Lock()
-	am.childApps[name] = []Key{}
-	am.childAppsMutex.Unlock()
-
-	go func() {
-		defer func() {
-			cancelFunc()
-			am.childAppsMutex.Lock()
-			delete(am.childApps, name)
-			am.childAppsMutex.Unlock()
-			am.apps.Delete(name)
-			slog.Info("Application finished", "name", name)
-		}()
-
-		if err := app(appCtx, appStruct.shutdownCh); err != nil {
-			select {
-			case am.errChan <- fmt.Errorf("error from application %v: %w", name, err):
-			default:
-				go func() {
-					am.errChan <- fmt.Errorf("error from application %v: %w", name, err)
-				}()
-			}
-		}
-	}()
-
-	return nil
+	return g
 }
 
-// Add this error to gronos.go:
-var ErrApplicationNotFound = errors.New("application not found")
+func (g *gronos[K]) Start() chan error {
+	errChan := make(chan error, 1)
+	go g.run(errChan)
+	return errChan
+}
 
-func (am *AppManager[Key]) GracefulShutdown() error {
-	ctx, cancel := context.WithTimeout(context.Background(), am.shutdownTimer)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	am.apps.Range(func(key, value interface{}) bool {
-		wg.Add(1)
-		go func(name Key, app struct {
-			app        RuntimeApplication
-			cancelFunc context.CancelFunc
-			shutdownCh chan struct{}
-		}) {
-			defer wg.Done()
-			app.cancelFunc()
-			select {
-			case <-app.shutdownCh:
-			default:
-				close(app.shutdownCh)
-			}
-			slog.Info("Shutting down application", "name", name)
-		}(key.(Key), value.(struct {
-			app        RuntimeApplication
-			cancelFunc context.CancelFunc
-			shutdownCh chan struct{}
-		}))
-		return true
-	})
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
+func (g *gronos[K]) Shutdown() {
+	g.cancel()
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-done:
-		return nil
+	case <-g.done:
+		// Shutdown completed successfully
+	case <-time.After(5 * time.Second):
+		// Timeout occurred, log a warning
+		fmt.Println("Warning: Shutdown timed out after 5 seconds")
 	}
 }
 
-func (am *AppManager[Key]) ShutdownApplication(name Key) error {
-	value, loaded := am.apps.LoadAndDelete(name)
-	if !loaded {
-		return fmt.Errorf("application with name %v not found", name)
-	}
-
-	app := value.(struct {
-		app        RuntimeApplication
-		cancelFunc context.CancelFunc
-		shutdownCh chan struct{}
-	})
-
-	app.cancelFunc()
-
-	select {
-	case <-app.shutdownCh:
-		// Channel is already closed, do nothing
-	default:
-		close(app.shutdownCh)
-	}
-
-	am.childAppsMutex.RLock()
-	childApps := am.childApps[name]
-	am.childAppsMutex.RUnlock()
-
-	for _, childName := range childApps {
-		if err := am.ShutdownApplication(childName); err != nil {
-			slog.Error("Failed to shutdown child application", "parent", name, "child", childName, "error", err)
-		}
-	}
-
-	am.childAppsMutex.Lock()
-	delete(am.childApps, name)
-	am.childAppsMutex.Unlock()
-
-	slog.Info("Application shut down", "name", name)
-	return nil
+func (g *gronos[K]) Wait() {
+	<-g.done
 }
 
-func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, <-chan error) {
-	for name, app := range apps {
-		if err := am.AddApplication(name, app); err != nil {
-			slog.Error("Failed to add application", "name", name, "error", err)
-		}
-	}
+func (g *gronos[K]) run(errChan chan<- error) {
+	defer close(g.done)
+	defer close(errChan)
 
-	shutdownChan := make(chan struct{})
-	errChan := make(chan error, 100) // Buffered channel to avoid blocking
-
-	var mu sync.Mutex
-	go func() {
-		for {
-			select {
-			case msg := <-am.useAddChan:
-				mu.Lock()
-				if err := am.AddApplication(msg.name, msg.app); err != nil {
-					slog.Error("Failed to add application via UseAdd", "name", msg.name, "error", err)
-				} else {
-					am.childAppsMutex.Lock()
-					am.childApps[msg.parent] = append(am.childApps[msg.parent], msg.name)
-					am.childAppsMutex.Unlock()
-				}
-				mu.Unlock()
-			case name := <-am.useShutdownChan:
-				mu.Lock()
-				if err := am.ShutdownApplication(name); err != nil {
-					slog.Error("Failed to shut down application via UseShutdown", "name", name, "error", err)
-				}
-				mu.Unlock()
-			case <-shutdownChan:
-				mu.Lock()
-				if err := am.GracefulShutdown(); err != nil {
-					select {
-					case errChan <- fmt.Errorf("error during graceful shutdown: %w", err):
-					default:
-						slog.Error("Failed to send shutdown error to channel", "error", err)
-					}
-				}
-				am.cancel()
-				close(errChan)
-				mu.Unlock()
+	for {
+		select {
+		case <-g.ctx.Done():
+			g.shutdownApps()
+			errChan <- g.ctx.Err() // Propagate the context error
+			return
+		case m, ok := <-g.com:
+			if !ok {
 				return
 			}
+			if err := g.handleMessage(m); err != nil {
+				errChan <- err
+			}
 		}
-	}()
+		runtime.Gosched()
+	}
+}
 
-	return shutdownChan, errChan
+func (g *gronos[K]) shutdownApps() {
+	var wg sync.WaitGroup
+	g.applications.Range(func(key, value interface{}) bool {
+		app := value.(applicationContext[K])
+		if app.alive {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				app.cancel()
+				<-app.shutdown
+			}()
+		}
+		return true
+	})
+	wg.Wait()
+}
+
+func (g *gronos[K]) handleMessage(m message) error {
+	switch msg := m.(type) {
+	case DeadLetter[K]:
+		var value any
+		var app applicationContext[K]
+		var ok bool
+		if value, ok = g.applications.Load(msg.Key); !ok {
+			return nil
+		}
+		if app, ok = value.(applicationContext[K]); !ok {
+			return nil
+		}
+		app.alive = false
+		app.reason = msg.Reason
+		app.closer()
+		g.applications.Store(app.k, app)
+		if msg.Reason != nil && msg.Reason.Error() != "shutdown" {
+			return fmt.Errorf("app error %v %v", msg.Key, msg.Reason)
+		}
+	case Terminated[K]:
+		var value any
+		var app applicationContext[K]
+		var ok bool
+		if value, ok = g.applications.Load(msg.Key); !ok {
+			return nil
+		}
+		if app, ok = value.(applicationContext[K]); !ok {
+			return nil
+		}
+		app.alive = false
+		app.closer()
+		g.applications.Store(app.k, app)
+	case ContextTerminated[K]:
+		var value any
+		var app applicationContext[K]
+		var ok bool
+		if value, ok = g.applications.Load(msg.Key); !ok {
+			return nil
+		}
+		if app, ok = value.(applicationContext[K]); !ok {
+			return nil
+		}
+		app.alive = false
+		app.cancel()
+		g.applications.Store(app.k, app)
+	case Add[K]:
+		return g.Add(msg.Key, msg.App)
+	}
+	return nil
+}
+
+func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
+	if _, ok := g.applications.Load(k); ok {
+		return fmt.Errorf("application with key %v already exists", k)
+	}
+	if g.ctx.Err() != nil {
+		return fmt.Errorf("context is already cancelled")
+	}
+
+	ctx, cancelFunc := context.WithCancel(g.ctx)
+	shutdown := make(chan struct{})
+
+	appCtx := applicationContext[K]{
+		k:        k,
+		app:      v,
+		ctx:      ctx,
+		com:      g.com,
+		retries:  0,
+		shutdown: shutdown,
+		reason:   nil,
+		alive:    true,
+	}
+
+	appCtx.closer = sync.OnceFunc(func() {
+		close(shutdown)
+		g.wait.Done()
+	})
+
+	appCtx.cancel = sync.OnceFunc(func() {
+		cancelFunc()
+		appCtx.closer()
+	})
+
+	g.applications.Store(k, appCtx)
+	g.keys.Append(k)
+	g.wait.Add(1)
+
+	go func(key K, ctx applicationContext[K]) {
+		var err error
+		if ctx.retries == 0 {
+			err = ctx.app(ctx.ctx, ctx.shutdown)
+		} else {
+			err = retry.Do(func() error {
+				return ctx.app(ctx.ctx, ctx.shutdown)
+			}, retry.Attempts(ctx.retries))
+		}
+		if err != nil && err != context.Canceled {
+			select {
+			case g.com <- DeadLetter[K]{Key: key, Reason: err}:
+			case <-g.ctx.Done():
+			}
+		} else if err == context.Canceled {
+			select {
+			case g.com <- ContextTerminated[K]{Key: key, Err: ctx.ctx.Err()}:
+			case <-g.ctx.Done():
+			}
+		} else {
+			select {
+			case g.com <- Terminated[K]{Key: key}:
+			case <-g.ctx.Done():
+			}
+		}
+	}(k, appCtx)
+
+	return nil
+}
+
+type ctxKey string
+
+var comKey ctxKey = "com"
+
+func (g *gronos[K]) createContext() (context.Context, context.CancelFunc) {
+	ctx := context.WithValue(context.Background(), comKey, g.com)
+	ctx, cancel := context.WithCancel(ctx)
+	return ctx, cancel
+}
+
+func UseBus(ctx context.Context) (chan<- message, error) {
+	value := ctx.Value(comKey)
+	if value == nil {
+		return nil, fmt.Errorf("com not found in context")
+	}
+	return value.(chan message), nil
+}
+
+type TickingApplication func(context.Context) error
+
+type tickerWrapper struct {
+	clock *Clock
+	ctx   context.Context
+	app   TickingApplication
+	cerr  chan error
+}
+
+func (t tickerWrapper) Tick() {
+	if err := t.app(t.ctx); err != nil {
+		t.clock.Stop()
+		t.cerr <- err
+	}
+}
+
+func Worker(interval time.Duration, mode ExecutionMode, app TickingApplication) RuntimeApplication {
+	return func(ctx context.Context, shutdown <-chan struct{}) error {
+		w := &tickerWrapper{
+			clock: NewClock(WithInterval(interval)),
+			ctx:   ctx,
+			app:   app,
+			cerr:  make(chan error, 1),
+		}
+		w.clock.Add(w, mode)
+		w.clock.Start()
+
+		select {
+		case <-ctx.Done():
+			w.clock.Stop()
+			return ctx.Err()
+		case <-shutdown:
+			w.clock.Stop()
+			return nil
+		case err := <-w.cerr:
+			w.clock.Stop()
+			return err
+		}
+	}
 }

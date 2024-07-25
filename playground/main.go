@@ -11,6 +11,7 @@ import (
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	nono := nonos.New[string](ctx, map[string]nonos.RuntimeApplication{
 		"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
 			fmt.Println("app1 started")
