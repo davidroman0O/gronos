@@ -2,6 +2,7 @@ package gronos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -9,31 +10,31 @@ import (
 	"time"
 )
 
-// RuntimeKey is a type constraint for keys used in runtime management.
+type AppState int
+
+const (
+	StateStarted AppState = iota
+	StateRunning
+	StateCompleted
+	StateError
+)
+
 type RuntimeKey comparable
 
-// RuntimeApplication defines a function type for applications managed by AppManager.
-// The application receives a context and a shutdown channel and returns an error.
 type RuntimeApplication func(ctx context.Context, shutdown chan struct{}) error
 
-// Ticker is an interface for objects that need to be periodically ticked.
 type Ticker interface {
 	Tick()
 }
 
-// ExecutionMode represents the mode of execution for TickerSubscribers.
 type ExecutionMode int
 
 const (
-	// NonBlocking mode allows tickers to run in separate goroutines.
 	NonBlocking ExecutionMode = iota
-	// ManagedTimeline mode runs tickers in the main dispatch loop, ensuring order.
 	ManagedTimeline
-	// BestEffort mode tries to run tickers as often as possible, without strict timing guarantees.
 	BestEffort
 )
 
-// TickerSubscriber is a structure that holds information about a subscribed Ticker.
 type TickerSubscriber struct {
 	Ticker          Ticker
 	Mode            ExecutionMode
@@ -42,8 +43,6 @@ type TickerSubscriber struct {
 	DynamicInterval func(elapsedTime time.Duration) time.Duration
 }
 
-// Clock is a structure for managing and dispatching periodic ticks to subscribers.
-// It uses a sync.Map to store TickerSubscribers and dispatches ticks based on a defined interval.
 type Clock struct {
 	name     string
 	interval time.Duration
@@ -54,8 +53,6 @@ type Clock struct {
 	started  atomic.Bool
 }
 
-// NewClock creates a new Clock instance with optional configurations.
-// Options include setting the name and interval of the Clock.
 func NewClock(opts ...ClockOption) *Clock {
 	c := &Clock{
 		interval: 100 * time.Millisecond,
@@ -68,25 +65,20 @@ func NewClock(opts ...ClockOption) *Clock {
 	return c
 }
 
-// ClockOption defines a function type for configuring a Clock.
 type ClockOption func(*Clock)
 
-// WithName sets the name of the Clock.
 func WithName(name string) ClockOption {
 	return func(c *Clock) {
 		c.name = name
 	}
 }
 
-// WithInterval sets the interval for the Clock ticks.
 func WithInterval(interval time.Duration) ClockOption {
 	return func(c *Clock) {
 		c.interval = interval
 	}
 }
 
-// Add registers a Ticker to the Clock with a specific ExecutionMode.
-// It stores the TickerSubscriber in a sync.Map for thread-safe access.
 func (c *Clock) Add(ticker Ticker, mode ExecutionMode) {
 	sub := &TickerSubscriber{
 		Ticker:   ticker,
@@ -100,7 +92,6 @@ func (c *Clock) Add(ticker Ticker, mode ExecutionMode) {
 	c.subs.Store(ticker, sub)
 }
 
-// Start begins the dispatching of ticks to subscribed tickers.
 func (c *Clock) Start() {
 	if !c.started.CompareAndSwap(false, true) {
 		return
@@ -109,7 +100,6 @@ func (c *Clock) Start() {
 	go c.dispatchTicks()
 }
 
-// Stop halts the dispatching of ticks and stops the Clock.
 func (c *Clock) Stop() {
 	if !c.ticking.CompareAndSwap(true, false) {
 		return
@@ -118,7 +108,6 @@ func (c *Clock) Stop() {
 	c.started.Store(false)
 }
 
-// dispatchTicks handles the periodic dispatching of ticks to subscribers.
 func (c *Clock) dispatchTicks() {
 	for {
 		select {
@@ -143,8 +132,6 @@ func (c *Clock) dispatchTicks() {
 	}
 }
 
-// executeTick triggers the Tick method on a subscriber.
-// It updates the last execution time and stores the subscriber back in the sync.Map.
 func (c *Clock) executeTick(key interface{}, sub *TickerSubscriber, now time.Time) {
 	sub.Ticker.Tick()
 	sub.lastExecTime.Store(now)
@@ -152,58 +139,39 @@ func (c *Clock) executeTick(key interface{}, sub *TickerSubscriber, now time.Tim
 }
 
 type AppManagerMsg[Key RuntimeKey] struct {
-	name Key
-	app  RuntimeApplication
+	name   Key
+	app    RuntimeApplication
+	parent Key
 }
 
-// AppManager manages the lifecycle of runtime applications.
-// It uses a sync.Map to store applications and their associated cancellation functions and channels.
-// The generic type Key is used to uniquely identify applications.
 type AppManager[Key RuntimeKey] struct {
-	apps          sync.Map
-	ctx           context.Context
-	cancel        context.CancelFunc
-	errChan       chan error
-	shutdownTimer time.Duration
-	once          sync.Once
-	mu            sync.Mutex
-	closed        bool
-	useAddChan    chan AppManagerMsg[Key]
-	useWaitChan   chan struct{}
+	apps            sync.Map
+	errChan         chan error
+	ctx             context.Context
+	cancel          context.CancelFunc
+	useAddChan      chan AppManagerMsg[Key]
+	useShutdownChan chan Key
+	shutdownTimer   time.Duration
+	mu              sync.Mutex
+	closed          bool
+	once            sync.Once
+	childApps       map[Key][]Key
+	childAppsMutex  sync.RWMutex
 }
 
-// NewAppManager creates a new AppManager with the specified shutdown timeout.
-// The shutdown timer specifies the duration to wait for applications to shut down gracefully.
-func NewAppManager[Key RuntimeKey](shutdownTimer time.Duration) *AppManager[Key] {
-	ctx, cancel := context.WithCancel(context.Background())
-	am := &AppManager[Key]{
-		ctx:           ctx,
-		cancel:        cancel,
-		errChan:       make(chan error, 1),
-		shutdownTimer: shutdownTimer,
-		closed:        false,
-		useAddChan:    make(chan AppManagerMsg[Key]),
-		useWaitChan:   make(chan struct{}),
-	}
-
-	go am.listenForAdd()
-	return am
-}
-
-func (am *AppManager[Key]) listenForAdd() {
-	for {
-		select {
-		case msg := <-am.useAddChan:
-			_ = am.AddApplication(msg.name, msg.app)
-		case <-am.ctx.Done():
-			return
-		}
+func NewAppManager[Key RuntimeKey](timeout time.Duration) *AppManager[Key] {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return &AppManager[Key]{
+		errChan:         make(chan error),
+		ctx:             ctx,
+		cancel:          cancel,
+		useAddChan:      make(chan AppManagerMsg[Key]),
+		useShutdownChan: make(chan Key),
+		shutdownTimer:   timeout,
+		childApps:       make(map[Key][]Key),
 	}
 }
 
-// AddApplication adds a new application to the AppManager.
-// It initializes a context and shutdown channel for the application and starts it in a new goroutine.
-// If an application with the same name already exists, it returns an error.
 func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) error {
 	appCtx := context.WithValue(am.ctx, appManagerKey, am)
 	appCtx, cancelFunc := context.WithCancel(appCtx)
@@ -219,6 +187,10 @@ func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) erro
 		cancelFunc()
 		return fmt.Errorf("application with name %v already exists", name)
 	}
+
+	am.childAppsMutex.Lock()
+	am.childApps[name] = []Key{}
+	am.childAppsMutex.Unlock()
 
 	go func() {
 		defer am.ShutdownApplication(name)
@@ -238,12 +210,22 @@ func (am *AppManager[Key]) AddApplication(name Key, app RuntimeApplication) erro
 	return nil
 }
 
-// ShutdownApplication shuts down an application by its name.
-// It cancels the context and closes the shutdown channel.
 func (am *AppManager[Key]) ShutdownApplication(name Key) error {
+	am.childAppsMutex.RLock()
+	childApps := am.childApps[name]
+	am.childAppsMutex.RUnlock()
+
+	for _, childName := range childApps {
+		if err := am.ShutdownApplication(childName); err != nil {
+			if !errors.Is(err, ErrApplicationNotFound) {
+				slog.Error("Failed to shutdown child application", "parent", name, "child", childName, "error", err)
+			}
+		}
+	}
+
 	value, loaded := am.apps.LoadAndDelete(name)
 	if !loaded {
-		return fmt.Errorf("application with name %v not found", name)
+		return ErrApplicationNotFound
 	}
 
 	app := value.(struct {
@@ -260,12 +242,17 @@ func (am *AppManager[Key]) ShutdownApplication(name Key) error {
 		close(app.shutdownCh)
 	}
 
+	am.childAppsMutex.Lock()
+	delete(am.childApps, name)
+	am.childAppsMutex.Unlock()
+
 	slog.Info("Application shut down", "name", name)
 	return nil
 }
 
-// GracefulShutdown attempts to shut down all applications gracefully within the specified timeout.
-// It waits for all applications to signal that they have shut down before returning.
+// Add this error to gronos.go:
+var ErrApplicationNotFound = errors.New("application not found")
+
 func (am *AppManager[Key]) GracefulShutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), am.shutdownTimer)
 	defer cancel()
@@ -282,7 +269,6 @@ func (am *AppManager[Key]) GracefulShutdown() error {
 			app.cancelFunc()
 			select {
 			case <-app.shutdownCh:
-				// Application already closed
 			default:
 				close(app.shutdownCh)
 			}
@@ -309,20 +295,31 @@ func (am *AppManager[Key]) GracefulShutdown() error {
 	}
 }
 
-// Run starts all provided applications and waits for a shutdown signal.
-// It returns a channel to trigger shutdown and another to receive errors.
 func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, <-chan error) {
 	for name, app := range apps {
 		if err := am.AddApplication(name, app); err != nil {
-			slog.Error("Failed to add application", "name", name, "error", err)
+			fmt.Printf("Failed to add application %v: %v\n", name, err)
 		}
 	}
 
 	shutdownChan := make(chan struct{})
+
 	go func() {
 		for msg := range am.useAddChan {
 			if err := am.AddApplication(msg.name, msg.app); err != nil {
-				slog.Error("Failed to add application via UseAdd", "name", msg.name, "error", err)
+				fmt.Printf("Failed to add application via UseAdd %v: %v\n", msg.name, err)
+			} else {
+				am.childAppsMutex.Lock()
+				am.childApps[msg.parent] = append(am.childApps[msg.parent], msg.name)
+				am.childAppsMutex.Unlock()
+			}
+		}
+	}()
+
+	go func() {
+		for name := range am.useShutdownChan {
+			if err := am.ShutdownApplication(name); err != nil {
+				fmt.Printf("Failed to shut down application via UseShutdown %v: %v\n", name, err)
 			}
 		}
 	}()
@@ -336,7 +333,7 @@ func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, 
 				select {
 				case am.errChan <- fmt.Errorf("error during graceful shutdown: %w", err):
 				default:
-					slog.Error("Failed to send shutdown error to channel", "error", err)
+					fmt.Printf("Failed to send shutdown error to channel: %v\n", err)
 				}
 			}
 		}
@@ -357,23 +354,33 @@ func (am *AppManager[Key]) Run(apps map[Key]RuntimeApplication) (chan struct{}, 
 type contextKey string
 
 const appManagerKey contextKey = "appManager"
+const currentAppKey contextKey = "currentApp"
 
-// UseAdd returns a channel to send a RuntimeApplication function and its name to the AppManager for adding.
-func (am *AppManager[Key]) UseAdd() chan<- AppManagerMsg[Key] {
-	return am.useAddChan
+func UseAdd[Key RuntimeKey](ctx context.Context, addChan chan<- AppManagerMsg[Key], name Key, app RuntimeApplication) {
+	var parent Key
+	if parentValue := ctx.Value(currentAppKey); parentValue != nil {
+		if p, ok := parentValue.(Key); ok {
+			parent = p
+		}
+	}
+
+	select {
+	case addChan <- AppManagerMsg[Key]{name: name, app: app, parent: parent}:
+	case <-ctx.Done():
+	}
 }
 
-// UseWait returns a channel depending on the state of the specified application.
-func (am *AppManager[Key]) UseWait(name Key, state string) <-chan struct{} {
+func UseWait[Key RuntimeKey](ctx context.Context, am *AppManager[Key], name Key, state AppState) <-chan struct{} {
 	waitChan := make(chan struct{})
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// handle panic if channel is already closed
-			}
-		}()
 		defer close(waitChan)
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			app, loaded := am.apps.Load(name)
 			if !loaded {
 				return
@@ -385,21 +392,21 @@ func (am *AppManager[Key]) UseWait(name Key, state string) <-chan struct{} {
 			})
 
 			switch state {
-			case "started":
-				if am.ctx.Err() == nil {
+			case StateStarted:
+				if appData.shutdownCh != nil {
 					return
 				}
-			case "running":
-				if am.ctx.Err() == nil && appData.shutdownCh != nil {
+			case StateRunning:
+				if appData.shutdownCh != nil && am.ctx.Err() == nil {
 					return
 				}
-			case "completed":
+			case StateCompleted:
 				select {
 				case <-appData.shutdownCh:
 					return
 				default:
 				}
-			case "error":
+			case StateError:
 				select {
 				case err := <-am.errChan:
 					if err != nil {
@@ -415,22 +422,25 @@ func (am *AppManager[Key]) UseWait(name Key, state string) <-chan struct{} {
 	return waitChan
 }
 
-// NonBlockingMiddleware creates a middleware that runs the application in NonBlocking mode.
+func UseShutdown[Key RuntimeKey](ctx context.Context, shutdownChan chan<- Key, name Key) {
+	select {
+	case shutdownChan <- name:
+	case <-ctx.Done():
+	}
+}
+
 func NonBlockingMiddleware(interval time.Duration, app RuntimeApplication) RuntimeApplication {
 	return createMiddleware(interval, NonBlocking, app)
 }
 
-// ManagedTimelineMiddleware creates a middleware that runs the application in ManagedTimeline mode.
 func ManagedTimelineMiddleware(interval time.Duration, app RuntimeApplication) RuntimeApplication {
 	return createMiddleware(interval, ManagedTimeline, app)
 }
 
-// BestEffortMiddleware creates a middleware that runs the application in BestEffort mode.
 func BestEffortMiddleware(interval time.Duration, app RuntimeApplication) RuntimeApplication {
 	return createMiddleware(interval, BestEffort, app)
 }
 
-// createMiddleware wraps a RuntimeApplication with a Clock to periodically trigger its execution.
 func createMiddleware(interval time.Duration, mode ExecutionMode, app RuntimeApplication) RuntimeApplication {
 	return func(ctx context.Context, shutdown chan struct{}) error {
 		ctx, cancel := context.WithCancel(ctx)
@@ -447,7 +457,6 @@ func createMiddleware(interval time.Duration, mode ExecutionMode, app RuntimeApp
 		clock.Start()
 		defer clock.Stop()
 
-		// Wait for context cancellation, shutdown signal, or an application error
 		select {
 		case err := <-wrapper.errCh:
 			return err
@@ -459,7 +468,6 @@ func createMiddleware(interval time.Duration, mode ExecutionMode, app RuntimeApp
 	}
 }
 
-// tickerWrapper wraps a RuntimeApplication for periodic execution by a Clock.
 type tickerWrapper struct {
 	app      RuntimeApplication
 	ctx      context.Context
@@ -468,7 +476,6 @@ type tickerWrapper struct {
 	cancel   context.CancelFunc
 }
 
-// Tick executes the wrapped application and handles any errors.
 func (tw *tickerWrapper) Tick() {
 	err := tw.app(tw.ctx, tw.shutdown)
 	if err != nil {

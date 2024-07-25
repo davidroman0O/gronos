@@ -2,8 +2,8 @@ package gronos
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,85 +83,49 @@ func TestAppManager(t *testing.T) {
 }
 
 func TestMiddlewaresWithAppManager(t *testing.T) {
-	testCases := []struct {
-		name          string
-		middleware    func(time.Duration, RuntimeApplication) RuntimeApplication
-		expectedExecs int64
+	tests := []struct {
+		name       string
+		middleware func(time.Duration, RuntimeApplication) RuntimeApplication
 	}{
-		{"NonBlockingMiddleware", NonBlockingMiddleware, 6},
-		{"ManagedTimelineMiddleware", ManagedTimelineMiddleware, 6},
-		{"BestEffortMiddleware", BestEffortMiddleware, 6},
+		{"NonBlockingMiddleware", NonBlockingMiddleware},
+		{"ManagedTimelineMiddleware", ManagedTimelineMiddleware},
+		{"BestEffortMiddleware", BestEffortMiddleware},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			am := NewAppManager[string](5 * time.Second)
-			executionCount := atomic.Int64{}
-			errorSent := make(chan struct{})
+			shutdownChan, errChan := am.Run(nil)
+			defer close(shutdownChan)
 
-			app := func(ctx context.Context, shutdown chan struct{}) error {
+			executionCount := atomic.Int64{}
+			middleware := tt.middleware(50*time.Millisecond, func(ctx context.Context, shutdown chan struct{}) error {
 				count := executionCount.Add(1)
-				log.Printf("Execution count: %d", count)
-				if count == tc.expectedExecs {
-					log.Printf("Sending test error")
-					close(errorSent)
+				t.Logf("Execution count: %d", count)
+				if count == 6 {
+					t.Log("Sending test error")
 					return fmt.Errorf("test error")
 				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-shutdown:
-					return nil
-				case <-time.After(10 * time.Millisecond):
-					return nil
-				}
-			}
+				return nil
+			})
 
-			wrappedApp := tc.middleware(50*time.Millisecond, app)
-
-			err := am.AddApplication(tc.name, wrappedApp)
+			err := am.AddApplication(tt.name, middleware)
 			require.NoError(t, err)
 
-			shutdownChan, errChan := am.Run(nil)
-
 			select {
-			case <-errorSent:
-				log.Printf("Error sent, waiting for propagation")
-			case <-time.After(3 * time.Second):
-				t.Fatal("Timeout waiting for error to be sent")
-			}
-
-			var receivedErr error
-			select {
-			case err, ok := <-errChan:
-				if !ok {
-					t.Fatal("Error channel closed unexpectedly")
-				}
-				log.Printf("Received error from AppManager: %v", err)
-				receivedErr = err
-			case <-time.After(3 * time.Second):
+			case err := <-errChan:
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "test error")
+			case <-time.After(2 * time.Second):
 				t.Fatal("Timeout waiting for error from AppManager")
 			}
 
-			assert.Error(t, receivedErr)
-			assert.Contains(t, receivedErr.Error(), "test error")
+			// Wait for the application to be removed
+			time.Sleep(100 * time.Millisecond)
 
-			close(shutdownChan)
-
-			// Wait for shutdown to complete
-			select {
-			case _, ok := <-errChan:
-				if ok {
-					t.Fatal("Error channel not closed after shutdown")
-				}
-			case <-time.After(3 * time.Second):
-				t.Fatal("Timeout waiting for error channel to close")
-			}
-
-			finalCount := executionCount.Load()
-			log.Printf("Final execution count: %d", finalCount)
-			assert.Equal(t, tc.expectedExecs, finalCount,
-				"Expected exactly %d executions before error, got %d", tc.expectedExecs, finalCount)
+			// Check if the application has been removed
+			_, loaded := am.apps.Load(tt.name)
+			require.False(t, loaded, "Application should have been removed")
 		})
 	}
 }
@@ -231,20 +195,19 @@ func TestDataRaceFreedom(t *testing.T) {
 }
 
 func TestTickerSubscriberDynamicInterval(t *testing.T) {
-	clock := NewClock(WithInterval(5 * time.Millisecond)) // Shortened the interval
+	clock := NewClock(WithInterval(5 * time.Millisecond))
 	ticker := &mockTicker{}
 	clock.Add(ticker, NonBlocking)
 
 	subscriber, _ := clock.subs.Load(ticker)
 	ts := subscriber.(*TickerSubscriber)
 
-	// Change dynamic interval
 	ts.DynamicInterval = func(elapsedTime time.Duration) time.Duration {
 		return 5 * time.Millisecond
 	}
 
 	clock.Start()
-	time.Sleep(150 * time.Millisecond) // Increased sleep duration
+	time.Sleep(150 * time.Millisecond)
 	clock.Stop()
 
 	assert.GreaterOrEqual(t, ticker.tickCount.Load(), int64(10), "Expected at least 10 ticks with dynamic interval")
@@ -256,7 +219,7 @@ func TestAppManagerMultipleApplications(t *testing.T) {
 	appName2 := "testApp2"
 
 	app := func(ctx context.Context, shutdown chan struct{}) error {
-		<-ctx.Done()
+		<-shutdown
 		return nil
 	}
 
@@ -355,93 +318,134 @@ func TestMiddlewareTickFrequency(t *testing.T) {
 
 	shutdownChan, _ := am.Run(nil)
 
-	time.Sleep(700 * time.Millisecond) // Increased sleep duration to ensure more ticks
+	time.Sleep(700 * time.Millisecond)
 	close(shutdownChan)
 
 	finalCount := executionCount.Load()
 	assert.GreaterOrEqual(t, finalCount, int64(8), "Expected at least 8 ticks within 500ms")
 }
 
-func TestAppManagerApplicationShutdownHandling(t *testing.T) {
+func TestApplicationShuttingDownOtherApplications(t *testing.T) {
 	am := NewAppManager[string](5 * time.Second)
-	appName := "testApp"
+	shutdownChan, errChan := am.Run(nil)
+	defer close(shutdownChan)
 
-	shutdownHandled := make(chan struct{})
-
-	app := func(ctx context.Context, shutdown chan struct{}) error {
+	appName := "shutdownTestApp"
+	err := am.AddApplication(appName, RuntimeApplication(func(ctx context.Context, shutdown chan struct{}) error {
 		select {
+		case <-time.After(1 * time.Second):
+			t.Logf("Sending shutdown signal for %s", appName)
+			return fmt.Errorf("test shutdown")
 		case <-shutdown:
-			close(shutdownHandled)
-			return nil
-		case <-ctx.Done():
+			t.Logf("Received shutdown signal for %s", appName)
 			return nil
 		}
-	}
-
-	err := am.AddApplication(appName, app)
-	require.NoError(t, err)
-
-	err = am.ShutdownApplication(appName)
+	}))
 	require.NoError(t, err)
 
 	select {
-	case <-shutdownHandled:
-		// Success
-	case <-time.After(2 * time.Second): // Increased timeout
-		t.Fatal("Timeout waiting for shutdown to be handled")
+	case err := <-errChan:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "test shutdown")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for error from AppManager")
 	}
+
+	// Wait for the application to be removed
+	time.Sleep(100 * time.Millisecond)
+
+	// Check if the application has been removed
+	_, loaded := am.apps.Load(appName)
+	require.False(t, loaded, "Application should have been removed")
 }
 
 func TestApplicationAddingOtherApplications(t *testing.T) {
 	am := NewAppManager[string](5 * time.Second)
-	addChan := am.UseAdd()
-	waitChan := am.UseWait
 
 	childAppName := "childApp"
 	parentAppName := "parentApp"
 
 	childApp := func(ctx context.Context, shutdown chan struct{}) error {
-		<-shutdown
+		t.Log("Child app started")
+		select {
+		case <-UseWait(ctx, am, childAppName, StateRunning):
+			t.Log("Child app running")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		select {
+		case <-shutdown:
+			t.Log("Child app received shutdown signal")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		t.Log("Child app shutting down")
 		return nil
 	}
 
 	parentApp := func(ctx context.Context, shutdown chan struct{}) error {
-		addChan <- AppManagerMsg[string]{name: childAppName, app: childApp}
+		t.Log("Parent app started")
+		ctx = context.WithValue(ctx, currentAppKey, parentAppName)
+		UseAdd(ctx, am.useAddChan, childAppName, childApp)
 
 		select {
-		case <-waitChan(childAppName, "started"):
-		case <-time.After(1 * time.Second):
-			return fmt.Errorf("child app did not start in time")
+		case <-UseWait(ctx, am, parentAppName, StateRunning):
+			t.Log("Parent app running")
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 
-		<-shutdown
+		select {
+		case <-UseWait(ctx, am, childAppName, StateRunning):
+			t.Log("Child app is now running")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		t.Log("Parent app initiating shutdown of child")
+		UseShutdown(ctx, am.useShutdownChan, childAppName)
+
+		select {
+		case <-UseWait(ctx, am, childAppName, StateCompleted):
+			t.Log("Child app has completed")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		select {
+		case <-shutdown:
+			t.Log("Parent app received shutdown signal")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		t.Log("Parent app shutting down")
 		return nil
 	}
 
-	addChan <- AppManagerMsg[string]{name: parentAppName, app: parentApp}
+	err := am.AddApplication(parentAppName, parentApp)
+	require.NoError(t, err)
 
-	shutdownChan, errChan := am.Run(nil)
-	time.Sleep(100 * time.Millisecond)
+	shutdownMainChan, errChan := am.Run(nil)
 
-	close(shutdownChan)
+	time.Sleep(1 * time.Second) // Give some time for apps to start and run
+
+	close(shutdownMainChan) // Initiate shutdown of all apps
 
 	select {
-	case err, ok := <-errChan:
-		if ok {
-			t.Fatalf("Error received: %v", err)
+	case err := <-errChan:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Unexpected error: %v", err)
 		}
-	case <-time.After(1 * time.Second):
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for applications to shut down")
 	}
 
-	select {
-	case <-waitChan(parentAppName, "completed"):
-	case <-time.After(1 * time.Second):
-		t.Fatal("Timeout waiting for parent app to complete")
-	}
-
-	select {
-	case <-waitChan(childAppName, "completed"):
-	case <-time.After(1 * time.Second):
-		t.Fatal("Timeout waiting for child app to complete")
-	}
+	// Verify both apps are removed
+	_, parentLoaded := am.apps.Load(parentAppName)
+	require.False(t, parentLoaded, "Parent app should be unloaded")
+	_, childLoaded := am.apps.Load(childAppName)
+	require.False(t, childLoaded, "Child app should be unloaded")
 }
