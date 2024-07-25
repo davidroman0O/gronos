@@ -1,4 +1,4 @@
-package nonos
+package gronos
 
 import (
 	"sync"

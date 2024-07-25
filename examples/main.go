@@ -5,18 +5,18 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/davidroman0O/gronos/nonos"
+	"github.com/davidroman0O/gronos"
 )
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	nono := nonos.New[string](ctx, map[string]nonos.RuntimeApplication{
+	nono := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
 		"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
 			fmt.Println("app1 started")
 
-			com, err := nonos.UseBus(ctx)
+			com, err := gronos.UseBus(ctx)
 			if err != nil {
 				return err
 			}
@@ -24,15 +24,15 @@ func main() {
 			go func() {
 				<-time.After(time.Second * 2)
 
-				com <- nonos.Add[string]{
+				com <- gronos.Add[string]{
 					Key: "worker3",
-					App: nonos.Worker(time.Second, nonos.ManagedTimeline, func(ctx context.Context) error {
+					App: gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
 						fmt.Println("worker3 tick")
 						return nil
 					}),
 				}
 
-				com <- nonos.DeadLetter[string]{Key: "app1", Reason: fmt.Errorf("kym")}
+				com <- gronos.DeadLetter[string]{Key: "app1", Reason: fmt.Errorf("kym")}
 			}()
 
 			select {
@@ -44,29 +44,29 @@ func main() {
 			fmt.Println("app1 ended")
 			return nil
 		},
-		"worker1": nonos.Worker(
+		"worker1": gronos.Worker(
 			time.Second/4,
-			nonos.ManagedTimeline,
+			gronos.ManagedTimeline,
 			func(ctx context.Context) error {
 				fmt.Println("worker1 tick")
-				com, err := nonos.UseBus(ctx)
+				com, err := gronos.UseBus(ctx)
 				if err != nil {
 					return err
 				}
 				go func() {
 					<-time.After(time.Second * 3)
-					com <- nonos.DeadLetter[string]{Key: "worker2", Reason: fmt.Errorf("kym")}
+					com <- gronos.DeadLetter[string]{Key: "worker2", Reason: fmt.Errorf("kym")}
 				}()
 				go func() {
 					<-time.After(time.Second * 5)
-					com <- nonos.DeadLetter[string]{Key: "worker3", Reason: fmt.Errorf("kym")}
+					com <- gronos.DeadLetter[string]{Key: "worker3", Reason: fmt.Errorf("kym")}
 				}()
 				<-ctx.Done()
 				return nil
 			}),
-		"worker2": nonos.Worker(
+		"worker2": gronos.Worker(
 			time.Second/4,
-			nonos.ManagedTimeline,
+			gronos.ManagedTimeline,
 			func(ctx context.Context) error {
 				fmt.Println("worker2 tick")
 				return nil
