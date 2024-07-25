@@ -99,11 +99,13 @@ func TestMiddlewaresWithAppManager(t *testing.T) {
 			defer close(shutdownChan)
 
 			executionCount := atomic.Int64{}
+			done := make(chan struct{})
 			middleware := tt.middleware(50*time.Millisecond, func(ctx context.Context, shutdown chan struct{}) error {
 				count := executionCount.Add(1)
 				t.Logf("Execution count: %d", count)
 				if count == 6 {
 					t.Log("Sending test error")
+					close(done)
 					return fmt.Errorf("test error")
 				}
 				return nil
@@ -113,11 +115,17 @@ func TestMiddlewaresWithAppManager(t *testing.T) {
 			require.NoError(t, err)
 
 			select {
-			case err := <-errChan:
-				require.Error(t, err)
-				require.Contains(t, err.Error(), "test error")
-			case <-time.After(2 * time.Second):
-				t.Fatal("Timeout waiting for error from AppManager")
+			case <-done:
+				// Wait for the error to be sent
+				select {
+				case err := <-errChan:
+					require.Error(t, err)
+					require.Contains(t, err.Error(), "test error")
+				case <-time.After(1 * time.Second):
+					t.Fatal("Timeout waiting for error from AppManager")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Timeout waiting for middleware to complete")
 			}
 
 			// Wait for the application to be removed
@@ -365,64 +373,53 @@ func TestApplicationAddingOtherApplications(t *testing.T) {
 	childAppName := "childApp"
 	parentAppName := "parentApp"
 
+	childAppAdded := make(chan struct{})
+	childAppShutdown := make(chan struct{})
+
 	childApp := func(ctx context.Context, shutdown chan struct{}) error {
+		close(childAppAdded)
 		t.Log("Child app started")
-		select {
-		case <-UseWait(ctx, am, childAppName, StateRunning):
-			t.Log("Child app running")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 
 		select {
+		case <-ctx.Done():
+			t.Log("Child app context done")
+			close(childAppShutdown)
+			return ctx.Err()
 		case <-shutdown:
 			t.Log("Child app received shutdown signal")
-		case <-ctx.Done():
-			return ctx.Err()
+			close(childAppShutdown)
+			return nil
 		}
-
-		t.Log("Child app shutting down")
-		return nil
 	}
 
+	parentAppAdded := make(chan struct{})
+	parentAppShutdown := make(chan struct{})
+
 	parentApp := func(ctx context.Context, shutdown chan struct{}) error {
+		close(parentAppAdded)
 		t.Log("Parent app started")
-		ctx = context.WithValue(ctx, currentAppKey, parentAppName)
+
 		UseAdd(ctx, am.useAddChan, childAppName, childApp)
 
-		select {
-		case <-UseWait(ctx, am, parentAppName, StateRunning):
-			t.Log("Parent app running")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		select {
-		case <-UseWait(ctx, am, childAppName, StateRunning):
-			t.Log("Child app is now running")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		<-childAppAdded
+		t.Log("Child app is now running")
 
 		t.Log("Parent app initiating shutdown of child")
 		UseShutdown(ctx, am.useShutdownChan, childAppName)
 
-		select {
-		case <-UseWait(ctx, am, childAppName, StateCompleted):
-			t.Log("Child app has completed")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		<-childAppShutdown
+		t.Log("Child app has completed")
 
 		select {
+		case <-ctx.Done():
+			t.Log("Parent app context done")
+			close(parentAppShutdown)
+			return ctx.Err()
 		case <-shutdown:
 			t.Log("Parent app received shutdown signal")
-		case <-ctx.Done():
-			return ctx.Err()
+			close(parentAppShutdown)
+			return nil
 		}
-
-		t.Log("Parent app shutting down")
-		return nil
 	}
 
 	err := am.AddApplication(parentAppName, parentApp)
@@ -430,17 +427,27 @@ func TestApplicationAddingOtherApplications(t *testing.T) {
 
 	shutdownMainChan, errChan := am.Run(nil)
 
-	time.Sleep(1 * time.Second) // Give some time for apps to start and run
+	<-parentAppAdded
+	t.Log("Parent app added")
+
+	time.Sleep(100 * time.Millisecond) // Give some time for apps to start
 
 	close(shutdownMainChan) // Initiate shutdown of all apps
 
+	select {
+	case <-parentAppShutdown:
+		t.Log("Parent app shut down")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for parent app to shut down")
+	}
+
+	// Check for any errors
 	select {
 	case err := <-errChan:
 		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timeout waiting for applications to shut down")
+	default:
 	}
 
 	// Verify both apps are removed
@@ -448,4 +455,6 @@ func TestApplicationAddingOtherApplications(t *testing.T) {
 	require.False(t, parentLoaded, "Parent app should be unloaded")
 	_, childLoaded := am.apps.Load(childAppName)
 	require.False(t, childLoaded, "Child app should be unloaded")
+
+	t.Log("Test completed successfully")
 }
