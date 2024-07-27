@@ -8,6 +8,7 @@ I was tired of writing the same boilerplates all the time so I wrote `gronos`, m
 
 <img src="gronos.webp" alt="Gronos" height="400">
 
+
 ## Table of Contents
 
 1. [Features](#features)
