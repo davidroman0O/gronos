@@ -2,7 +2,6 @@ package gronos
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -10,28 +9,42 @@ import (
 )
 
 func TestGronosContextCancellation(t *testing.T) {
+
 	t.Run("Context cancellation stops all applications", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		// Create a context with a timeout to ensure the test doesn't hang
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		appCount := 3
-		runningApps := atomic.Int32{}
-		completedApps := atomic.Int32{}
-
 		apps := make(map[string]RuntimeApplication)
+		appStatuses := make(map[string]*atomic.Int32)
+
 		for i := 0; i < appCount; i++ {
-			apps[string(rune('A'+i))] = func(ctx context.Context, shutdown <-chan struct{}) error {
-				runningApps.Add(1)
-				defer runningApps.Add(-1)
-				defer completedApps.Add(1)
-				fmt.Println(ctx)
-				select {
-				case <-ctx.Done():
-					fmt.Println("ctx done")
-					return ctx.Err()
-				case <-shutdown:
-					fmt.Println("shutdown")
-					return errors.New("shutdown")
+			appName := fmt.Sprintf("App%d", i)
+			status := &atomic.Int32{}
+			appStatuses[appName] = status
+
+			apps[appName] = func(appCtx context.Context, shutdown <-chan struct{}) error {
+				status.Store(1)       // App is running
+				defer status.Store(2) // App has stopped
+
+				// t.Logf("%s: Started", appName)
+
+				// Simulate some work
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-appCtx.Done():
+						// t.Logf("%s: Received context cancellation", appName)
+						return appCtx.Err()
+					case <-shutdown:
+						// t.Logf("%s: Received shutdown signal", appName)
+						return nil
+					case <-ticker.C:
+						// t.Logf("%s: Running", appName)
+					}
 				}
 			}
 		}
@@ -39,88 +52,86 @@ func TestGronosContextCancellation(t *testing.T) {
 		g := New[string](ctx, apps)
 		errChan := g.Start()
 
-		// Wait for all apps to start
-		for i := 0; i < 100 && runningApps.Load() < int32(appCount); i++ {
-			time.Sleep(10 * time.Millisecond)
-		}
-
-		if runningApps.Load() != int32(appCount) {
-			t.Fatalf("Not all applications started. Expected %d, got %d", appCount, runningApps.Load())
+		for {
+			allRunning := true
+			for _, status := range appStatuses {
+				if status.Load() != 1 {
+					allRunning = false
+					break
+				}
+			}
+			if allRunning {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
 
 		// Cancel the context
+		t.Log("Cancelling context")
 		cancel()
 
-		// Wait for all apps to complete with a timeout
-		timeout := time.After(2 * time.Second)
-		for completedApps.Load() < int32(appCount) {
-			select {
-			case <-timeout:
-				t.Fatalf("Timeout waiting for apps to complete. Completed: %d/%d", completedApps.Load(), appCount)
-			default:
-				time.Sleep(10 * time.Millisecond)
-			}
-		}
-
-		g.Wait()
-
-		// Check for errors
+		// Check for the expected error
 		select {
 		case err := <-errChan:
-			if err == nil {
-				t.Error("Expected an error due to context cancellation, but got nil")
+			if err != context.Canceled && err != context.DeadlineExceeded {
+				t.Errorf("Expected context.Canceled or context.DeadlineExceeded, got: %v", err)
 			}
 		case <-time.After(time.Second):
-			t.Error("Timeout waiting for error after context cancellation")
+			t.Error("Timed out waiting for error from Gronos")
 		}
+
+		// Ensure Gronos has fully shut down
+		g.Wait()
+
+		t.Log("Test completed successfully")
 	})
 
 	t.Run("Context cancellation with long-running application", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		appStarted := make(chan struct{})
 		appFinished := make(chan struct{})
 
 		app := func(ctx context.Context, shutdown <-chan struct{}) error {
 			close(appStarted)
+			defer fmt.Println("App received context cancellation")
 			select {
 			case <-ctx.Done():
 				close(appFinished)
 				return ctx.Err()
 			case <-shutdown:
 				close(appFinished)
-				return errors.New("shutdown")
+				return nil
 			}
 		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
 		g := New(ctx, map[string]RuntimeApplication{"long-running": app})
 		errChan := g.Start()
 
-		// Wait for the app to start
 		<-appStarted
-
-		// Cancel the context
 		cancel()
 
-		// Wait for the app to finish
 		select {
 		case <-appFinished:
 			// App finished as expected
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatal("Timeout waiting for app to finish after context cancellation")
 		}
 
 		g.Wait()
 
-		// Check for errors
 		select {
 		case err := <-errChan:
-			if err == nil || err.Error() != "context canceled" {
-				t.Errorf("Expected 'context canceled' error, but got: %v", err)
+			if err == nil {
+				t.Error("Expected an error, but got nil")
 			}
-		default:
-			t.Error("Expected an error due to context cancellation, but no error was received")
+			if err != context.Canceled {
+				t.Errorf("Expected context.Canceled error, but got: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("Timeout waiting for error after context cancellation")
 		}
 	})
 

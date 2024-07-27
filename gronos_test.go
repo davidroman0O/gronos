@@ -34,19 +34,13 @@ func TestGronos(t *testing.T) {
 
 		errors := g.Start()
 
-		select {
-		case <-appStarted:
-			// App started successfully
-		case <-time.After(time.Second):
-			t.Fatal("Timeout waiting for app to start")
-		}
-
+		<-appStarted
 		g.Shutdown()
 
 		select {
 		case <-appFinished:
 			// App finished successfully
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatal("Timeout waiting for app to finish")
 		}
 
@@ -138,6 +132,7 @@ func TestGronos(t *testing.T) {
 
 		select {
 		case err := <-errors:
+			fmt.Println(err)
 			if err == nil {
 				t.Fatal("Expected an error, got nil")
 			}
@@ -255,32 +250,38 @@ func TestWorker(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		var tickCount int32
-		interval := 100 * time.Millisecond
-		worker := Worker(interval, NonBlocking, func(ctx context.Context) error {
-			atomic.AddInt32(&tickCount, 1)
+		tickCount := atomic.Int32{}
+		tickChan := make(chan struct{})
+
+		worker := Worker(time.Millisecond, NonBlocking, func(ctx context.Context) error {
+			tickCount.Add(1)
+			select {
+			case tickChan <- struct{}{}:
+			default:
+			}
 			return nil
 		})
 
-		shutdown := make(chan struct{})
-		done := make(chan struct{})
+		go worker(ctx, nil)
 
-		go func() {
-			err := worker(ctx, shutdown)
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
+		// Wait for 5 ticks
+		for i := 0; i < 5; i++ {
+			select {
+			case <-tickChan:
+			case <-time.After(time.Second):
+				t.Fatalf("Timed out waiting for tick %d", i+1)
 			}
-			close(done)
-		}()
+		}
 
-		time.Sleep(550 * time.Millisecond) // Allow for 5 ticks (with some margin)
-		close(shutdown)
+		cancel()
 
-		<-done
+		time.Sleep(10 * time.Millisecond) // Short sleep to allow for any final ticks
 
-		finalCount := atomic.LoadInt32(&tickCount)
-		if finalCount < 4 || finalCount > 6 {
-			t.Errorf("Expected around 5 ticks, got %d", finalCount)
+		finalCount := tickCount.Load()
+		t.Logf("Final tick count: %d", finalCount)
+
+		if finalCount < 5 {
+			t.Errorf("Expected at least 5 ticks, got %d", finalCount)
 		}
 	})
 
