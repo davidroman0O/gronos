@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 )
 
-var ErrLoopCritical = errors.New("critical error: stopping the loop")
+var ErrLoopCritical = errors.New("critical error")
 
 type CancellableTask func(ctx context.Context) error
 

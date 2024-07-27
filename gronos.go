@@ -283,7 +283,7 @@ func (g *gronos[K]) handleMessage(m message) error {
 		app.closer()
 		g.applications.Store(app.k, app)
 		if msg.Reason != nil && msg.Reason.Error() != "shutdown" {
-			return fmt.Errorf("app error %v %v", msg.Key, msg.Reason)
+			return errors.Join(fmt.Errorf("app error %v", msg.Key), msg.Reason)
 		}
 	case terminatedMessage[K]:
 		var value any
@@ -320,7 +320,7 @@ func (g *gronos[K]) handleMessage(m message) error {
 	case addMessage[K]:
 		return g.Add(msg.Key, msg.App)
 	case errorMessage[K]:
-		return fmt.Errorf("app error %v %v", msg.Key, msg.Err)
+		return errors.Join(fmt.Errorf("app error %v", msg.Key), msg.Err)
 	}
 
 	return nil
@@ -394,7 +394,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		var ok bool
 		if value, ok = g.applications.Load(key); !ok {
 			// quite critical
-			g.com <- errorMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}, Err: fmt.Errorf("unable to find application %v", key)}
+			g.com <- MsgError(key, fmt.Errorf("unable to find application %v", key))
 			return
 		}
 		future := value.(applicationContext[K])
@@ -404,11 +404,11 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		}
 		// async termination
 		if err != nil && err != context.Canceled {
-			g.com <- deadLetterMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}, Reason: err}
+			g.com <- MsgDeadLetter(key, err)
 		} else if err == context.Canceled {
-			g.com <- contextTerminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}, Err: ctx.ctx.Err()}
+			g.com <- MsgContextTerminated(key, ctx.ctx.Err())
 		} else {
-			g.com <- terminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}}
+			g.com <- MsgTerminated(key)
 		}
 
 		close(realDone)

@@ -223,9 +223,8 @@ func TestIteratorMiddleware(t *testing.T) {
 	})
 
 	t.Run("Error handling and graceful shutdown", func(t *testing.T) {
-		iterCtx, iterCancel := context.WithCancel(context.Background())
-		defer iterCancel()
-		appCtx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
 		expectedError := errors.New("expected error")
 		var errorCount int32
@@ -238,34 +237,38 @@ func TestIteratorMiddleware(t *testing.T) {
 		tasks := []CancellableTask{
 			func(ctx context.Context) error {
 				atomic.AddInt32(&errorCount, 1)
-				return expectedError
+				return expectedError // will be wrapped...
 			},
 		}
 
-		iterApp := Iterator(iterCtx, tasks, WithLoopableIteratorOptions(
+		iterApp := Iterator(ctx, tasks, WithLoopableIteratorOptions(
 			WithOnError(func(err error) error {
-				return errors.Join(err, ErrLoopCritical)
+				return errors.Join(ErrLoopCritical, err)
 			}),
 			WithExtraCancel(cleanup),
 		))
 
-		errChan := make(chan error, 1)
+		g := New[string](ctx, map[string]RuntimeApplication{
+			"iterator": iterApp,
+		})
 
-		go func() {
-			errChan <- iterApp(appCtx, nil)
-		}()
+		errChan := g.Start()
 
 		// Wait a bit to ensure the task has a chance to execute
 		time.Sleep(50 * time.Millisecond)
 
-		// Cancel the iterator context to trigger shutdown
-		iterCancel()
+		// Cancel the context to trigger shutdown
+		cancel()
+
+		// Wait for Gronos to finish
+		g.Wait()
 
 		select {
 		case err := <-errChan:
-			if !errors.Is(err, context.Canceled) {
-				t.Errorf("Expected context.Canceled, got: %v", err)
+			if !errors.Is(err, ErrLoopCritical) || !errors.Is(err, expectedError) {
+				t.Errorf("Expected ErrLoopCritical and %v, got: %v", expectedError, err)
 			}
+
 		case <-time.After(1 * time.Second):
 			t.Error("Timeout waiting for error")
 		}
