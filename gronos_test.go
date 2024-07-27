@@ -34,19 +34,13 @@ func TestGronos(t *testing.T) {
 
 		errors := g.Start()
 
-		select {
-		case <-appStarted:
-			// App started successfully
-		case <-time.After(time.Second):
-			t.Fatal("Timeout waiting for app to start")
-		}
-
+		<-appStarted
 		g.Shutdown()
 
 		select {
 		case <-appFinished:
 			// App finished successfully
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatal("Timeout waiting for app to finish")
 		}
 

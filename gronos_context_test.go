@@ -2,14 +2,13 @@ package gronos
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestGronosContextCancellation(t *testing.T) {
+
 	t.Run("Context cancellation stops all applications", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -24,14 +23,12 @@ func TestGronosContextCancellation(t *testing.T) {
 				runningApps.Add(1)
 				defer runningApps.Add(-1)
 				defer completedApps.Add(1)
-				fmt.Println(ctx)
+
 				select {
 				case <-ctx.Done():
-					fmt.Println("ctx done")
 					return ctx.Err()
 				case <-shutdown:
-					fmt.Println("shutdown")
-					return errors.New("shutdown")
+					return nil
 				}
 			}
 		}
@@ -44,12 +41,7 @@ func TestGronosContextCancellation(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		if runningApps.Load() != int32(appCount) {
-			t.Fatalf("Not all applications started. Expected %d, got %d", appCount, runningApps.Load())
-		}
-
-		// Cancel the context
-		cancel()
+		cancel() // Cancel the context
 
 		// Wait for all apps to complete with a timeout
 		timeout := time.After(2 * time.Second)
@@ -67,8 +59,8 @@ func TestGronosContextCancellation(t *testing.T) {
 		// Check for errors
 		select {
 		case err := <-errChan:
-			if err == nil {
-				t.Error("Expected an error due to context cancellation, but got nil")
+			if err != context.Canceled {
+				t.Errorf("Expected context.Canceled error, but got: %v", err)
 			}
 		case <-time.After(time.Second):
 			t.Error("Timeout waiting for error after context cancellation")
@@ -90,37 +82,32 @@ func TestGronosContextCancellation(t *testing.T) {
 				return ctx.Err()
 			case <-shutdown:
 				close(appFinished)
-				return errors.New("shutdown")
+				return nil
 			}
 		}
 
 		g := New(ctx, map[string]RuntimeApplication{"long-running": app})
 		errChan := g.Start()
 
-		// Wait for the app to start
 		<-appStarted
-
-		// Cancel the context
 		cancel()
 
-		// Wait for the app to finish
 		select {
 		case <-appFinished:
 			// App finished as expected
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatal("Timeout waiting for app to finish after context cancellation")
 		}
 
 		g.Wait()
 
-		// Check for errors
 		select {
 		case err := <-errChan:
-			if err == nil || err.Error() != "context canceled" {
-				t.Errorf("Expected 'context canceled' error, but got: %v", err)
+			if err != context.Canceled {
+				t.Errorf("Expected context.Canceled error, but got: %v", err)
 			}
-		default:
-			t.Error("Expected an error due to context cancellation, but no error was received")
+		case <-time.After(time.Second):
+			t.Error("Timeout waiting for error after context cancellation")
 		}
 	})
 

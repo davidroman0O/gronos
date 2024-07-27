@@ -32,32 +32,56 @@ type gronos[K comparable] struct {
 	closer       func()
 }
 
-// DeadLetter represents a message indicating that an application has terminated with an error.
-type DeadLetter[K comparable] struct {
-	Key    K
+type HeaderMessage[K comparable] struct {
+	Key K
+}
+
+// deadLetterMessage represents a message indicating that an application has terminated with an error.
+type deadLetterMessage[K comparable] struct {
+	HeaderMessage[K]
 	Reason error
 }
 
-// Terminated represents a message indicating that an application has terminated normally.
-type Terminated[K comparable] struct {
-	Key K
+func MsgDeadLetter[K comparable](k K, reason error) deadLetterMessage[K] {
+	return deadLetterMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, Reason: reason}
 }
 
-// ContextTerminated represents a message indicating that an application's context has been terminated.
-type ContextTerminated[K comparable] struct {
-	Key K
+// terminatedMessage represents a message indicating that an application has terminatedMessage normally.
+type terminatedMessage[K comparable] struct {
+	HeaderMessage[K]
+}
+
+func MsgTerminated[K comparable](k K) terminatedMessage[K] {
+	return terminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}}
+}
+
+// contextTerminatedMessage represents a message indicating that an application's context has been terminated.
+type contextTerminatedMessage[K comparable] struct {
+	HeaderMessage[K]
 	Err error
 }
 
-type Error[K comparable] struct {
-	Key K
+func MsgContextTerminated[K comparable](k K, err error) contextTerminatedMessage[K] {
+	return contextTerminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, Err: err}
+}
+
+type errorMessage[K comparable] struct {
+	HeaderMessage[K]
 	Err error
 }
 
-// Add represents a message to add a new application to the gronos system.
-type Add[K comparable] struct {
-	Key K
+func MsgError[K comparable](k K, err error) errorMessage[K] {
+	return errorMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, Err: err}
+}
+
+// addMessage represents a message to add a new application to the gronos system.
+type addMessage[K comparable] struct {
+	HeaderMessage[K]
 	App RuntimeApplication
+}
+
+func MsgAdd[K comparable](k K, app RuntimeApplication) addMessage[K] {
+	return addMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, App: app}
 }
 
 // applicationContext holds the context and metadata for a running application.
@@ -192,9 +216,9 @@ func (g *gronos[K]) shutdownApps(cancelled bool) {
 		if app.alive {
 			wg.Add(1)
 			if !cancelled {
-				g.com <- DeadLetter[K]{Key: app.k, Reason: errors.New("shutdown")}
+				g.com <- deadLetterMessage[K]{HeaderMessage: HeaderMessage[K]{Key: app.k}, Reason: errors.New("shutdown")}
 			} else {
-				g.com <- ContextTerminated[K]{Key: app.k}
+				g.com <- contextTerminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: app.k}}
 			}
 			wg.Done()
 		}
@@ -206,7 +230,7 @@ func (g *gronos[K]) shutdownApps(cancelled bool) {
 // handleMessage processes incoming messages and updates the gronos state accordingly.
 func (g *gronos[K]) handleMessage(m message) error {
 	switch msg := m.(type) {
-	case DeadLetter[K]:
+	case deadLetterMessage[K]:
 		var value any
 		var app applicationContext[K]
 		var ok bool
@@ -226,7 +250,7 @@ func (g *gronos[K]) handleMessage(m message) error {
 		if msg.Reason != nil && msg.Reason.Error() != "shutdown" {
 			return fmt.Errorf("app error %v %v", msg.Key, msg.Reason)
 		}
-	case Terminated[K]:
+	case terminatedMessage[K]:
 		var value any
 		var app applicationContext[K]
 		var ok bool
@@ -242,7 +266,7 @@ func (g *gronos[K]) handleMessage(m message) error {
 		app.alive = false
 		app.closer()
 		g.applications.Store(app.k, app)
-	case ContextTerminated[K]:
+	case contextTerminatedMessage[K]:
 		var value any
 		var app applicationContext[K]
 		var ok bool
@@ -258,9 +282,9 @@ func (g *gronos[K]) handleMessage(m message) error {
 		app.alive = false
 		app.cancel()
 		g.applications.Store(app.k, app)
-	case Add[K]:
+	case addMessage[K]:
 		return g.Add(msg.Key, msg.App)
-	case Error[K]:
+	case errorMessage[K]:
 		return fmt.Errorf("app error %v %v", msg.Key, msg.Err)
 	}
 
@@ -347,7 +371,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		var ok bool
 		if value, ok = g.applications.Load(key); !ok {
 			// quite critical
-			g.com <- Error[K]{Key: key, Err: fmt.Errorf("unable to find application %v", key)}
+			g.com <- errorMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}, Err: fmt.Errorf("unable to find application %v", key)}
 			return
 		}
 		future := value.(applicationContext[K])
@@ -357,11 +381,11 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		}
 		// async termination
 		if err != nil && err != context.Canceled {
-			g.com <- DeadLetter[K]{Key: key, Reason: err}
+			g.com <- deadLetterMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}, Reason: err}
 		} else if err == context.Canceled {
-			g.com <- ContextTerminated[K]{Key: key, Err: ctx.ctx.Err()}
+			g.com <- contextTerminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}, Err: ctx.ctx.Err()}
 		} else {
-			g.com <- Terminated[K]{Key: key}
+			g.com <- terminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: key}}
 		}
 
 		close(realDone)

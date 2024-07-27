@@ -25,15 +25,13 @@ func main() {
 			go func() {
 				<-time.After(time.Second * 2)
 
-				com <- gronos.Add[string]{
-					Key: "worker3",
-					App: gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
+				com <- gronos.MsgAdd("worker3",
+					gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
 						log.Println("worker3 tick")
 						return nil
-					}),
-				}
+					}))
 
-				com <- gronos.DeadLetter[string]{Key: "app1", Reason: fmt.Errorf("kym")}
+				com <- gronos.MsgDeadLetter("app1", fmt.Errorf("kym"))
 			}()
 
 			select {
@@ -56,11 +54,11 @@ func main() {
 				}
 				go func() {
 					<-time.After(time.Second * 3)
-					com <- gronos.DeadLetter[string]{Key: "worker2", Reason: fmt.Errorf("kym")}
+					com <- gronos.MsgDeadLetter("worker2", fmt.Errorf("kym"))
 				}()
 				go func() {
 					<-time.After(time.Second * 5)
-					com <- gronos.DeadLetter[string]{Key: "worker3", Reason: fmt.Errorf("kym")}
+					com <- gronos.MsgDeadLetter("worker3", fmt.Errorf("kym"))
 				}()
 				<-ctx.Done()
 				return nil
