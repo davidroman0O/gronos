@@ -132,6 +132,7 @@ func TestGronos(t *testing.T) {
 
 		select {
 		case err := <-errors:
+			fmt.Println(err)
 			if err == nil {
 				t.Fatal("Expected an error, got nil")
 			}

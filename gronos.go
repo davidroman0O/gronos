@@ -189,12 +189,16 @@ func (g *gronos[K]) OnDone() <-chan struct{} {
 // run is the main loop of the gronos instance, handling messages and managing applications.
 func (g *gronos[K]) run(errChan chan<- error) {
 	defer g.closer()
-
+	ticker := time.NewTicker(time.Second / 16)
 	for {
 		select {
+		case <-g.done:
+			ticker.Stop()
+			return
 		case <-g.ctx.Done():
 			g.shutdownApps(true)
 			errChan <- g.ctx.Err() // Propagate the context error
+			ticker.Stop()
 			return
 		case m, ok := <-g.com:
 			if !ok {
@@ -202,6 +206,21 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			}
 			if err := g.handleMessage(m); err != nil {
 				errChan <- err
+			}
+		case <-ticker.C:
+			howMuchAlive := 0
+			g.applications.Range(func(key, value interface{}) bool {
+				app := value.(applicationContext[K])
+				if app.alive {
+					howMuchAlive++
+					return true
+				}
+				return true
+			})
+
+			// we somehow closed all apps, we shouldn't wait anymore
+			if howMuchAlive == 0 {
+				g.closer() // it's the end
 			}
 		}
 		runtime.Gosched()
@@ -286,21 +305,6 @@ func (g *gronos[K]) handleMessage(m message) error {
 		return g.Add(msg.Key, msg.App)
 	case errorMessage[K]:
 		return fmt.Errorf("app error %v %v", msg.Key, msg.Err)
-	}
-
-	howMuchAlive := 0
-	g.applications.Range(func(key, value interface{}) bool {
-		app := value.(applicationContext[K])
-		if app.alive {
-			howMuchAlive++
-			return true
-		}
-		return true
-	})
-
-	// we somehow closed all apps, we shouldn't wait anymore
-	if howMuchAlive == 0 {
-		g.closer() // it's the end
 	}
 
 	return nil
