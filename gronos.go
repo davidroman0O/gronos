@@ -216,6 +216,9 @@ func (g *gronos[K]) handleMessage(m message) error {
 		if app, ok = value.(applicationContext[K]); !ok {
 			return nil
 		}
+		if !app.alive {
+			return nil
+		}
 		app.alive = false
 		app.reason = msg.Reason
 		app.closer()
@@ -233,6 +236,9 @@ func (g *gronos[K]) handleMessage(m message) error {
 		if app, ok = value.(applicationContext[K]); !ok {
 			return nil
 		}
+		if !app.alive {
+			return nil
+		}
 		app.alive = false
 		app.closer()
 		g.applications.Store(app.k, app)
@@ -244,6 +250,9 @@ func (g *gronos[K]) handleMessage(m message) error {
 			return nil
 		}
 		if app, ok = value.(applicationContext[K]); !ok {
+			return nil
+		}
+		if !app.alive {
 			return nil
 		}
 		app.alive = false
