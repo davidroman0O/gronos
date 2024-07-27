@@ -6,6 +6,8 @@ It manages multiple concurrent applications, with features like dynamic applicat
 
 I was tired of writing the same boilerplates all the time so I wrote `gronos`, my now go-to for bootstrapping the runtime of my apps.
 
+<img src="gronos.webp" alt="Gronos" height="400">
+
 ## Table of Contents
 
 1. [Features](#features)
