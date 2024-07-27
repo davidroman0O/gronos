@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/avast/retry-go/v3"
 )
@@ -119,23 +120,33 @@ func (g *gronos[K]) Start() chan error {
 	return errChan
 }
 
+type shutdownOptions struct {
+	timeout time.Duration
+}
+
+type ShutdownOption func(*shutdownOptions)
+
+func WithTimeout(timeout time.Duration) func(*shutdownOptions) {
+	return func(c *shutdownOptions) {
+		c.timeout = timeout
+	}
+}
+
 // Shutdown initiates the shutdown process for all applications managed by the gronos instance.
 //
 // Example usage:
 //
 //	g.Shutdown()
-func (g *gronos[K]) Shutdown() {
+func (g *gronos[K]) Shutdown(opts ...ShutdownOption) {
+	c := &shutdownOptions{}
+	for _, opt := range opts {
+		opt(c)
+	}
 	g.shutdownApps(false)
-	/// We shouldn't use the g.done cause the Wait() is there for that
-	/// Maybe we could add a option a timeout for the shutdown
-	// select {
-	// case <-g.done:
-	// 	fmt.Println("Shutdown completed successfully")
-	// 	// Shutdown completed successfully
-	// case <-time.After(5 * time.Second):
-	// 	// Timeout occurred, log a warning
-	// 	fmt.Println("Warning: Shutdown timed out after 5 seconds")
-	// }
+	if c.timeout > 0 {
+		<-time.After(c.timeout)
+		fmt.Println("Warning: Shutdown timed out after", c.timeout)
+	}
 }
 
 // Wait blocks until all applications managed by the gronos instance have terminated.
