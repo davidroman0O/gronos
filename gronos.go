@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/avast/retry-go/v3"
@@ -30,6 +30,7 @@ type gronos[K comparable] struct {
 	cancel       context.CancelFunc
 	done         chan struct{}
 	closer       func()
+	cancelled    atomic.Bool
 }
 
 type HeaderMessage[K comparable] struct {
@@ -82,6 +83,12 @@ type addMessage[K comparable] struct {
 
 func MsgAdd[K comparable](k K, app RuntimeApplication) addMessage[K] {
 	return addMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, App: app}
+}
+
+type contextCancelledMessage[K comparable] struct{}
+
+func msgContextCancelled[K comparable]() contextCancelledMessage[K] {
+	return contextCancelledMessage[K]{}
 }
 
 // applicationContext holds the context and metadata for a running application.
@@ -140,6 +147,7 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gron
 //	}
 func (g *gronos[K]) Start() chan error {
 	errChan := make(chan error, 1)
+	g.cancelled.Store(false)
 	go g.run(errChan)
 	return errChan
 }
@@ -189,17 +197,24 @@ func (g *gronos[K]) OnDone() <-chan struct{} {
 // run is the main loop of the gronos instance, handling messages and managing applications.
 func (g *gronos[K]) run(errChan chan<- error) {
 	defer g.closer()
-	ticker := time.NewTicker(time.Second / 16)
+	defer func() {
+		if g.ctx.Err() == context.Canceled {
+			errChan <- g.ctx.Err()
+		}
+		close(errChan)
+	}()
+
 	for {
 		select {
-		case <-g.done:
-			ticker.Stop()
-			return
 		case <-g.ctx.Done():
+			if g.cancelled.Load() {
+				continue
+			}
+			g.cancelled.Store(true)
 			g.shutdownApps(true)
-			errChan <- g.ctx.Err() // Propagate the context error
-			ticker.Stop()
-			return
+			g.cancelled.Store(true)
+			g.com <- msgContextCancelled[K]()
+			continue
 		case m, ok := <-g.com:
 			if !ok {
 				return
@@ -207,7 +222,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			if err := g.handleMessage(m); err != nil {
 				errChan <- err
 			}
-		case <-ticker.C:
+
 			howMuchAlive := 0
 			g.applications.Range(func(key, value interface{}) bool {
 				app := value.(applicationContext[K])
@@ -221,9 +236,10 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			// we somehow closed all apps, we shouldn't wait anymore
 			if howMuchAlive == 0 {
 				g.closer() // it's the end
+				return
 			}
 		}
-		runtime.Gosched()
+		// runtime.Gosched()
 	}
 }
 
@@ -235,9 +251,9 @@ func (g *gronos[K]) shutdownApps(cancelled bool) {
 		if app.alive {
 			wg.Add(1)
 			if !cancelled {
-				g.com <- deadLetterMessage[K]{HeaderMessage: HeaderMessage[K]{Key: app.k}, Reason: errors.New("shutdown")}
+				g.com <- MsgDeadLetter(app.k, errors.New("shutdown"))
 			} else {
-				g.com <- contextTerminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: app.k}}
+				g.com <- MsgContextTerminated(app.k, nil)
 			}
 			wg.Done()
 		}
@@ -327,6 +343,9 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		return fmt.Errorf("application with key %v already exists", k)
 	}
 	if g.ctx.Err() != nil {
+		return fmt.Errorf("context is already cancelled")
+	}
+	if g.cancelled.Load() {
 		return fmt.Errorf("context is already cancelled")
 	}
 

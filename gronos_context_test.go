@@ -87,14 +87,13 @@ func TestGronosContextCancellation(t *testing.T) {
 	})
 
 	t.Run("Context cancellation with long-running application", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		appStarted := make(chan struct{})
 		appFinished := make(chan struct{})
 
 		app := func(ctx context.Context, shutdown <-chan struct{}) error {
 			close(appStarted)
+			defer fmt.Println("App received context cancellation")
 			select {
 			case <-ctx.Done():
 				close(appFinished)
@@ -104,6 +103,9 @@ func TestGronosContextCancellation(t *testing.T) {
 				return nil
 			}
 		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
 		g := New(ctx, map[string]RuntimeApplication{"long-running": app})
 		errChan := g.Start()
@@ -122,6 +124,9 @@ func TestGronosContextCancellation(t *testing.T) {
 
 		select {
 		case err := <-errChan:
+			if err == nil {
+				t.Error("Expected an error, but got nil")
+			}
 			if err != context.Canceled {
 				t.Errorf("Expected context.Canceled error, but got: %v", err)
 			}
