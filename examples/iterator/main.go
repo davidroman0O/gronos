@@ -51,8 +51,9 @@ func main() {
 		steps,
 		gronos.WithLoopableIteratorOptions(
 			gronos.WithExtraCancel(cancelExtra),
-			gronos.WithOnError(func(err error) {
+			gronos.WithOnError(func(err error) error {
 				log.Printf("Custom error handling: %v", err)
+				return nil
 			}),
 			gronos.WithShouldStop(func(err error) bool {
 				return err != nil // Stop on any error
@@ -81,10 +82,11 @@ func main() {
 	}()
 
 	go func() {
-		<-time.After(time.Second * 5)
+		<-time.After(time.Second * 2)
+		// extraCancel()
 		cancel()
-		<-time.After(time.Second * 1)
-		g.Shutdown()
+		// <-time.After(time.Second * 1)
+		// g.Shutdown()
 	}()
 
 	g.Wait()

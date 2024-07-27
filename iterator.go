@@ -3,7 +3,9 @@ package gronos
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 var ErrLoopCritical = errors.New("critical error: stopping the loop")
@@ -11,17 +13,18 @@ var ErrLoopCritical = errors.New("critical error: stopping the loop")
 type CancellableTask func(ctx context.Context) error
 
 type LoopableIterator struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	extraCancel []context.CancelFunc
 	tasks       []CancellableTask
 	index       int
-	done        chan struct{}
 	mu          sync.Mutex
-	onError     func(error)
+	onError     func(error) error
 	shouldStop  func(error) bool
 	beforeLoop  func() error
 	afterLoop   func() error
+	extraCancel []context.CancelFunc
+	running     atomic.Bool
+	stopCh      chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 type LoopableIteratorOption func(*LoopableIterator)
@@ -32,7 +35,7 @@ func WithExtraCancel(cancels ...context.CancelFunc) LoopableIteratorOption {
 	}
 }
 
-func WithOnError(handler func(error)) LoopableIteratorOption {
+func WithOnError(handler func(error) error) LoopableIteratorOption {
 	return func(li *LoopableIterator) {
 		li.onError = handler
 	}
@@ -56,17 +59,14 @@ func WithAfterLoop(afterLoop func() error) LoopableIteratorOption {
 	}
 }
 
-func NewLoopableIterator(ctx context.Context, tasks []CancellableTask, opts ...LoopableIteratorOption) *LoopableIterator {
-	ctx, cancel := context.WithCancel(ctx)
+func NewLoopableIterator(tasks []CancellableTask, opts ...LoopableIteratorOption) *LoopableIterator {
 	li := &LoopableIterator{
-		ctx:         ctx,
-		cancel:      cancel,
 		tasks:       tasks,
 		index:       0,
-		done:        make(chan struct{}),
 		extraCancel: []context.CancelFunc{},
-		onError: func(err error) {
-			// Default error handler
+		stopCh:      make(chan struct{}),
+		onError: func(err error) error {
+			return err // Default: return the error as-is
 		},
 		shouldStop: func(err error) bool {
 			return errors.Is(err, ErrLoopCritical)
@@ -78,26 +78,44 @@ func NewLoopableIterator(ctx context.Context, tasks []CancellableTask, opts ...L
 	return li
 }
 
-func (li *LoopableIterator) Run() chan error {
+func (li *LoopableIterator) Run(ctx context.Context) chan error {
+	if !li.running.CompareAndSwap(false, true) {
+		return nil // Already running
+	}
+
+	if li.ctx != nil && li.ctx == ctx {
+		return nil // Same context, can't rerun
+	}
+
+	li.ctx, li.cancel = context.WithCancel(ctx)
+	li.index = 0
+	li.stopCh = make(chan struct{})
+
 	errChan := make(chan error)
 
 	go func() {
-		defer close(li.done)
 		defer close(errChan)
+		defer li.running.Store(false)
+		defer li.cancel()
 
 		for {
 			select {
 			case <-li.ctx.Done():
+				fmt.Println("Context done")
 				for _, cancel := range li.extraCancel {
 					cancel()
 				}
 				errChan <- li.ctx.Err()
 				return
+			case <-li.stopCh:
+				return
 			default:
 				if err := li.runIteration(); err != nil {
-					errChan <- err
-					if li.shouldStop(err) {
-						return
+					if handledErr := li.onError(err); handledErr != nil {
+						errChan <- handledErr
+						if li.shouldStop(handledErr) {
+							return
+						}
 					}
 				}
 			}
@@ -110,19 +128,16 @@ func (li *LoopableIterator) Run() chan error {
 func (li *LoopableIterator) runIteration() error {
 	if li.beforeLoop != nil {
 		if err := li.beforeLoop(); err != nil {
-			li.onError(err)
 			return err
 		}
 	}
 
 	if err := li.runTasks(); err != nil {
-		li.onError(err)
 		return err
 	}
 
 	if li.afterLoop != nil {
 		if err := li.afterLoop(); err != nil {
-			li.onError(err)
 			return err
 		}
 	}
@@ -141,12 +156,14 @@ func (li *LoopableIterator) runTasks() error {
 	return nil
 }
 
-func (li *LoopableIterator) Wait() {
-	<-li.done
+func (li *LoopableIterator) Stop() {
+	close(li.stopCh)
 }
 
 func (li *LoopableIterator) Cancel() {
-	li.cancel()
+	if li.cancel != nil {
+		li.cancel()
+	}
 }
 
 func (li *LoopableIterator) resetIndex() {

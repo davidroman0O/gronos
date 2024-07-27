@@ -25,8 +25,8 @@ func TestLoopableIterator(t *testing.T) {
 			},
 		}
 
-		li := NewLoopableIterator(ctx, tasks)
-		errChan := li.Run()
+		li := NewLoopableIterator(tasks)
+		errChan := li.Run(ctx)
 
 		time.Sleep(100 * time.Millisecond)
 		li.Cancel()
@@ -56,8 +56,8 @@ func TestLoopableIterator(t *testing.T) {
 			},
 		}
 
-		li := NewLoopableIterator(ctx, tasks)
-		errChan := li.Run()
+		li := NewLoopableIterator(tasks)
+		errChan := li.Run(ctx)
 
 		// Wait for a short time to allow multiple errors to occur
 		time.Sleep(100 * time.Millisecond)
@@ -101,8 +101,8 @@ func TestLoopableIterator(t *testing.T) {
 			},
 		}
 
-		li := NewLoopableIterator(ctx, tasks)
-		errChan := li.Run()
+		li := NewLoopableIterator(tasks)
+		errChan := li.Run(ctx)
 
 		err := <-errChan
 		if !errors.Is(err, ErrLoopCritical) {
@@ -121,7 +121,7 @@ func TestLoopableIterator(t *testing.T) {
 
 		var beforeCount, afterCount, taskCount int32
 
-		li := NewLoopableIterator(ctx,
+		li := NewLoopableIterator(
 			[]CancellableTask{
 				func(ctx context.Context) error {
 					atomic.AddInt32(&taskCount, 1)
@@ -138,7 +138,7 @@ func TestLoopableIterator(t *testing.T) {
 			}),
 		)
 
-		errChan := li.Run()
+		errChan := li.Run(ctx)
 
 		time.Sleep(100 * time.Millisecond)
 		li.Cancel()

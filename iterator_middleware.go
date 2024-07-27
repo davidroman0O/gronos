@@ -5,22 +5,11 @@ import (
 	"errors"
 )
 
-// ErrorListener is a function type for listening to errors from the LoopableIterator.
-type ErrorListener func(error)
-
 // IteratorOption is a function type for configuring the Iterator middleware.
 type IteratorOption func(*iteratorConfig)
 
 type iteratorConfig struct {
-	errorListener ErrorListener
-	loopOpts      []LoopableIteratorOption
-}
-
-// WithErrorListener sets an error listener for the Iterator middleware.
-func WithErrorListener(listener ErrorListener) IteratorOption {
-	return func(c *iteratorConfig) {
-		c.errorListener = listener
-	}
+	loopOpts []LoopableIteratorOption
 }
 
 // WithLoopableIteratorOptions adds LoopableIteratorOptions to the Iterator middleware.
@@ -54,8 +43,8 @@ func Iterator(iterCtx context.Context, tasks []CancellableTask, opts ...Iterator
 			}
 		}()
 
-		li := NewLoopableIterator(ctx, tasks, config.loopOpts...)
-		errChan := li.Run()
+		li := NewLoopableIterator(tasks, config.loopOpts...)
+		errChan := li.Run(ctx)
 
 		for {
 			select {
@@ -72,9 +61,6 @@ func Iterator(iterCtx context.Context, tasks []CancellableTask, opts ...Iterator
 				if !ok {
 					// Error channel closed, iterator has finished
 					return nil
-				}
-				if config.errorListener != nil {
-					config.errorListener(err)
 				}
 				if errors.Is(err, ErrLoopCritical) {
 					li.Cancel()

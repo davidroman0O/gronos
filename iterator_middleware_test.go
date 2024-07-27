@@ -126,17 +126,16 @@ func TestIteratorMiddleware(t *testing.T) {
 
 		tasks := []CancellableTask{
 			func(ctx context.Context) error {
+				atomic.AddInt32(&errorCount, 1)
 				return expectedError
 			},
 		}
 
-		errorListener := func(err error) {
-			if err == expectedError {
-				atomic.AddInt32(&errorCount, 1)
-			}
-		}
-
-		iterApp := Iterator(iterCtx, tasks, WithErrorListener(errorListener))
+		iterApp := Iterator(iterCtx, tasks, WithLoopableIteratorOptions(
+			WithOnError(func(err error) error {
+				return errors.Join(err, ErrLoopCritical)
+			}),
+		))
 
 		shutdown := make(chan struct{})
 		errChan := make(chan error, 1)
@@ -145,16 +144,20 @@ func TestIteratorMiddleware(t *testing.T) {
 			errChan <- iterApp(appCtx, shutdown)
 		}()
 
-		time.Sleep(100 * time.Millisecond)
-		close(shutdown)
-
-		err := <-errChan
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
+		select {
+		case err := <-errChan:
+			if !errors.Is(err, ErrLoopCritical) {
+				t.Errorf("Expected ErrLoopCritical, got: %v", err)
+			}
+			if !errors.Is(err, expectedError) {
+				t.Errorf("Expected error to contain %v, got: %v", expectedError, err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Error("Timeout waiting for error")
 		}
 
 		if atomic.LoadInt32(&errorCount) == 0 {
-			t.Error("Expected error listener to be called at least once")
+			t.Error("Expected error to occur at least once")
 		}
 	})
 
