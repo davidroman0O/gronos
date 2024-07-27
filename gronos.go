@@ -48,6 +48,11 @@ type ContextTerminated[K comparable] struct {
 	Err error
 }
 
+type Error[K comparable] struct {
+	Key K
+	Err error
+}
+
 // Add represents a message to add a new application to the gronos system.
 type Add[K comparable] struct {
 	Key K
@@ -239,6 +244,8 @@ func (g *gronos[K]) handleMessage(m message) error {
 		fmt.Println("Context terminated", msg.Key, app.ctx.Err())
 	case Add[K]:
 		return g.Add(msg.Key, msg.App)
+	case Error[K]:
+		return fmt.Errorf("app error %v %v", msg.Key, msg.Err)
 	}
 
 	howMuchAlive := 0
@@ -325,14 +332,13 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		if value, ok = g.applications.Load(key); !ok {
 			// quite critical
 			fmt.Println("Application not found", key)
-			// TODO: handle error?
+			g.com <- Error[K]{Key: key, Err: fmt.Errorf("unable to find application %v", key)}
 			return
 		}
 		future := value.(applicationContext[K])
 		// that mean the application was requested from outside to be terminated as a shutdown
 		if !future.alive {
 			fmt.Println("Application was requested to be terminated", key)
-			// TODO: handle error?
 			return
 		}
 		// async termination
