@@ -221,4 +221,61 @@ func TestIteratorMiddleware(t *testing.T) {
 			t.Errorf("Expected ErrLoopCritical, got: %v", err)
 		}
 	})
+
+	t.Run("Error handling and graceful shutdown", func(t *testing.T) {
+		iterCtx, iterCancel := context.WithCancel(context.Background())
+		defer iterCancel()
+		appCtx := context.Background()
+
+		expectedError := errors.New("expected error")
+		var errorCount int32
+		var cleanupExecuted int32
+
+		cleanup := context.CancelFunc(func() {
+			atomic.AddInt32(&cleanupExecuted, 1)
+		})
+
+		tasks := []CancellableTask{
+			func(ctx context.Context) error {
+				atomic.AddInt32(&errorCount, 1)
+				return expectedError
+			},
+		}
+
+		iterApp := Iterator(iterCtx, tasks, WithLoopableIteratorOptions(
+			WithOnError(func(err error) error {
+				return errors.Join(err, ErrLoopCritical)
+			}),
+			WithExtraCancel(cleanup),
+		))
+
+		errChan := make(chan error, 1)
+
+		go func() {
+			errChan <- iterApp(appCtx, nil)
+		}()
+
+		// Wait a bit to ensure the task has a chance to execute
+		time.Sleep(50 * time.Millisecond)
+
+		// Cancel the iterator context to trigger shutdown
+		iterCancel()
+
+		select {
+		case err := <-errChan:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("Expected context.Canceled, got: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Error("Timeout waiting for error")
+		}
+
+		if atomic.LoadInt32(&errorCount) == 0 {
+			t.Error("Expected error to occur at least once")
+		}
+
+		if atomic.LoadInt32(&cleanupExecuted) == 0 {
+			t.Error("Expected cleanup (extraCancel) to be executed")
+		}
+	})
 }

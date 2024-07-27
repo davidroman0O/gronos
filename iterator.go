@@ -3,7 +3,6 @@ package gronos
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -25,6 +24,7 @@ type LoopableIterator struct {
 	stopCh      chan struct{}
 	ctx         context.Context
 	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 type LoopableIteratorOption func(*LoopableIterator)
@@ -91,20 +91,15 @@ func (li *LoopableIterator) Run(ctx context.Context) chan error {
 	li.index = 0
 	li.stopCh = make(chan struct{})
 
-	errChan := make(chan error)
+	errChan := make(chan error, 1) // Buffered channel to avoid goroutine leak
 
+	li.wg.Add(1)
 	go func() {
-		defer close(errChan)
-		defer li.running.Store(false)
-		defer li.cancel()
+		defer li.cleanup(errChan)
 
 		for {
 			select {
 			case <-li.ctx.Done():
-				fmt.Println("Context done")
-				for _, cancel := range li.extraCancel {
-					cancel()
-				}
 				errChan <- li.ctx.Err()
 				return
 			case <-li.stopCh:
@@ -125,19 +120,53 @@ func (li *LoopableIterator) Run(ctx context.Context) chan error {
 	return errChan
 }
 
+func (li *LoopableIterator) cleanup(errChan chan error) {
+	li.cancel()
+	li.runExtraCancel()
+	close(errChan)
+	li.running.Store(false)
+	li.wg.Done()
+}
+
+func (li *LoopableIterator) Wait() {
+	li.wg.Wait()
+}
+
+func (li *LoopableIterator) runExtraCancel() {
+	for _, cancel := range li.extraCancel {
+		cancel()
+	}
+}
+
+func (li *LoopableIterator) checkError(err error) error {
+	var critical error
+	if li.onError != nil {
+		critical = li.onError(err)
+	}
+
+	// Only ErrLoopCritical will stop the loop
+	if errors.Is(err, ErrLoopCritical) {
+		return err
+	} else if critical != nil {
+		return critical
+	}
+
+	return nil
+}
+
 func (li *LoopableIterator) runIteration() error {
 	if li.beforeLoop != nil {
-		if err := li.beforeLoop(); err != nil {
+		if err := li.checkError(li.beforeLoop()); err != nil {
 			return err
 		}
 	}
 
-	if err := li.runTasks(); err != nil {
+	if err := li.checkError(li.runTasks()); err != nil {
 		return err
 	}
 
 	if li.afterLoop != nil {
-		if err := li.afterLoop(); err != nil {
+		if err := li.checkError(li.afterLoop()); err != nil {
 			return err
 		}
 	}

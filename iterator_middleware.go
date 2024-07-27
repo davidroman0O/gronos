@@ -27,47 +27,33 @@ func Iterator(iterCtx context.Context, tasks []CancellableTask, opts ...Iterator
 	}
 
 	return func(appCtx context.Context, shutdown <-chan struct{}) error {
-		// Create a new context that's cancelled when either the iterator context
-		// or the application context is cancelled
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
-		go func() {
-			select {
-			case <-iterCtx.Done():
-				cancel()
-			case <-appCtx.Done():
-				cancel()
-			case <-shutdown:
-				cancel()
-			}
-		}()
+		li := NewLoopableIterator(tasks, config.loopOpts...) // only the loopable iterator will define when to stop
+		errChan := li.Run(iterCtx)
 
-		li := NewLoopableIterator(tasks, config.loopOpts...)
-		errChan := li.Run(ctx)
-
-		for {
-			select {
-			case <-iterCtx.Done():
-				li.Cancel()
-				return iterCtx.Err()
-			case <-appCtx.Done():
-				li.Cancel()
-				return appCtx.Err()
-			case <-shutdown:
-				li.Cancel()
+		var finalErr error
+		select {
+		case <-iterCtx.Done():
+			li.Cancel()
+			finalErr = iterCtx.Err()
+		case <-appCtx.Done():
+			li.Cancel()
+			finalErr = appCtx.Err()
+		case <-shutdown:
+			li.Cancel()
+		case err, ok := <-errChan:
+			if !ok {
+				// Error channel closed, iterator has finished
 				return nil
-			case err, ok := <-errChan:
-				if !ok {
-					// Error channel closed, iterator has finished
-					return nil
-				}
-				if errors.Is(err, ErrLoopCritical) {
-					li.Cancel()
-					return err
-				}
-				// Non-critical errors are ignored, and the loop continues
+			}
+			if errors.Is(err, ErrLoopCritical) {
+				li.Cancel()
+				finalErr = err
 			}
 		}
+
+		li.Wait() // Wait for the iterator to finish
+
+		return finalErr
 	}
 }

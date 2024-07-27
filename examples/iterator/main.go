@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -40,19 +41,26 @@ func main() {
 		fmt.Println("Extra cancel")
 	}
 
-	g.Add("asideWorker", gronos.Worker(
+	err := g.Add("asideWorker", gronos.Worker(
 		time.Second/2, gronos.ManagedTimeline, func(ctx context.Context) error {
 			fmt.Println("work work work")
 			return nil
 		}))
+	if err != nil {
+		// Handle error
+		panic(err)
+	}
 
-	err := g.Add("iteratorApp", gronos.Iterator(
+	err = g.Add("iteratorApp", gronos.Iterator(
 		extraCtx,
 		steps,
 		gronos.WithLoopableIteratorOptions(
 			gronos.WithExtraCancel(cancelExtra),
 			gronos.WithOnError(func(err error) error {
-				log.Printf("Custom error handling: %v", err)
+				if errors.Is(err, gronos.ErrLoopCritical) {
+					log.Printf("Critical error: %v", err)
+					return nil
+				}
 				return nil
 			}),
 			gronos.WithShouldStop(func(err error) bool {
@@ -84,9 +92,9 @@ func main() {
 	go func() {
 		<-time.After(time.Second * 2)
 		// extraCancel()
-		cancel()
+		// cancel()
 		// <-time.After(time.Second * 1)
-		// g.Shutdown()
+		g.Shutdown() // should not trigger cancellations
 	}()
 
 	g.Wait()

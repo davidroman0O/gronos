@@ -3,10 +3,10 @@ package gronos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
-	"time"
 
 	"github.com/avast/retry-go/v3"
 )
@@ -28,6 +28,7 @@ type gronos[K comparable] struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done         chan struct{}
+	closer       func()
 }
 
 // DeadLetter represents a message indicating that an application has terminated with an error.
@@ -92,6 +93,10 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gron
 	for k, v := range init {
 		g.Add(k, v)
 	}
+	g.closer = sync.OnceFunc(func() {
+		close(g.com)
+		close(g.done)
+	})
 	return g
 }
 
@@ -115,14 +120,17 @@ func (g *gronos[K]) Start() chan error {
 //
 //	g.Shutdown()
 func (g *gronos[K]) Shutdown() {
-	g.cancel()
-	select {
-	case <-g.done:
-		// Shutdown completed successfully
-	case <-time.After(5 * time.Second):
-		// Timeout occurred, log a warning
-		fmt.Println("Warning: Shutdown timed out after 5 seconds")
-	}
+	g.shutdownApps(false)
+	/// We shouldn't use the g.done cause the Wait() is there for that
+	/// Maybe we could add a option a timeout for the shutdown
+	// select {
+	// case <-g.done:
+	// 	fmt.Println("Shutdown completed successfully")
+	// 	// Shutdown completed successfully
+	// case <-time.After(5 * time.Second):
+	// 	// Timeout occurred, log a warning
+	// 	fmt.Println("Warning: Shutdown timed out after 5 seconds")
+	// }
 }
 
 // Wait blocks until all applications managed by the gronos instance have terminated.
@@ -134,15 +142,19 @@ func (g *gronos[K]) Wait() {
 	<-g.done
 }
 
+// Return the done channel, will be closed when all runtimes have terminated.
+func (g *gronos[K]) OnDone() <-chan struct{} {
+	return g.done
+}
+
 // run is the main loop of the gronos instance, handling messages and managing applications.
 func (g *gronos[K]) run(errChan chan<- error) {
-	defer close(g.done)
-	defer close(errChan)
+	defer g.closer()
 
 	for {
 		select {
 		case <-g.ctx.Done():
-			g.shutdownApps()
+			g.shutdownApps(true)
 			errChan <- g.ctx.Err() // Propagate the context error
 			return
 		case m, ok := <-g.com:
@@ -158,17 +170,18 @@ func (g *gronos[K]) run(errChan chan<- error) {
 }
 
 // shutdownApps initiates the shutdown process for all running applications.
-func (g *gronos[K]) shutdownApps() {
+func (g *gronos[K]) shutdownApps(cancelled bool) {
 	var wg sync.WaitGroup
 	g.applications.Range(func(key, value interface{}) bool {
 		app := value.(applicationContext[K])
 		if app.alive {
 			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				app.cancel()
-				<-app.shutdown
-			}()
+			if !cancelled {
+				g.com <- DeadLetter[K]{Key: app.k, Reason: errors.New("shutdown")}
+			} else {
+				g.com <- ContextTerminated[K]{Key: app.k}
+			}
+			wg.Done()
 		}
 		return true
 	})
@@ -195,6 +208,7 @@ func (g *gronos[K]) handleMessage(m message) error {
 		if msg.Reason != nil && msg.Reason.Error() != "shutdown" {
 			return fmt.Errorf("app error %v %v", msg.Key, msg.Reason)
 		}
+		fmt.Println("Application terminated with error", msg.Key, msg.Reason)
 	case Terminated[K]:
 		var value any
 		var app applicationContext[K]
@@ -208,6 +222,7 @@ func (g *gronos[K]) handleMessage(m message) error {
 		app.alive = false
 		app.closer()
 		g.applications.Store(app.k, app)
+		fmt.Println("Application terminated", msg.Key)
 	case ContextTerminated[K]:
 		var value any
 		var app applicationContext[K]
@@ -221,9 +236,26 @@ func (g *gronos[K]) handleMessage(m message) error {
 		app.alive = false
 		app.cancel()
 		g.applications.Store(app.k, app)
+		fmt.Println("Context terminated", msg.Key, app.ctx.Err())
 	case Add[K]:
 		return g.Add(msg.Key, msg.App)
 	}
+
+	howMuchAlive := 0
+	g.applications.Range(func(key, value interface{}) bool {
+		app := value.(applicationContext[K])
+		if app.alive {
+			howMuchAlive++
+			return true
+		}
+		return true
+	})
+
+	// we somehow closed all apps, we shouldn't wait anymore
+	if howMuchAlive == 0 {
+		g.closer() // it's the end
+	}
+
 	return nil
 }
 
@@ -261,8 +293,12 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		alive:    true,
 	}
 
+	// despite being triggered for termination, we need to wait for the application to REALLY finish
+	realDone := make(chan struct{})
+
 	appCtx.closer = sync.OnceFunc(func() {
 		close(shutdown)
+		<-realDone
 		g.wait.Done()
 	})
 
@@ -284,22 +320,32 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 				return ctx.app(ctx.ctx, ctx.shutdown)
 			}, retry.Attempts(ctx.retries))
 		}
-		if err != nil && err != context.Canceled {
-			select {
-			case g.com <- DeadLetter[K]{Key: key, Reason: err}:
-			case <-g.ctx.Done():
-			}
-		} else if err == context.Canceled {
-			select {
-			case g.com <- ContextTerminated[K]{Key: key, Err: ctx.ctx.Err()}:
-			case <-g.ctx.Done():
-			}
-		} else {
-			select {
-			case g.com <- Terminated[K]{Key: key}:
-			case <-g.ctx.Done():
-			}
+		var value any
+		var ok bool
+		if value, ok = g.applications.Load(key); !ok {
+			// quite critical
+			fmt.Println("Application not found", key)
+			// TODO: handle error?
+			return
 		}
+		future := value.(applicationContext[K])
+		// that mean the application was requested from outside to be terminated as a shutdown
+		if !future.alive {
+			fmt.Println("Application was requested to be terminated", key)
+			// TODO: handle error?
+			return
+		}
+		// async termination
+		if err != nil && err != context.Canceled {
+			g.com <- DeadLetter[K]{Key: key, Reason: err}
+		} else if err == context.Canceled {
+			g.com <- ContextTerminated[K]{Key: key, Err: ctx.ctx.Err()}
+		} else {
+			g.com <- Terminated[K]{Key: key}
+		}
+
+		close(realDone)
+		fmt.Println("Application requested for termination", key)
 	}(k, appCtx)
 
 	return nil
@@ -333,56 +379,4 @@ func UseBus(ctx context.Context) (chan<- message, error) {
 		return nil, fmt.Errorf("com not found in context")
 	}
 	return value.(chan message), nil
-}
-
-// TickingApplication is a function type representing an application that performs periodic tasks.
-type TickingApplication func(context.Context) error
-
-type tickerWrapper struct {
-	clock *Clock
-	ctx   context.Context
-	app   TickingApplication
-	cerr  chan error
-}
-
-func (t tickerWrapper) Tick() {
-	if err := t.app(t.ctx); err != nil {
-		t.clock.Stop()
-		t.cerr <- err
-	}
-}
-
-// Worker creates a RuntimeApplication that executes a TickingApplication at specified intervals.
-// It takes an interval duration, execution mode, and a TickingApplication as parameters.
-//
-// Example usage:
-//
-//	worker := gronos.Worker(time.Second, gronos.NonBlocking, func(ctx context.Context) error {
-//		// Periodic task logic here
-//		return nil
-//	})
-//	g.Add("periodicTask", worker)
-func Worker(interval time.Duration, mode ExecutionMode, app TickingApplication) RuntimeApplication {
-	return func(ctx context.Context, shutdown <-chan struct{}) error {
-		w := &tickerWrapper{
-			clock: NewClock(WithInterval(interval)),
-			ctx:   ctx,
-			app:   app,
-			cerr:  make(chan error, 1),
-		}
-		w.clock.Add(w, mode)
-		w.clock.Start()
-
-		select {
-		case <-ctx.Done():
-			w.clock.Stop()
-			return ctx.Err()
-		case <-shutdown:
-			w.clock.Stop()
-			return nil
-		case err := <-w.cerr:
-			w.clock.Stop()
-			return err
-		}
-	}
 }
