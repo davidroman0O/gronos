@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"time"
 
@@ -14,17 +13,29 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gronos.New[string](ctx, nil)
+	g := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
+		"stopper": func(ctx context.Context, shutdown <-chan struct{}) error {
+			<-time.After(time.Second * 3)
+			log.Println("Shooting others")
+			bus, err := gronos.UseBus(ctx)
+			if err != nil {
+				return err
+			}
+			bus <- gronos.ContextTerminated[string]{Key: "iteratorApp"} // will execute the extra cancel
+			bus <- gronos.DeadLetter[string]{Key: "asideWorker"}        // will just stop shutdown
+			return nil
+		},
+	})
 
 	steps := []gronos.CancellableTask{
 		func(ctx context.Context) error {
 			// Step 1 logic
-			fmt.Println("Step 1")
+			log.Println("Step 1")
 			return nil
 		},
 		func(ctx context.Context) error {
 			// Step 2 logic
-			fmt.Println("Step 2")
+			log.Println("Step 2")
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -38,12 +49,12 @@ func main() {
 	defer extraCancel()
 
 	cancelExtra := func() {
-		fmt.Println("Extra cancel")
+		log.Println("Extra cancel")
 	}
 
 	err := g.Add("asideWorker", gronos.Worker(
 		time.Second/2, gronos.ManagedTimeline, func(ctx context.Context) error {
-			fmt.Println("work work work")
+			log.Println("work work work")
 			return nil
 		}))
 	if err != nil {
@@ -89,13 +100,6 @@ func main() {
 		}
 	}()
 
-	go func() {
-		<-time.After(time.Second * 2)
-		// extraCancel()
-		// cancel()
-		// <-time.After(time.Second * 1)
-		g.Shutdown() // should not trigger cancellations
-	}()
-
 	g.Wait()
+	log.Println("Finished")
 }

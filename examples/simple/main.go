@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/davidroman0O/gronos"
@@ -14,7 +15,7 @@ func main() {
 
 	nono := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
 		"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
-			fmt.Println("app1 started")
+			log.Println("app1 started")
 
 			com, err := gronos.UseBus(ctx)
 			if err != nil {
@@ -27,7 +28,7 @@ func main() {
 				com <- gronos.Add[string]{
 					Key: "worker3",
 					App: gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
-						fmt.Println("worker3 tick")
+						log.Println("worker3 tick")
 						return nil
 					}),
 				}
@@ -39,16 +40,16 @@ func main() {
 			case <-shutdown:
 				// Handle successful start
 			case <-time.After(time.Second * 10): // Adjust the timeout as necessary
-				fmt.Println("Timeout waiting for start signal")
+				log.Println("Timeout waiting for start signal")
 			}
-			fmt.Println("app1 ended")
+			log.Println("app1 ended")
 			return nil
 		},
 		"worker1": gronos.Worker(
 			time.Second/4,
 			gronos.ManagedTimeline,
 			func(ctx context.Context) error {
-				fmt.Println("worker1 tick")
+				log.Println("worker1 tick")
 				com, err := gronos.UseBus(ctx)
 				if err != nil {
 					return err
@@ -68,7 +69,7 @@ func main() {
 			time.Second/4,
 			gronos.ManagedTimeline,
 			func(ctx context.Context) error {
-				fmt.Println("worker2 tick")
+				log.Println("worker2 tick")
 				return nil
 			}),
 	})

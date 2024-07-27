@@ -145,7 +145,6 @@ func (g *gronos[K]) Shutdown(opts ...ShutdownOption) {
 	g.shutdownApps(false)
 	if c.timeout > 0 {
 		<-time.After(c.timeout)
-		fmt.Println("Warning: Shutdown timed out after", c.timeout)
 	}
 }
 
@@ -224,7 +223,6 @@ func (g *gronos[K]) handleMessage(m message) error {
 		if msg.Reason != nil && msg.Reason.Error() != "shutdown" {
 			return fmt.Errorf("app error %v %v", msg.Key, msg.Reason)
 		}
-		fmt.Println("Application terminated with error", msg.Key, msg.Reason)
 	case Terminated[K]:
 		var value any
 		var app applicationContext[K]
@@ -238,7 +236,6 @@ func (g *gronos[K]) handleMessage(m message) error {
 		app.alive = false
 		app.closer()
 		g.applications.Store(app.k, app)
-		fmt.Println("Application terminated", msg.Key)
 	case ContextTerminated[K]:
 		var value any
 		var app applicationContext[K]
@@ -252,7 +249,6 @@ func (g *gronos[K]) handleMessage(m message) error {
 		app.alive = false
 		app.cancel()
 		g.applications.Store(app.k, app)
-		fmt.Println("Context terminated", msg.Key, app.ctx.Err())
 	case Add[K]:
 		return g.Add(msg.Key, msg.App)
 	case Error[K]:
@@ -342,14 +338,12 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		var ok bool
 		if value, ok = g.applications.Load(key); !ok {
 			// quite critical
-			fmt.Println("Application not found", key)
 			g.com <- Error[K]{Key: key, Err: fmt.Errorf("unable to find application %v", key)}
 			return
 		}
 		future := value.(applicationContext[K])
 		// that mean the application was requested from outside to be terminated as a shutdown
 		if !future.alive {
-			fmt.Println("Application was requested to be terminated", key)
 			return
 		}
 		// async termination
@@ -362,7 +356,6 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		}
 
 		close(realDone)
-		fmt.Println("Application requested for termination", key)
 	}(k, appCtx)
 
 	return nil
