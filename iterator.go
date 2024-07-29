@@ -140,7 +140,8 @@ func (li *LoopableIterator) runExtraCancel() {
 
 func (li *LoopableIterator) checkError(err error) error {
 	var critical error
-	if li.onError != nil {
+	// both conditions are important, we shouldn't trigger onError if the `err` is nil
+	if li.onError != nil && err != nil {
 		critical = li.onError(err)
 	}
 
