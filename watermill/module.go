@@ -2,6 +2,7 @@ package watermillextension
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -31,33 +32,62 @@ func (w *WatermillMiddleware[K]) OnStart(ctx context.Context, errChan chan<- err
 	return nil
 }
 
+func (w *WatermillMiddleware[K]) OnNewRuntime(ctx context.Context) context.Context {
+	return context.WithValue(ctx, "watermill_middleware", w)
+}
+
 func (w *WatermillMiddleware[K]) OnStop(ctx context.Context, errChan chan<- error) error {
 	w.logger.Info("Stopping Watermill middleware", nil)
 	w.closeAllComponents(errChan)
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) {
-	w.pubs.Range(func(key, value interface{}) bool {
-		if err := value.(message.Publisher).Close(); err != nil {
-			errChan <- fmt.Errorf("error closing publisher %v: %w", key, err)
-		}
-		return true
-	})
+func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, 3) // For publishers, subscribers, and routers
 
-	w.subs.Range(func(key, value interface{}) bool {
-		if err := value.(message.Subscriber).Close(); err != nil {
-			errChan <- fmt.Errorf("error closing subscriber %v: %w", key, err)
-		}
-		return true
-	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.pubs.Range(func(key, value interface{}) bool {
+			if err := value.(message.Publisher).Close(); err != nil {
+				errCh <- fmt.Errorf("error closing publisher %v: %w", key, err)
+			}
+			return true
+		})
+	}()
 
-	w.routers.Range(func(key, value interface{}) bool {
-		if err := value.(*RouterStatus).Router.Close(); err != nil {
-			errChan <- fmt.Errorf("error closing router %v: %w", key, err)
-		}
-		return true
-	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.subs.Range(func(key, value interface{}) bool {
+			if err := value.(message.Subscriber).Close(); err != nil {
+				errCh <- fmt.Errorf("error closing subscriber %v: %w", key, err)
+			}
+			return true
+		})
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.routers.Range(func(key, value interface{}) bool {
+			if err := value.(*RouterStatus).Router.Close(); err != nil {
+				errCh <- fmt.Errorf("error closing router %v: %w", key, err)
+			}
+			return true
+		})
+	}()
+
+	wg.Wait()
+	close(errCh)
+
+	var errs error
+	for err := range errCh {
+		errs = errors.Join(errs, err)
+	}
+
+	return errs
 }
 
 type AddPublisherMessage[K comparable] struct {

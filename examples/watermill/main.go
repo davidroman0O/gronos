@@ -21,13 +21,19 @@ func main() {
 	g := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
 		"setup": setupApp,
 	},
-		gronos.WithShutdownBehavior[string](gronos.ShutdownManual),
+		gronos.WithShutdownBehavior[string](gronos.ShutdownAutomatic),
 		gronos.WithGracePeriod[string](10*time.Second),
 		gronos.WithMinRuntime[string](30*time.Second),
 		gronos.WithExtension[string](watermillMiddleware),
 	)
 
 	errChan := g.Start()
+
+	go func() {
+		for err := range errChan {
+			fmt.Printf("Error: %v\n", err)
+		}
+	}()
 
 	// Wait for setup to complete
 	for !g.IsComplete("setup") {
@@ -51,11 +57,6 @@ func main() {
 
 	// Wait for shutdown to complete
 	g.Wait()
-
-	// Check for any errors
-	if err := <-errChan; err != nil {
-		fmt.Printf("Error: %v\n", err)
-	}
 }
 
 func setupApp(ctx context.Context, shutdown <-chan struct{}) error {

@@ -19,7 +19,7 @@ func MsgDeadLetter[K comparable](k K, reason error) deadLetterMessage[K] {
 	return deadLetterMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, Reason: reason}
 }
 
-// terminatedMessage represents a message indicating that an application has terminatedMessage normally.
+// terminatedMessage represents a message indicating that an application has terminated normally.
 type terminatedMessage[K comparable] struct {
 	HeaderMessage[K]
 }
@@ -66,6 +66,9 @@ func msgContextCancelled[K comparable]() contextCancelledMessage[K] {
 // ShutdownMessage represents a message to initiate shutdown
 type ShutdownMessage struct{}
 
+// ErrUnhandledMessage is returned when a message type is not recognized.
+var ErrUnhandledMessage = errors.New("unhandled message type")
+
 func (g *gronos[K]) handleGronosMessage(m Message) error {
 	switch msg := m.(type) {
 	case deadLetterMessage[K]:
@@ -82,11 +85,13 @@ func (g *gronos[K]) handleGronosMessage(m Message) error {
 		g.handleStatusMessage(msg)
 		return nil
 	case ShutdownMessage:
-		fmt.Println("gronos shutdown requests")
-		g.requestShutdown <- struct{}{}
+		g.initiateShutdown(false)
+		return nil
+	case contextCancelledMessage[K]:
+		g.initiateShutdown(true)
 		return nil
 	default:
-		return fmt.Errorf("unknown message type for gronos core: %T", msg)
+		return ErrUnhandledMessage
 	}
 }
 
@@ -99,10 +104,10 @@ func (g *gronos[K]) handleDeadLetter(msg deadLetterMessage[K]) error {
 	if !ok {
 		return nil
 	}
-	if !app.alive {
+	if !app.alive.Load() {
 		return nil
 	}
-	app.alive = false
+	app.alive.Store(false)
 	app.reason = msg.Reason
 	app.closer()
 	g.applications.Store(app.k, app)
@@ -121,10 +126,10 @@ func (g *gronos[K]) handleTerminated(msg terminatedMessage[K]) error {
 	if !ok {
 		return nil
 	}
-	if !app.alive {
+	if !app.alive.Load() {
 		return nil
 	}
-	app.alive = false
+	app.alive.Store(false)
 	app.closer()
 	g.applications.Store(app.k, app)
 	return nil
@@ -139,10 +144,10 @@ func (g *gronos[K]) handleContextTerminated(msg contextTerminatedMessage[K]) err
 	if !ok {
 		return nil
 	}
-	if !app.alive {
+	if !app.alive.Load() {
 		return nil
 	}
-	app.alive = false
+	app.alive.Store(false)
 	app.cancel()
 	g.applications.Store(app.k, app)
 	return nil
