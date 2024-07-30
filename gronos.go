@@ -12,83 +12,66 @@ import (
 	"github.com/avast/retry-go/v3"
 )
 
+type ShutdownBehavior int
+
+const (
+	ShutdownAutomatic ShutdownBehavior = iota
+	ShutdownManual
+)
+
+// StatusState represents the possible states of a component
+type StatusState string
+
+const (
+	StatusAdded     StatusState = "added"
+	StatusStarting  StatusState = "starting"
+	StatusRunning   StatusState = "running"
+	StatusCompleted StatusState = "completed"
+	StatusFailed    StatusState = "failed"
+)
+
+// StatusMessage is used to update the status of a component
+type StatusMessage[K comparable] struct {
+	HeaderMessage[K]
+	State StatusState
+}
+
+// StatusResponseMessage is the response to a status request
+type StatusResponseMessage[K comparable] struct {
+	HeaderMessage[K]
+	State StatusState
+}
+
 // RuntimeApplication is a function type representing an application that can be run concurrently.
 // It takes a context and a shutdown channel as parameters and returns an error.
 type RuntimeApplication func(ctx context.Context, shutdown <-chan struct{}) error
 
-// message is an interface type for internal communication within gronos.
-type message interface{}
+// Message is an interface type for internal communication within gronos.
+type Message interface{}
+
+type gronosConfig struct {
+	shutdownBehavior ShutdownBehavior
+	gracePeriod      time.Duration
+	minRuntime       time.Duration
+}
 
 // gronos is the main struct that manages concurrent applications.
 // It is parameterized by a comparable key type K.
 type gronos[K comparable] struct {
-	applications sync.Map
-	keys         ConcurrentArray[K]
-	com          chan message
-	wait         sync.WaitGroup
-	ctx          context.Context
-	cancel       context.CancelFunc
-	done         chan struct{}
-	closer       func()
-	cancelled    atomic.Bool
-}
-
-type HeaderMessage[K comparable] struct {
-	Key K
-}
-
-// deadLetterMessage represents a message indicating that an application has terminated with an error.
-type deadLetterMessage[K comparable] struct {
-	HeaderMessage[K]
-	Reason error
-}
-
-func MsgDeadLetter[K comparable](k K, reason error) deadLetterMessage[K] {
-	return deadLetterMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, Reason: reason}
-}
-
-// terminatedMessage represents a message indicating that an application has terminatedMessage normally.
-type terminatedMessage[K comparable] struct {
-	HeaderMessage[K]
-}
-
-func MsgTerminated[K comparable](k K) terminatedMessage[K] {
-	return terminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}}
-}
-
-// contextTerminatedMessage represents a message indicating that an application's context has been terminated.
-type contextTerminatedMessage[K comparable] struct {
-	HeaderMessage[K]
-	Err error
-}
-
-func MsgContextTerminated[K comparable](k K, err error) contextTerminatedMessage[K] {
-	return contextTerminatedMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, Err: err}
-}
-
-type errorMessage[K comparable] struct {
-	HeaderMessage[K]
-	Err error
-}
-
-func MsgError[K comparable](k K, err error) errorMessage[K] {
-	return errorMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, Err: err}
-}
-
-// addMessage represents a message to add a new application to the gronos system.
-type addMessage[K comparable] struct {
-	HeaderMessage[K]
-	App RuntimeApplication
-}
-
-func MsgAdd[K comparable](k K, app RuntimeApplication) addMessage[K] {
-	return addMessage[K]{HeaderMessage: HeaderMessage[K]{Key: k}, App: app}
-}
-
-type contextCancelledMessage[K comparable] struct{}
-
-func msgContextCancelled[K comparable]() contextCancelledMessage[K] {
-	return contextCancelledMessage[K]{}
+	applications    sync.Map
+	keys            ConcurrentArray[K]
+	com             chan Message
+	wait            sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	done            chan struct{}
+	closer          func()
+	cancelled       atomic.Bool
+	extensions      []ExtensionHooks[K]
+	statuses        sync.Map
+	config          gronosConfig
+	startTime       time.Time
+	requestShutdown chan struct{}
 }
 
 // applicationContext holds the context and metadata for a running application.
@@ -96,13 +79,21 @@ type applicationContext[K comparable] struct {
 	k        K
 	app      RuntimeApplication
 	ctx      context.Context
-	com      chan message
+	com      chan Message
 	retries  uint
 	alive    bool
 	reason   error
 	shutdown chan struct{}
 	closer   func() // proxy function to close the channel shutdown
 	cancel   func() // proxy function to cancel the context
+}
+
+type Option[K comparable] func(*gronos[K])
+
+func WithExtension[K comparable](ext ExtensionHooks[K]) Option[K] {
+	return func(ctx *gronos[K]) {
+		ctx.extensions = append(ctx.extensions, ext)
+	}
 }
 
 // New creates a new gronos instance with the given context and initial applications.
@@ -118,14 +109,25 @@ type applicationContext[K comparable] struct {
 //		},
 //	}
 //	g := gronos.New(ctx, apps)
-func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gronos[K] {
+func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts ...Option[K]) *gronos[K] {
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
-		com:    make(chan message, 200),
-		keys:   ConcurrentArray[K]{},
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		com:        make(chan Message, 200),
+		keys:       ConcurrentArray[K]{},
+		ctx:        ctx,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		extensions: []ExtensionHooks[K]{},
+		statuses:   sync.Map{},
+		config: gronosConfig{
+			shutdownBehavior: ShutdownAutomatic,
+			gracePeriod:      2 * time.Second,
+			minRuntime:       2 * time.Second,
+		},
+		requestShutdown: make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(g)
 	}
 	for k, v := range init {
 		g.Add(k, v)
@@ -133,6 +135,7 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gron
 	g.closer = sync.OnceFunc(func() {
 		close(g.com)
 		close(g.done)
+		close(g.requestShutdown)
 	})
 	return g
 }
@@ -146,8 +149,19 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication) *gron
 //		log.Printf("Error: %v", err)
 //	}
 func (g *gronos[K]) Start() chan error {
-	errChan := make(chan error, 1)
+	errChan := make(chan error, 100)
 	g.cancelled.Store(false)
+	g.startTime = time.Now()
+
+	// Apply extensions' OnStart hooks
+	for _, ext := range g.extensions {
+		if err := ext.OnStart(g.ctx, errChan); err != nil {
+			errChan <- fmt.Errorf("extension error on start: %w", err)
+			close(errChan)
+			return errChan
+		}
+	}
+
 	go g.run(errChan)
 	return errChan
 }
@@ -174,10 +188,12 @@ func (g *gronos[K]) Shutdown(opts ...ShutdownOption) {
 	for _, opt := range opts {
 		opt(c)
 	}
+	fmt.Println("gronos shutdown function called")
 	g.shutdownApps(false)
 	if c.timeout > 0 {
 		<-time.After(c.timeout)
 	}
+	g.com <- ShutdownMessage{}
 }
 
 // Wait blocks until all applications managed by the gronos instance have terminated.
@@ -196,13 +212,23 @@ func (g *gronos[K]) OnDone() <-chan struct{} {
 
 // run is the main loop of the gronos instance, handling messages and managing applications.
 func (g *gronos[K]) run(errChan chan<- error) {
-	defer g.closer()
 	defer func() {
 		if g.ctx.Err() == context.Canceled {
 			errChan <- g.ctx.Err()
 		}
+		fmt.Println("gronos run done")
+		// Apply extensions' OnStop hooks
+		for _, ext := range g.extensions {
+			fmt.Println("gronos extension stop")
+			if err := ext.OnStop(g.ctx, errChan); err != nil {
+				errChan <- fmt.Errorf("extension error on stop: %w", err)
+			}
+		}
 		close(errChan)
+		g.closer()
 	}()
+
+	ticker := time.NewTicker(1 * time.Second)
 
 	for {
 		select {
@@ -215,31 +241,81 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			g.cancelled.Store(true)
 			g.com <- msgContextCancelled[K]()
 			continue
+
+		case <-g.requestShutdown:
+			fmt.Println("gronos request shutdown message")
+			if g.config.shutdownBehavior == ShutdownManual {
+				fmt.Println("gronos request shutdown message returned")
+				ticker.Stop() // just in case it wasn't clear before
+				return
+			}
+			// sorry but you're in automatic mode
+			continue
+
+		case <-ticker.C:
+			// no ticker for manual
+			if g.config.shutdownBehavior == ShutdownManual {
+				ticker.Stop()
+				continue
+			}
+
+			fmt.Println("gronos ticker should consider")
+			if g.shouldConsiderShutdown() {
+				if g.considerShutdown() {
+					ticker.Stop()
+					return
+				}
+			}
+
 		case m, ok := <-g.com:
+			fmt.Println("gronos message", m)
 			if !ok {
 				return
 			}
+
 			if err := g.handleMessage(m); err != nil {
 				errChan <- err
 			}
-
-			howMuchAlive := 0
-			g.applications.Range(func(key, value interface{}) bool {
-				app := value.(applicationContext[K])
-				if app.alive {
-					howMuchAlive++
-					return true
-				}
-				return true
-			})
-
-			// we somehow closed all apps, we shouldn't wait anymore
-			if howMuchAlive == 0 {
-				g.closer() // it's the end
-				return
-			}
 		}
-		// runtime.Gosched()
+	}
+}
+
+func (g *gronos[K]) shouldConsiderShutdown() bool {
+	if g.config.shutdownBehavior == ShutdownManual {
+		fmt.Println("gronos manual shutdown")
+		return false
+	}
+
+	fmt.Println("time since", time.Since(g.startTime), g.config.minRuntime)
+	if time.Since(g.startTime) < g.config.minRuntime {
+		return false
+	}
+
+	howMuchAlive := 0
+	g.applications.Range(func(key, value interface{}) bool {
+		app := value.(applicationContext[K])
+		if app.alive {
+			howMuchAlive++
+		}
+		return true
+	})
+
+	fmt.Println("how much alive", howMuchAlive)
+
+	return howMuchAlive == 0
+}
+
+func (g *gronos[K]) considerShutdown() bool {
+	fmt.Println("gronos consider shutdown")
+	select {
+	case <-time.After(g.config.gracePeriod):
+		fmt.Println("gronos grace period")
+		g.com <- ShutdownMessage{}
+		return true
+	case <-g.ctx.Done():
+		fmt.Println("gronos context cancelled no shutdown")
+		// Context cancelled, no need to send shutdown signal
+		return false
 	}
 }
 
@@ -250,6 +326,7 @@ func (g *gronos[K]) shutdownApps(cancelled bool) {
 		app := value.(applicationContext[K])
 		if app.alive {
 			wg.Add(1)
+			fmt.Println("gronos shutdown", app.k)
 			if !cancelled {
 				g.com <- MsgDeadLetter(app.k, errors.New("shutdown"))
 			} else {
@@ -259,71 +336,49 @@ func (g *gronos[K]) shutdownApps(cancelled bool) {
 		}
 		return true
 	})
+	fmt.Println("gronos shutdown wait")
 	wg.Wait()
+	fmt.Println("gronos shutdown done")
 }
 
 // handleMessage processes incoming messages and updates the gronos state accordingly.
-func (g *gronos[K]) handleMessage(m message) error {
-	switch msg := m.(type) {
-	case deadLetterMessage[K]:
-		var value any
-		var app applicationContext[K]
-		var ok bool
-		if value, ok = g.applications.Load(msg.Key); !ok {
-			return nil
-		}
-		if app, ok = value.(applicationContext[K]); !ok {
-			return nil
-		}
-		if !app.alive { // dead app doesn't receive messages
-			return nil
-		}
-		app.alive = false
-		app.reason = msg.Reason
-		app.closer()
-		g.applications.Store(app.k, app)
-		if msg.Reason != nil && msg.Reason.Error() != "shutdown" {
-			return errors.Join(fmt.Errorf("app error %v", msg.Key), msg.Reason)
-		}
-	case terminatedMessage[K]:
-		var value any
-		var app applicationContext[K]
-		var ok bool
-		if value, ok = g.applications.Load(msg.Key); !ok {
-			return nil
-		}
-		if app, ok = value.(applicationContext[K]); !ok {
-			return nil
-		}
-		if !app.alive { // dead app doesn't receive messages
-			return nil
-		}
-		app.alive = false
-		app.closer()
-		g.applications.Store(app.k, app)
-	case contextTerminatedMessage[K]:
-		var value any
-		var app applicationContext[K]
-		var ok bool
-		if value, ok = g.applications.Load(msg.Key); !ok {
-			return nil
-		}
-		if app, ok = value.(applicationContext[K]); !ok {
-			return nil
-		}
-		if !app.alive { // dead app doesn't receive messages
-			return nil
-		}
-		app.alive = false
-		app.cancel()
-		g.applications.Store(app.k, app)
-	case addMessage[K]:
-		return g.Add(msg.Key, msg.App)
-	case errorMessage[K]:
-		return errors.Join(fmt.Errorf("app error %v", msg.Key), msg.Err)
+func (g *gronos[K]) handleMessage(m Message) error {
+	// First, try to handle the message with the gronos core
+	err := g.handleGronosMessage(m)
+	if err == nil {
+		return nil
 	}
 
-	return nil
+	// If the gronos core couldn't handle it, pass it to extensions
+	for _, ext := range g.extensions {
+		err := ext.OnMsg(g.ctx, m)
+		if err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("unhandled message type: %T", m)
+}
+
+// IsStarted checks if a component has started
+func (g *gronos[K]) IsStarted(k K) bool {
+	state, ok := g.statuses.Load(k)
+	return ok && (state == StatusStarting || state == StatusRunning)
+}
+
+// IsComplete checks if a component has completed
+func (g *gronos[K]) IsComplete(k K) bool {
+	state, ok := g.statuses.Load(k)
+	return ok && state == StatusCompleted
+}
+
+// GetStatus retrieves the current status of a component
+func (g *gronos[K]) GetStatus(k K) (StatusState, bool) {
+	state, ok := g.statuses.Load(k)
+	if !ok {
+		return "", false
+	}
+	return state.(StatusState), true
 }
 
 // Add adds a new application to the gronos instance with the given key and RuntimeApplication.
@@ -350,6 +405,8 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 	}
 
 	ctx, cancel := g.createContext()
+
+	// runtime application shutdown channel
 	shutdown := make(chan struct{})
 
 	appCtx := applicationContext[K]{
@@ -373,7 +430,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 	})
 
 	appCtx.cancel = sync.OnceFunc(func() {
-		cancel()
+		cancel() // cancel first
 		appCtx.closer()
 	})
 
@@ -390,6 +447,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 				return ctx.app(ctx.ctx, ctx.shutdown)
 			}, retry.Attempts(ctx.retries))
 		}
+		fmt.Println("gronos application done", key, err)
 		var value any
 		var ok bool
 		if value, ok = g.applications.Load(key); !ok {
@@ -439,10 +497,33 @@ func (g *gronos[K]) createContext() (context.Context, context.CancelFunc) {
 //		return
 //	}
 //	bus <- someMessage
-func UseBus(ctx context.Context) (chan<- message, error) {
+func UseBus(ctx context.Context) (chan<- Message, error) {
 	value := ctx.Value(comKey)
 	if value == nil {
 		return nil, fmt.Errorf("com not found in context")
 	}
-	return value.(chan message), nil
+	return value.(chan Message), nil
+}
+
+func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {
+	return func(g *gronos[K]) {
+		g.config.shutdownBehavior = behavior
+	}
+}
+
+func WithGracePeriod[K comparable](period time.Duration) Option[K] {
+	return func(g *gronos[K]) {
+		g.config.gracePeriod = period
+	}
+}
+
+func WithMinRuntime[K comparable](duration time.Duration) Option[K] {
+	return func(g *gronos[K]) {
+		g.config.minRuntime = duration
+	}
+}
+
+// Manual shutdown function
+func (g *gronos[K]) RequestShutdown() {
+	g.com <- ShutdownMessage{}
 }
