@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
@@ -33,7 +32,7 @@ func main() {
 							return nil
 						}))
 
-					com <- gronos.MsgDeadLetter("app1", fmt.Errorf("kym"))
+					com <- gronos.MsgDeadLetter("app1", nil)
 				}()
 
 				select {
@@ -56,11 +55,11 @@ func main() {
 					}
 					go func() {
 						<-time.After(time.Second * 1)
-						com <- gronos.MsgDeadLetter("worker2", fmt.Errorf("kym"))
+						com <- gronos.MsgDeadLetter("worker2", nil)
 					}()
 					go func() {
 						<-time.After(time.Second * 2)
-						com <- gronos.MsgDeadLetter("worker3", fmt.Errorf("kym"))
+						com <- gronos.MsgDeadLetter("worker3", nil)
 					}()
 					<-ctx.Done()
 					return nil
@@ -72,7 +71,9 @@ func main() {
 					log.Println("worker2 tick")
 					return nil
 				}),
-		}, gronos.WithShutdownBehavior[string](gronos.ShutdownManual))
+		},
+		gronos.WithShutdownBehavior[string](gronos.ShutdownManual),
+	)
 
 	e := nono.Start()
 
