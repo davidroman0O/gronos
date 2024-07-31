@@ -71,6 +71,7 @@ type gronos[K comparable] struct {
 	statuses     sync.Map
 	config       gronosConfig
 	startTime    time.Time
+	open         atomic.Bool
 }
 
 // applicationContext holds the context and metadata for a running application.
@@ -80,7 +81,7 @@ type applicationContext[K comparable] struct {
 	ctx      context.Context
 	com      chan Message
 	retries  uint
-	alive    atomic.Bool
+	alive    bool
 	reason   error
 	shutdown chan struct{}
 	closer   func() // proxy function to close the channel shutdown
@@ -130,6 +131,7 @@ func (g *gronos[K]) Start() chan error {
 	errChan := make(chan error, 100)
 	g.isShutting.Store(false)
 	g.startTime = time.Now()
+	g.open.Store(true)
 
 	// Apply extensions' OnStart hooks
 	for _, ext := range g.extensions {
@@ -158,7 +160,9 @@ func WithTimeout(timeout time.Duration) ShutdownOption {
 
 // Shutdown initiates the shutdown process for all applications managed by the gronos instance.
 func (g *gronos[K]) Shutdown(opts ...ShutdownOption) {
-	c := &shutdownOptions{}
+	c := &shutdownOptions{
+		timeout: time.Millisecond * 10,
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -222,7 +226,7 @@ func (g *gronos[K]) checkAutomaticShutdown() {
 	allStopped := true
 	g.applications.Range(func(_, value interface{}) bool {
 		app := value.(applicationContext[K])
-		if app.alive.Load() {
+		if app.alive {
 			allStopped = false
 			return false
 		}
@@ -266,7 +270,7 @@ func (g *gronos[K]) gracefulShutdown(done chan<- struct{}) {
 func (g *gronos[K]) forceShutdown() {
 	g.applications.Range(func(_, value interface{}) bool {
 		app := value.(applicationContext[K])
-		if app.alive.Load() {
+		if app.alive {
 			app.cancel()
 		}
 		return true
@@ -278,7 +282,7 @@ func (g *gronos[K]) shutdownApps(cancelled bool) {
 	var wg sync.WaitGroup
 	g.applications.Range(func(key, value interface{}) bool {
 		app := value.(applicationContext[K])
-		if app.alive.Load() {
+		if app.alive {
 			wg.Add(1)
 			go func(k K) {
 				defer wg.Done()
@@ -291,6 +295,7 @@ func (g *gronos[K]) shutdownApps(cancelled bool) {
 		}
 		return true
 	})
+	g.open.Store(false)
 	wg.Wait()
 }
 
@@ -371,7 +376,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 		shutdown: shutdown,
 		reason:   nil,
 	}
-	appCtx.alive.Store(true)
+	appCtx.alive = true
 
 	realDone := make(chan struct{})
 
@@ -400,22 +405,31 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
 			}, retry.Attempts(ctx.retries))
 		}
 
+		// extend context cleanup
+		for _, ext := range g.extensions {
+			ctx.ctx = ext.OnStopRuntime(ctx.ctx)
+		}
+
 		value, ok := g.applications.Load(key)
 		if !ok {
 			g.com <- MsgError(key, fmt.Errorf("unable to find application %v", key))
 			return
 		}
 		future := value.(applicationContext[K])
-		if !future.alive.Load() {
+		if !future.alive {
 			return
 		}
 
-		if err != nil && err != context.Canceled {
-			g.com <- MsgDeadLetter(key, err)
-		} else if err == context.Canceled {
-			g.com <- MsgContextTerminated(key, ctx.ctx.Err())
-		} else {
-			g.com <- MsgTerminated(key)
+		// timing of shutdown might not be right if we shutdown manually
+		// probably we could make a better?
+		if g.open.Load() {
+			if err != nil && err != context.Canceled {
+				g.com <- MsgDeadLetter(key, err)
+			} else if err == context.Canceled {
+				g.com <- MsgContextTerminated(key, ctx.ctx.Err())
+			} else {
+				g.com <- MsgTerminated(key)
+			}
 		}
 
 		close(realDone)

@@ -131,7 +131,11 @@ func subscriberApp(ctx context.Context, shutdown <-chan struct{}) error {
 
 	for {
 		select {
-		case msg := <-messages:
+		case msg, ok := <-messages:
+			if !ok {
+				fmt.Println("	Subscriber closed")
+				return nil
+			}
 			fmt.Printf("Received processed message: %s\n", string(msg.Payload))
 			msg.Ack()
 		case <-ctx.Done():

@@ -104,10 +104,10 @@ func (g *gronos[K]) handleDeadLetter(msg deadLetterMessage[K]) error {
 	if !ok {
 		return nil
 	}
-	if !app.alive.Load() {
+	if !app.alive {
 		return nil
 	}
-	app.alive.Store(false)
+	app.alive = false
 	app.reason = msg.Reason
 	app.closer()
 	g.applications.Store(app.k, app)
@@ -126,10 +126,10 @@ func (g *gronos[K]) handleTerminated(msg terminatedMessage[K]) error {
 	if !ok {
 		return nil
 	}
-	if !app.alive.Load() {
+	if !app.alive {
 		return nil
 	}
-	app.alive.Store(false)
+	app.alive = false
 	app.closer()
 	g.applications.Store(app.k, app)
 	return nil
@@ -144,10 +144,10 @@ func (g *gronos[K]) handleContextTerminated(msg contextTerminatedMessage[K]) err
 	if !ok {
 		return nil
 	}
-	if !app.alive.Load() {
+	if !app.alive {
 		return nil
 	}
-	app.alive.Store(false)
+	app.alive = false
 	app.cancel()
 	g.applications.Store(app.k, app)
 	return nil

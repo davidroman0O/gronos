@@ -36,6 +36,10 @@ func (w *WatermillMiddleware[K]) OnNewRuntime(ctx context.Context) context.Conte
 	return context.WithValue(ctx, "watermill_middleware", w)
 }
 
+func (w *WatermillMiddleware[K]) OnStopRuntime(ctx context.Context) context.Context {
+	return ctx
+}
+
 func (w *WatermillMiddleware[K]) OnStop(ctx context.Context, errChan chan<- error) error {
 	w.logger.Info("Stopping Watermill middleware", nil)
 	w.closeAllComponents(errChan)
