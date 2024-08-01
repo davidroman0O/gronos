@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/avast/retry-go/v3"
+	"github.com/charmbracelet/log"
 )
 
 type ShutdownBehavior int
@@ -19,27 +21,64 @@ const (
 	ShutdownManual
 )
 
+var (
+	ErrUnhandledMessage = errors.New("unhandled message")
+	ErrPanic            = errors.New("panic")
+)
+
 // StatusState represents the possible states of a component
 type StatusState string
 
+/// States:
+/// - Added: The initial state when the application is stored.
+/// - Running: The state when the runtime application is triggered.
+/// - ShuttingDown: The intermediate state when any shutdown mechanism is initiated.
+/// - Cancelled: The state when the context is cancelled.
+/// - Panicked: The state when there is panic recovery with an error.
+/// - Terminated: The state when the application has finished its work.
+/// - ShutdownWithError: The state when there is an error associated with the shutdown.
+/// - ShutdownByRequested: The state when the framework is triggered by developer code to shut down.
+/// - ShutdownByOS: The state when the operating system requests a shutdown.
+/// Messages:
+/// - AddRuntimeApplicationMessage: Transitions from Added to Running.
+/// - CancelShutdown: Transitions from Running to Cancelled.
+/// - TerminateShutdown: Transitions from Running to Terminated.
+/// - PanicShutdown: Transitions from Running to Panicked.
+/// - ErrorShutdown: Transitions from Running to ShutdownWithError.
+/// - RequestedShutdown: Transitions from Running to ShutdownByRequested.
+/// - OSShutdown: Transitions from Running to ShutdownByOS.
+
 const (
-	StatusAdded     StatusState = "added"
-	StatusStarting  StatusState = "starting"
-	StatusRunning   StatusState = "running"
-	StatusCompleted StatusState = "completed"
-	StatusFailed    StatusState = "failed"
+	StatusAdded       StatusState = "added"        // first state
+	StatusRunning     StatusState = "running"      // when the runtime application is triggered
+	StatusShutingDown StatusState = "shuting_down" // when any of messages related to shutdown is initiated
+
+	// final states
+
+	StatusShutdownCancelled  StatusState = "shutdown_cancelled"
+	StatusShutdownPanicked   StatusState = "shutdown_panicked"
+	StatusShutdownTerminated StatusState = "shutdown_terminated"
+	StatusShutdownError      StatusState = "shutdown_error"
 )
 
-// StatusMessage is used to update the status of a component
-type StatusMessage[K comparable] struct {
-	HeaderMessage[K]
-	State StatusState
-}
-
-// StatusResponseMessage is the response to a status request
-type StatusResponseMessage[K comparable] struct {
-	HeaderMessage[K]
-	State StatusState
+func stateNumber(state StatusState) int {
+	switch state {
+	case StatusAdded:
+		return 0
+	case StatusRunning:
+		return 1
+	case StatusShutingDown:
+		return 2
+	case StatusShutdownCancelled:
+		return 3
+	case StatusShutdownPanicked:
+		return 3
+	case StatusShutdownTerminated:
+		return 3
+	case StatusShutdownError:
+		return 3
+	}
+	return -1
 }
 
 // RuntimeApplication is a function type representing an application that can be run concurrently.
@@ -58,34 +97,42 @@ type gronosConfig struct {
 // gronos is the main struct that manages concurrent applications.
 // It is parameterized by a comparable key type K.
 type gronos[K comparable] struct {
-	applications sync.Map
-	keys         ConcurrentArray[K]
-	com          chan Message
-	wait         sync.WaitGroup
-	ctx          context.Context
-	cancel       context.CancelFunc
-	done         chan struct{}
-	closer       func()
-	isShutting   atomic.Bool
-	extensions   []ExtensionHooks[K]
-	statuses     sync.Map
-	config       gronosConfig
-	startTime    time.Time
-	open         atomic.Bool
-}
+	com        chan Message
+	wait       sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+	closer     func()
+	config     gronosConfig
+	startTime  time.Time
+	started    atomic.Bool // define if gronos started or not
+	extensions []ExtensionHooks[K]
+	errChan    chan error
 
-// applicationContext holds the context and metadata for a running application.
-type applicationContext[K comparable] struct {
-	k        K
-	app      RuntimeApplication
-	ctx      context.Context
-	com      chan Message
-	retries  uint
-	alive    bool
-	reason   error
-	shutdown chan struct{}
-	closer   func() // proxy function to close the channel shutdown
-	cancel   func() // proxy function to cancel the context
+	// when we are shutting down to prevent triggering multiple shutdowns
+	isShutting atomic.Bool
+
+	// phase 1 - asked for shutdown
+	askShutting chan struct{}
+	// phase 2 - trigger on goroutines when have to shutdown
+	shutting chan struct{}
+	// phase 3 - when shutting is return all goroutines, closer will close the done channel
+	done chan struct{}
+
+	init map[K]RuntimeApplication
+
+	// TODO: i think i shouldn't have `applications` but split it for each attributes and use messages to mutate it
+	mkeys   sync.Map
+	mapp    sync.Map // application func - key is mkey
+	mctx    sync.Map // ctx - key is mkey
+	mcom    sync.Map // com chan - key is mkey
+	mret    sync.Map // retries - key is mkey
+	mshu    sync.Map // shutdown chan - key is mkey
+	mali    sync.Map // alive - key is mkey
+	mrea    sync.Map // reason - key is mkey
+	mcloser sync.Map // closer - key is mkey
+	mcancel sync.Map // cancel - key is mkey
+	mstatus sync.Map // status - key is mkey
+	mdone   sync.Map // done - key is mkey
 }
 
 type Option[K comparable] func(*gronos[K])
@@ -100,86 +147,159 @@ func WithExtension[K comparable](ext ExtensionHooks[K]) Option[K] {
 func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts ...Option[K]) *gronos[K] {
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
-		com:        make(chan Message, 200),
-		keys:       ConcurrentArray[K]{},
-		ctx:        ctx,
-		cancel:     cancel,
+		com:    make(chan Message, 200),
+		ctx:    ctx,
+		cancel: cancel,
+		// phase 1 - asked for shutdown
+		askShutting: make(chan struct{}),
+		// phase 2 - trigger on goroutines when have to shutdown
+		shutting: make(chan struct{}),
+		// phase 3 - when shutting is return all goroutines, closer will close the done channel
 		done:       make(chan struct{}),
+		errChan:    make(chan error, 100),
 		extensions: []ExtensionHooks[K]{},
-		statuses:   sync.Map{},
 		config: gronosConfig{
-			shutdownBehavior: ShutdownAutomatic,
+			shutdownBehavior: ShutdownManual,
 			gracePeriod:      2 * time.Second,
 			minRuntime:       2 * time.Second,
 		},
+		init: init,
 	}
 	for _, opt := range opts {
 		opt(g)
 	}
-	for k, v := range init {
-		g.Add(k, v)
-	}
 	g.closer = sync.OnceFunc(func() {
 		close(g.com)
 		close(g.done)
+		g.started.Store(false) // we stopped
 	})
 	return g
 }
 
 // Start begins running the gronos instance and returns a channel for receiving errors.
 func (g *gronos[K]) Start() chan error {
-	errChan := make(chan error, 100)
+	// can't trigger twice in a row Start until it is shutdown
+	if g.started.Load() {
+		g.errChan <- fmt.Errorf("gronos is already running")
+		return g.errChan
+	}
+	// If it was shutdown, we need to re-init values
+	if g.isShutting.Load() {
+		// re-init values, we are re-using the same instance
+		g.askShutting = make(chan struct{})
+	}
 	g.isShutting.Store(false)
 	g.startTime = time.Now()
-	g.open.Store(true)
+	g.started.Store(true)
 
 	// Apply extensions' OnStart hooks
 	for _, ext := range g.extensions {
-		if err := ext.OnStart(g.ctx, errChan); err != nil {
-			errChan <- fmt.Errorf("extension error on start: %w", err)
-			close(errChan)
-			return errChan
+		if err := ext.OnStart(g.ctx, g.errChan); err != nil {
+			g.errChan <- fmt.Errorf("extension error on start: %w", err)
+			close(g.errChan) // special case, we can't continue
+			return g.errChan
 		}
 	}
 
-	go g.run(errChan)
-	return errChan
-}
-
-type shutdownOptions struct {
-	timeout time.Duration
-}
-
-type ShutdownOption func(*shutdownOptions)
-
-func WithTimeout(timeout time.Duration) ShutdownOption {
-	return func(c *shutdownOptions) {
-		c.timeout = timeout
+	for k, v := range g.init {
+		g.com <- MsgAddRuntimeApplication[K](k, v)
 	}
+
+	go g.readMessages(g.errChan)
+	go g.run(g.errChan)
+
+	if g.config.shutdownBehavior == ShutdownAutomatic {
+		go g.automaticShutdown()
+	}
+
+	return g.errChan
 }
 
 // Shutdown initiates the shutdown process for all applications managed by the gronos instance.
-func (g *gronos[K]) Shutdown(opts ...ShutdownOption) {
-	c := &shutdownOptions{
-		timeout: time.Millisecond * 10,
+func (g *gronos[K]) Shutdown() {
+	log.Info("[Gronos] shutdown called")
+	if g.isShutting.Load() {
+		log.Error("[Gronos] shutdown already called")
+		return
 	}
-	for _, opt := range opts {
-		opt(c)
+	log.Info("[Gronos] shutdown isShutting to ", true)
+	// prevent multiple shutdowns
+	g.isShutting.Store(true)
+	log.Info("[Gronos] shutdown trigger askShutting ", g.askShutting)
+	if g.config.shutdownBehavior == ShutdownManual {
+		// in that exact order
+		close(g.askShutting)
+		g.shutdownAllAndWait()
+		close(g.shutting)
+		return
 	}
-	g.com <- ShutdownMessage{}
-	if c.timeout > 0 {
-		<-time.After(c.timeout)
-	}
+	// shutting down process will be kicked off by the automaticShutdown goroutine
+	g.askShutting <- struct{}{}
 }
 
 // Wait blocks until all applications managed by the gronos instance have terminated.
 func (g *gronos[K]) Wait() {
-	<-g.done
+	log.Info("[Gronos] wait", g.done)
+	if !g.started.Load() {
+		// wasn't even started
+		log.Info("[Gronos] wasn't started")
+		g.closer()
+		return
+	}
+	_, ok := <-g.done
+	log.Info("[Gronos] wait done", ok)
 }
 
 // OnDone returns the done channel, which will be closed when all runtimes have terminated.
 func (g *gronos[K]) OnDone() <-chan struct{} {
 	return g.done
+}
+
+func (g *gronos[K]) readMessages(errChan chan<- error) {
+	// drain the channel until it is closed
+	for m := range g.com {
+		if err := g.handleMessage(m); err != nil {
+			errChan <- err
+		}
+	}
+}
+
+func (g *gronos[K]) automaticShutdown() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	defer func() {
+		log.Info("[Gronos] closing askShutting")
+		close(g.askShutting)
+		close(g.shutting) // to trigger the other goroutine that need to stop
+	}()
+
+	// check if we need to shutdown
+	for {
+		select {
+		// asked for immediate shutdown
+		case <-g.askShutting:
+			log.Info("[Gronos] automatic shutdown askShutting triggered")
+			g.shutdownAllAndWait()
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			if g.isShutting.Load() {
+				log.Info("[Gronos] ticker shutdown stop", "reason", "isShutting")
+				// we do not need automatic shutdown anymore
+				ticker.Stop()
+				continue
+			}
+			log.Info("[Gronos] ticker shutdown")
+			if g.config.shutdownBehavior == ShutdownAutomatic {
+				log.Info("[Gronos] check automatic shutdown")
+				if g.checkAutomaticShutdown() {
+					return
+				}
+			}
+		}
+		runtime.Gosched() // give cpu time to other goroutines
+	}
 }
 
 // run is the main loop of the gronos instance, handling messages and managing applications.
@@ -193,110 +313,86 @@ func (g *gronos[K]) run(errChan chan<- error) {
 		}
 		close(errChan)
 		g.closer()
+		log.Info("[Gronos] run closed")
 	}()
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-g.ctx.Done():
-			g.initiateShutdown(true)
-			return
-		case <-ticker.C:
-			if g.config.shutdownBehavior == ShutdownAutomatic {
-				g.checkAutomaticShutdown()
-			}
-		case m, ok := <-g.com:
-			if !ok {
-				return
-			}
-			if err := g.handleMessage(m); err != nil {
-				errChan <- err
-			}
-		}
-	}
-}
-
-func (g *gronos[K]) checkAutomaticShutdown() {
-	if time.Since(g.startTime) < g.config.minRuntime {
+	// blocking until all applications are done
+	select {
+	case <-g.shutting:
+		log.Info("[Gronos] run shutting down")
+		return
+	case <-g.ctx.Done():
+		log.Info("[Gronos] context done")
+		g.com <- MsgAllCancelShutdown[K]()
 		return
 	}
-
-	allStopped := true
-	g.applications.Range(func(_, value interface{}) bool {
-		app := value.(applicationContext[K])
-		if app.alive {
-			allStopped = false
-			return false
-		}
-		return true
-	})
-
-	if allStopped {
-		g.initiateShutdown(false)
-	}
 }
 
-func (g *gronos[K]) initiateShutdown(cancelled bool) {
-	if !g.isShutting.CompareAndSwap(false, true) {
-		return // Shutdown already in progress
-	}
+// focused on shutting down all applications and waiting for them to finish
+func (g *gronos[K]) shutdownAllAndWait() {
+	log.Info("[Gronos] Initiating shutdownAllAndWait")
 
-	if g.config.shutdownBehavior == ShutdownManual && !cancelled {
-		g.shutdownApps(false)
-	} else {
-		timer := time.NewTimer(g.config.gracePeriod)
-		defer timer.Stop()
+	timeout := time.After(10 * time.Second) // Set the total timeout duration
+	log.Info("[Gronos] Timeout set for 10 seconds")
 
-		shutdownChan := make(chan struct{})
-		go g.gracefulShutdown(shutdownChan)
+	shutdownComplete := false
 
+	for !shutdownComplete {
 		select {
-		case <-timer.C:
-			g.forceShutdown()
-		case <-shutdownChan:
-			// Graceful shutdown completed
+		case <-timeout:
+			// Exit the loop if the total timeout duration has passed
+			log.Error("[Gronos] Shutdown timed out")
+			g.errChan <- fmt.Errorf("shutdown timed out")
+			shutdownComplete = true
+		default:
+			// Send shutdown message
+			log.Info("[Gronos] Sending MsgAllShutdown")
+			g.com <- MsgAllShutdown[K]()
+
+			// Wait for a specified timeout
+			log.Info("[Gronos] Waiting for 1 second")
+			<-time.After(1 * time.Second)
+
+			// Check if there are any alive instances
+			log.Info("[Gronos] Checking if any instances are alive")
+			doneAlive, msgAlive := MsgRequestAllAlive[K]()
+			g.com <- msgAlive
+			if alive := <-doneAlive; !alive {
+				log.Info("[Gronos] No instances are alive")
+				shutdownComplete = true
+			} else {
+				log.Info("[Gronos] Some instances are still alive")
+			}
 		}
 	}
-	g.cancel() // Cancel the context after shutdown is complete
+
+	log.Info("[Gronos] Entering grace period")
+	<-time.After(g.config.gracePeriod)
+	log.Info("[Gronos] Shutdown all and finished waiting")
 }
 
-func (g *gronos[K]) gracefulShutdown(done chan<- struct{}) {
-	g.shutdownApps(false)
-	close(done)
-}
+// check if all applications are alive or not, if not then time to gronos shutdown
+func (g *gronos[K]) checkAutomaticShutdown() bool {
+	if time.Since(g.startTime) < g.config.minRuntime {
+		return false
+	}
 
-func (g *gronos[K]) forceShutdown() {
-	g.applications.Range(func(_, value interface{}) bool {
-		app := value.(applicationContext[K])
-		if app.alive {
-			app.cancel()
-		}
-		return true
-	})
-}
+	log.Info("[Gronos] check automatic shutdown sending all shutdown")
 
-// shutdownApps initiates the shutdown process for all running applications.
-func (g *gronos[K]) shutdownApps(cancelled bool) {
-	var wg sync.WaitGroup
-	g.applications.Range(func(key, value interface{}) bool {
-		app := value.(applicationContext[K])
-		if app.alive {
-			wg.Add(1)
-			go func(k K) {
-				defer wg.Done()
-				if cancelled {
-					g.com <- MsgContextTerminated(k, g.ctx.Err())
-				} else {
-					g.com <- MsgDeadLetter(k, errors.New("shutdown"))
-				}
-			}(app.k)
-		}
-		return true
-	})
-	g.open.Store(false)
-	wg.Wait()
+	doneAlive, msgAlive := MsgRequestAllAlive[K]()
+	g.com <- msgAlive
+	log.Info("[Gronos] Sent MsgRequestAllAlive")
+	alive := <-doneAlive
+	log.Info("[Gronos] Received MsgRequestAllAlive", "alive", alive)
+
+	if alive {
+		log.Info("[Gronos] Instances might be still alive")
+		return false
+	}
+
+	g.shutdownAllAndWait()
+
+	return true
 }
 
 // handleMessage processes incoming messages and updates the gronos state accordingly.
@@ -328,114 +424,203 @@ func (g *gronos[K]) handleMessage(m Message) error {
 
 // IsStarted checks if a component has started
 func (g *gronos[K]) IsStarted(k K) bool {
-	state, ok := g.statuses.Load(k)
-	return ok && (state == StatusStarting || state == StatusRunning)
+	state := g.GetStatus(k)
+	return (state == StatusRunning)
 }
 
 // IsComplete checks if a component has completed
 func (g *gronos[K]) IsComplete(k K) bool {
-	state, ok := g.statuses.Load(k)
-	return ok && state == StatusCompleted
+	state := g.GetStatus(k)
+	return (state == StatusShutdownCancelled ||
+		state == StatusShutdownError ||
+		state == StatusShutdownTerminated ||
+		state == StatusShutdownPanicked)
 }
 
 // GetStatus retrieves the current status of a component
-func (g *gronos[K]) GetStatus(k K) (StatusState, bool) {
-	state, ok := g.statuses.Load(k)
-	if !ok {
-		return "", false
+func (g *gronos[K]) GetStatus(k K) StatusState {
+	done, msg := MsgRequestStatus(k)
+	g.com <- msg
+	return <-done
+}
+
+type addOptions struct {
+	whenState StatusState
+}
+
+type addOption func(*addOptions)
+
+func WhenState(state StatusState) addOption {
+	return func(o *addOptions) {
+		o.whenState = state
 	}
-	return state.(StatusState), true
 }
 
 // Add adds a new application to the gronos instance with the given key and RuntimeApplication.
-func (g *gronos[K]) Add(k K, v RuntimeApplication) error {
-	if _, ok := g.applications.Load(k); ok {
-		return fmt.Errorf("application with key %v already exists", k)
+func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan struct{} {
+	cfg := addOptions{
+		whenState: StatusAdded,
 	}
-	if g.ctx.Err() != nil {
-		return fmt.Errorf("context is already cancelled")
-	}
-	if g.isShutting.Load() {
-		return fmt.Errorf("gronos is shutting down")
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
-	ctx, cancel := g.createContext()
-	shutdown := make(chan struct{})
+	// Add new runtime application
+	g.com <- MsgAddRuntimeApplication[K](k, v)
 
-	// extend context with new eventual context
-	for _, ext := range g.extensions {
-		ctx = ext.OnNewRuntime(ctx)
-	}
+	// Request asynchronous confirmation of the state
+	done, msg := MsgRequestStatusAsync[K](k, cfg.whenState)
 
-	appCtx := applicationContext[K]{
-		k:        k,
-		app:      v,
-		ctx:      ctx,
-		com:      g.com,
-		retries:  0,
-		shutdown: shutdown,
-		reason:   nil,
-	}
-	appCtx.alive = true
+	// send the message
+	g.com <- msg
 
-	realDone := make(chan struct{})
-
-	appCtx.closer = sync.OnceFunc(func() {
-		close(shutdown)
-		<-realDone
-		g.wait.Done()
-	})
-
-	appCtx.cancel = sync.OnceFunc(func() {
-		cancel()
-		appCtx.closer()
-	})
-
-	g.applications.Store(k, appCtx)
-	g.keys.Append(k)
-	g.wait.Add(1)
-
-	go func(key K, ctx applicationContext[K]) {
-		var err error
-		if ctx.retries == 0 {
-			err = ctx.app(ctx.ctx, ctx.shutdown)
-		} else {
-			err = retry.Do(func() error {
-				return ctx.app(ctx.ctx, ctx.shutdown)
-			}, retry.Attempts(ctx.retries))
+	proxy := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(5 * time.Second):
+			log.Printf("Timeout waiting for application %v to reach state %v", k, cfg.whenState)
+		case <-done:
+			log.Printf("Application %v reached state %v", k, cfg.whenState)
 		}
+		close(proxy)
+	}()
 
-		// extend context cleanup
-		for _, ext := range g.extensions {
-			ctx.ctx = ext.OnStopRuntime(ctx.ctx)
-		}
+	// return receive only channel if the user want to listen when the runtime application is added
+	return proxy
+}
 
-		value, ok := g.applications.Load(key)
-		if !ok {
-			g.com <- MsgError(key, fmt.Errorf("unable to find application %v", key))
-			return
-		}
-		future := value.(applicationContext[K])
-		if !future.alive {
-			return
-		}
+// Used as a goroutine which is blocking until the application is done
+func (g *gronos[K]) handleRuntimeApplication(key K, com chan Message) {
+	var retries uint
 
-		// timing of shutdown might not be right if we shutdown manually
-		// probably we could make a better?
-		if g.open.Load() {
-			if err != nil && err != context.Canceled {
-				g.com <- MsgDeadLetter(key, err)
-			} else if err == context.Canceled {
-				g.com <- MsgContextTerminated(key, ctx.ctx.Err())
-			} else {
-				g.com <- MsgTerminated(key)
+	var shutdown chan struct{}
+	var app RuntimeApplication
+	var ctx context.Context
+
+	var ok bool
+	var value any
+
+	// only get what we need
+	{
+		{
+			if value, ok = g.mret.Load(key); !ok {
+				return
 			}
+			retries = value.(uint)
 		}
 
-		close(realDone)
-	}(k, appCtx)
+		{
+			if value, ok = g.mapp.Load(key); !ok {
+				return
+			}
+			app = value.(RuntimeApplication)
+		}
 
-	return nil
+		{
+			if value, ok = g.mctx.Load(key); !ok {
+				return
+			}
+			ctx = value.(context.Context)
+		}
+
+		{
+			if value, ok = g.mshu.Load(key); !ok {
+				return
+			}
+			shutdown = value.(chan struct{})
+		}
+	}
+
+	g.mstatus.Store(key, StatusRunning)
+
+	log.Info("[RuntimeApplication] goroutine executed", key)
+	var err error
+	go func() {
+		log.Info("[RuntimeApplication] goroutine start", key)
+		defer func() {
+			if r := recover(); r != nil {
+				switch v := r.(type) {
+				case error:
+					err = errors.Join(v, ErrPanic)
+				case string:
+					err = errors.Join(errors.New(v), ErrPanic)
+				default:
+					err = errors.Join(fmt.Errorf("%v", v), ErrPanic)
+				}
+				close(shutdown)
+			}
+		}()
+		if retries == 0 {
+			log.Info("[RuntimeApplication] goroutine start runtime application", key)
+			err = app(ctx, shutdown)
+		} else {
+			log.Info("[RuntimeApplication] goroutine start retriable runtime application", key)
+			err = retry.Do(func() error {
+				return app(ctx, shutdown)
+			}, retry.Attempts(retries))
+		}
+		log.Info("[RuntimeApplication] goroutine done", key, err)
+	}()
+
+	log.Info("[RuntimeApplication] waiting goroutine", key, err)
+
+	// context or shutdown might be triggered
+	select {
+	case <-ctx.Done():
+		err = errors.Join(err, ctx.Err())
+	case <-shutdown:
+	}
+
+	log.Info("[RuntimeApplication] wait done", key, err)
+
+	defer func() {
+		log.Info("[RuntimeApplication] defer", key, err)
+		// read done channel
+		if value, ok = g.mdone.Load(key); !ok {
+			// log error
+			log.Info("[RuntimeApplication] defer not found", key)
+		}
+		time.Sleep(1 * time.Second)
+		close(value.(chan struct{}))
+		log.Info("[RuntimeApplication] defer done", key)
+	}()
+
+	// extend context cleanup
+	for _, ext := range g.extensions {
+		ctx = ext.OnStopRuntime(ctx)
+	}
+
+	// If the application:
+	// - close its own shutdown function
+	// - cancelled it's own context
+	// then it will pass after that block and send a message to the com
+	// otherwise, we just need to quit that function
+	{
+		if value, ok = g.mali.Load(key); !ok {
+			return
+		}
+		alive := value.(bool)
+		if !alive {
+			return
+		}
+	}
+
+	log.Info("[RuntimeApplication] com", key, err)
+	if err != nil {
+		if errors.Is(err, context.Canceled) { // cancellation
+			log.Info("[RuntimeApplication] com canceled", key, err)
+			com <- MsgCancelShutdown(key, ctx.Err())
+		} else if errors.Is(err, ErrPanic) { // panic recovery
+			log.Info("[RuntimeApplication] com panic", key, err)
+			com <- MsgPanicShutdown(key, err)
+		} else { // error shutdown
+			log.Info("[RuntimeApplication] com error", key, err)
+			com <- MsgErrorShutdown(key, err)
+		}
+	} else { // application terminated or requested shutdown
+		log.Info("[RuntimeApplication] com terminate", key)
+		com <- MsgTerminateShutdown(key)
+	}
 }
 
 type ctxKey string
@@ -476,7 +661,74 @@ func WithMinRuntime[K comparable](duration time.Duration) Option[K] {
 	}
 }
 
-// RequestShutdown initiates a manual shutdown
-func (g *gronos[K]) RequestShutdown() {
-	g.com <- ShutdownMessage{}
-}
+// func (g *gronos[K]) initiateShutdown(cancelled bool) {
+// 	if !g.isShutting.CompareAndSwap(false, true) {
+// 		return // Shutdown already in progress
+// 	}
+
+// 	if g.config.shutdownBehavior == ShutdownManual && !cancelled {
+// 		g.shutdownApps(false)
+// 	} else {
+// 		timer := time.NewTimer(g.config.gracePeriod)
+// 		defer timer.Stop()
+
+// 		shutdownChan := make(chan struct{})
+// 		go g.gracefulShutdown(shutdownChan)
+
+// 		select {
+// 		case <-timer.C:
+// 			g.forceShutdown()
+// 		case <-shutdownChan:
+// 			// Graceful shutdown completed
+// 		}
+// 	}
+// 	g.cancel() // Cancel the context after shutdown is complete
+// }
+
+// func (g *gronos[K]) gracefulShutdown(done chan<- struct{}) {
+// 	// g.shutdownApps(false)
+// 	close(done)
+// }
+
+// func (g *gronos[K]) forceShutdown() {
+
+// 	var value any
+// 	var ok bool
+// 	g.mkeys.Range(func(key, kv interface{}) bool {
+// 		if value, ok = g.mali.Load(key); !ok {
+// 			alive := value.(bool)
+// 			if alive {
+// 				if value, ok = g.mcancel.Load(key); ok {
+// 					cancel := value.(func())
+// 					cancel()
+// 				} // todo: log error
+// 				return false
+// 			}
+// 		} // todo: log error
+// 		return true
+// 	})
+
+// }
+
+// // shutdownApps initiates the shutdown process for all running applications.
+// func (g *gronos[K]) shutdownApps(cancelled bool) {
+
+// 	var value any
+// 	var ok bool
+// 	g.mkeys.Range(func(key, kv interface{}) bool {
+// 		if value, ok = g.mali.Load(key); !ok {
+// 			alive := value.(bool)
+// 			if alive {
+// 				if cancelled {
+// 					g.com <- MsgContextTerminated(key, g.ctx.Err())
+// 				} else {
+// 					g.com <- MsgDeadLetter(key, errors.New("shutdown"))
+// 				}
+// 				return false
+// 			}
+// 		} // todo: log error
+// 		return true
+// 	})
+
+// 	g.open.Store(false)
+// }

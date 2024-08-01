@@ -18,19 +18,23 @@ func TestGronos(t *testing.T) {
 		appStarted := make(chan struct{})
 		appFinished := make(chan struct{})
 
-		g := New[string](ctx, map[string]RuntimeApplication{
-			"test-app": func(ctx context.Context, shutdown <-chan struct{}) error {
-				close(appStarted)
-				select {
-				case <-ctx.Done():
-					close(appFinished)
-					return ctx.Err()
-				case <-shutdown:
-					close(appFinished)
-					return nil
-				}
+		g := New[string](
+			ctx,
+			map[string]RuntimeApplication{
+				"test-app": func(ctx context.Context, shutdown <-chan struct{}) error {
+					close(appStarted)
+					select {
+					case <-ctx.Done():
+						close(appFinished)
+						return ctx.Err()
+					case <-shutdown:
+						close(appFinished)
+						return nil
+					}
+				},
 			},
-		})
+			WithMinRuntime[string](time.Second/2), WithGracePeriod[string](time.Second/2),
+		)
 
 		errors := g.Start()
 

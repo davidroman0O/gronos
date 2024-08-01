@@ -51,7 +51,7 @@ func main() {
 	fmt.Println("Shutting down...")
 
 	// Initiate shutdown
-	g.RequestShutdown()
+	g.Shutdown()
 
 	fmt.Println("Waiting for shutdown to complete...")
 
@@ -68,12 +68,12 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 	pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
 
 	com <- watermillext.AddPublisherMessage[string]{
-		HeaderMessage: gronos.HeaderMessage[string]{Key: "pubsub"},
-		Publisher:     pubSub,
+		KeyMessage: gronos.KeyMessage[string]{Key: "pubsub"},
+		Publisher:  pubSub,
 	}
 	com <- watermillext.AddSubscriberMessage[string]{
-		HeaderMessage: gronos.HeaderMessage[string]{Key: "pubsub"},
-		Subscriber:    pubSub,
+		KeyMessage: gronos.KeyMessage[string]{Key: "pubsub"},
+		Subscriber: pubSub,
 	}
 
 	router, err := message.NewRouter(message.RouterConfig{}, watermill.NewStdLogger(false, false))
@@ -81,13 +81,13 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 		return err
 	}
 	com <- watermillext.AddRouterMessage[string]{
-		HeaderMessage: gronos.HeaderMessage[string]{Key: "router"},
-		Router:        router,
+		KeyMessage: gronos.KeyMessage[string]{Key: "router"},
+		Router:     router,
 	}
 
 	com <- gronos.StatusMessage[string]{
-		HeaderMessage: gronos.HeaderMessage[string]{Key: "setup"},
-		State:         gronos.StatusCompleted,
+		KeyMessage: gronos.KeyMessage[string]{Key: "setup"},
+		State:      gronos.StatusCompleted,
 	}
 
 	return nil
@@ -153,7 +153,7 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
 	}
 
 	com <- watermillext.AddHandlerMessage[string]{
-		HeaderMessage:  gronos.HeaderMessage[string]{Key: "router"},
+		KeyMessage:     gronos.KeyMessage[string]{Key: "router"},
 		HandlerName:    "example-handler",
 		SubscribeTopic: "example.topic",
 		PublishTopic:   "example.processed.topic",

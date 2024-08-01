@@ -95,34 +95,34 @@ func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) error 
 }
 
 type AddPublisherMessage[K comparable] struct {
-	gronos.HeaderMessage[K]
+	gronos.KeyMessage[K]
 	Publisher message.Publisher
 }
 
 type AddSubscriberMessage[K comparable] struct {
-	gronos.HeaderMessage[K]
+	gronos.KeyMessage[K]
 	Subscriber message.Subscriber
 }
 
 type AddRouterMessage[K comparable] struct {
-	gronos.HeaderMessage[K]
+	gronos.KeyMessage[K]
 	Router *message.Router
 }
 
 type ClosePublisherMessage[K comparable] struct {
-	gronos.HeaderMessage[K]
+	gronos.KeyMessage[K]
 }
 
 type CloseSubscriberMessage[K comparable] struct {
-	gronos.HeaderMessage[K]
+	gronos.KeyMessage[K]
 }
 
 type AddHandlerMessage[K comparable] struct {
-	gronos.HeaderMessage[K] // Key here represents the router key
-	HandlerName             string
-	SubscribeTopic          string
-	PublishTopic            string
-	HandlerFunc             message.HandlerFunc
+	gronos.KeyMessage[K] // Key here represents the router key
+	HandlerName          string
+	SubscribeTopic       string
+	PublishTopic         string
+	HandlerFunc          message.HandlerFunc
 }
 
 func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) error {
