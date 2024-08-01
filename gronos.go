@@ -159,7 +159,7 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts 
 		errChan:    make(chan error, 100),
 		extensions: []ExtensionHooks[K]{},
 		config: gronosConfig{
-			shutdownBehavior: ShutdownManual,
+			shutdownBehavior: ShutdownAutomatic,
 			gracePeriod:      2 * time.Second,
 			minRuntime:       2 * time.Second,
 		},
