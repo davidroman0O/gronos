@@ -397,57 +397,39 @@ func (g *gronos[K]) handleCancelShutdown(msg CancelShutdown[K]) error {
 
 	return nil
 }
-
-// Used as a goroutine which is blocking until the application is done
 func (g *gronos[K]) handleRuntimeApplication(key K, com chan Message) {
 	var retries uint
-
 	var shutdown chan struct{}
 	var app RuntimeApplication
 	var ctx context.Context
 
-	var ok bool
-	var value any
-
-	// only get what we need
-	{
-		{
-			if value, ok = g.mret.Load(key); !ok {
-				return
-			}
-			retries = value.(uint)
-		}
-
-		{
-			if value, ok = g.mapp.Load(key); !ok {
-				return
-			}
-			app = value.(RuntimeApplication)
-		}
-
-		{
-			if value, ok = g.mctx.Load(key); !ok {
-				return
-			}
-			ctx = value.(context.Context)
-		}
-
-		{
-			if value, ok = g.mshu.Load(key); !ok {
-				return
-			}
-			shutdown = value.(chan struct{})
-		}
+	// Load necessary data
+	if value, ok := g.mret.Load(key); ok {
+		retries = value.(uint)
+	}
+	if value, ok := g.mapp.Load(key); ok {
+		app = value.(RuntimeApplication)
+	}
+	if value, ok := g.mctx.Load(key); ok {
+		ctx = value.(context.Context)
+	}
+	if value, ok := g.mshu.Load(key); ok {
+		shutdown = value.(chan struct{})
 	}
 
 	g.mstatus.Store(key, StatusRunning)
 
 	log.Info("[RuntimeApplication] goroutine executed", key)
-	var err error
+
+	errChan := make(chan error, 1)
+	done := make(chan struct{})
+
 	go func() {
+		defer close(done)
 		log.Info("[RuntimeApplication] goroutine start", key)
 		defer func() {
 			if r := recover(); r != nil {
+				var err error
 				switch v := r.(type) {
 				case error:
 					err = errors.Join(v, ErrPanic)
@@ -456,9 +438,12 @@ func (g *gronos[K]) handleRuntimeApplication(key K, com chan Message) {
 				default:
 					err = errors.Join(fmt.Errorf("%v", v), ErrPanic)
 				}
+				errChan <- err
 				close(shutdown)
 			}
 		}()
+
+		var err error
 		if retries == 0 {
 			log.Info("[RuntimeApplication] goroutine start runtime application", key)
 			err = app(ctx, shutdown)
@@ -468,65 +453,64 @@ func (g *gronos[K]) handleRuntimeApplication(key K, com chan Message) {
 				return app(ctx, shutdown)
 			}, retry.Attempts(retries))
 		}
+		errChan <- err
 		log.Info("[RuntimeApplication] goroutine done", key, err)
 	}()
 
-	log.Info("[RuntimeApplication] waiting goroutine", key, err)
+	log.Info("[RuntimeApplication] waiting goroutine", key)
 
-	// context or shutdown might be triggered
+	var err error
 	select {
 	case <-ctx.Done():
-		err = errors.Join(err, ctx.Err())
+		err = ctx.Err()
 	case <-shutdown:
+	case <-done:
+	}
+
+	// Check for any error from the goroutine
+	select {
+	case goroutineErr := <-errChan:
+		if goroutineErr != nil {
+			err = goroutineErr
+		}
+	default:
 	}
 
 	log.Info("[RuntimeApplication] wait done", key, err)
 
 	defer func() {
 		log.Info("[RuntimeApplication] defer", key, err)
-		// read done channel
-		if value, ok = g.mdone.Load(key); !ok {
-			// log error
+		if value, ok := g.mdone.Load(key); ok {
+			close(value.(chan struct{}))
+		} else {
 			log.Info("[RuntimeApplication] defer not found", key)
 		}
-		time.Sleep(1 * time.Second)
-		close(value.(chan struct{}))
 		log.Info("[RuntimeApplication] defer done", key)
 	}()
 
-	// extend context cleanup
+	// Extend context cleanup
 	for _, ext := range g.extensions {
 		ctx = ext.OnStopRuntime(ctx)
 	}
 
-	// If the application:
-	// - close its own shutdown function
-	// - cancelled it's own context
-	// then it will pass after that block and send a message to the com
-	// otherwise, we just need to quit that function
-	{
-		if value, ok = g.mali.Load(key); !ok {
-			return
-		}
-		alive := value.(bool)
-		if !alive {
-			return
-		}
+	// Check if the application is still alive
+	if value, ok := g.mali.Load(key); !ok || !value.(bool) {
+		return
 	}
 
 	log.Info("[RuntimeApplication] com", key, err)
 	if err != nil {
-		if errors.Is(err, context.Canceled) { // cancellation
+		if errors.Is(err, context.Canceled) {
 			log.Info("[RuntimeApplication] com canceled", key, err)
-			com <- MsgCancelShutdown(key, ctx.Err())
-		} else if errors.Is(err, ErrPanic) { // panic recovery
+			com <- MsgCancelShutdown(key, err)
+		} else if errors.Is(err, ErrPanic) {
 			log.Info("[RuntimeApplication] com panic", key, err)
 			com <- MsgPanicShutdown(key, err)
-		} else { // error shutdown
+		} else {
 			log.Info("[RuntimeApplication] com error", key, err)
 			com <- MsgErrorShutdown(key, err)
 		}
-	} else { // application terminated or requested shutdown
+	} else {
 		log.Info("[RuntimeApplication] com terminate", key)
 		com <- MsgTerminateShutdown(key)
 	}
