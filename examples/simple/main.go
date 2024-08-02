@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"os/signal"
+	"sync/atomic"
 	"time"
 
 	"github.com/davidroman0O/gronos"
@@ -82,9 +85,25 @@ func main() {
 		}
 	}()
 
+	ctrlc := atomic.Bool{}
+	timour := atomic.Bool{}
+
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		<-c
+		ctrlc.Store(true)
+		if !timour.Load() {
+			nono.Shutdown()
+		}
+	}()
+
 	go func() {
 		<-time.After(time.Second * 3)
-		nono.Shutdown()
+		if !ctrlc.Load() {
+			timour.Store(true)
+			nono.Shutdown()
+		}
 	}()
 
 	nono.Wait()
