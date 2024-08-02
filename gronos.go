@@ -26,8 +26,9 @@ const (
 )
 
 var (
-	ErrUnhandledMessage = errors.New("unhandled message")
-	ErrPanic            = errors.New("panic")
+	ErrUnhandledMessage         = errors.New("unhandled message")
+	ErrUnmanageExtensionMessage = errors.New("unmanage extension message")
+	ErrPanic                    = errors.New("panic")
 )
 
 // StatusState represents the possible states of a component
@@ -405,14 +406,18 @@ func (g *gronos[K]) handleMessage(m Message) error {
 
 	// If the gronos core couldn't handle it or returned an error, pass it to extensions
 	if coreErr != nil {
-		for _, ext := range g.extensions {
-			extErr := ext.OnMsg(g.ctx, m)
-			if extErr == nil {
-				// Message was handled by an extension
-				return nil
+		if errors.Is(coreErr, ErrUnhandledMessage) {
+			for _, ext := range g.extensions {
+				extErr := ext.OnMsg(g.ctx, m)
+				if extErr == nil {
+					// Message was handled by an extension
+					return nil
+				}
+				if errors.Is(extErr, ErrUnmanageExtensionMessage) {
+					// Collect extension errors, but continue trying other extensions
+					coreErr = errors.Join(coreErr, extErr)
+				}
 			}
-			// Collect extension errors, but continue trying other extensions
-			coreErr = errors.Join(coreErr, extErr)
 		}
 	}
 
@@ -507,33 +512,6 @@ func UseBus(ctx context.Context) (chan<- Message, error) {
 	}
 	return value.(chan Message), nil
 }
-
-// func UseBus[K comparable](ctx context.Context) (chan<- Message, error) {
-// 	comValue := ctx.Value(comKey)
-// 	if comValue == nil {
-// 		return nil, fmt.Errorf("com not found in context")
-// 	}
-
-// 	keyValue := ctx.Value(keyKey)
-// 	if keyValue == nil {
-// 		return nil, fmt.Errorf("key not found in context")
-// 	}
-
-// 	comChan := comValue.(chan Message)
-
-// 	proxyChan := make(chan Message)
-
-// 	go func() {
-// 		for msg := range proxyChan {
-// 			comChan <- Envelope[K]{
-// 				From:    keyValue.(K),
-// 				Message: msg,
-// 			}
-// 		}
-// 	}()
-
-// 	return proxyChan, nil
-// }
 
 func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {
 	return func(g *gronos[K]) {

@@ -22,8 +22,8 @@ func main() {
 		"setup": setupApp,
 	},
 		gronos.WithShutdownBehavior[string](gronos.ShutdownAutomatic),
-		gronos.WithGracePeriod[string](10*time.Second),
-		gronos.WithMinRuntime[string](30*time.Second),
+		gronos.WithGracePeriod[string](2*time.Second),
+		gronos.WithMinRuntime[string](5*time.Second),
 		gronos.WithExtension[string](watermillMiddleware),
 	)
 
@@ -46,7 +46,7 @@ func main() {
 	g.Add("router", routerApp)
 
 	// Run for a while
-	time.Sleep(1 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	fmt.Println("Shutting down...")
 
@@ -67,28 +67,20 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 
 	pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
 
-	com <- watermillext.AddPublisherMessage[string]{
-		KeyMessage: gronos.KeyMessage[string]{Key: "pubsub"},
-		Publisher:  pubSub,
-	}
-	com <- watermillext.AddSubscriberMessage[string]{
-		KeyMessage: gronos.KeyMessage[string]{Key: "pubsub"},
-		Subscriber: pubSub,
-	}
+	com <- watermillext.MsgAddPublisher("pubsub", pubSub)
+
+	com <- watermillext.MsgAddSubscriber("pubsub", pubSub)
 
 	router, err := message.NewRouter(message.RouterConfig{}, watermill.NewStdLogger(false, false))
 	if err != nil {
 		return err
 	}
-	com <- watermillext.AddRouterMessage[string]{
-		KeyMessage: gronos.KeyMessage[string]{Key: "router"},
-		Router:     router,
-	}
 
-	com <- gronos.StatusMessage[string]{
-		KeyMessage: gronos.KeyMessage[string]{Key: "setup"},
-		State:      gronos.StatusCompleted,
-	}
+	com <- watermillext.MsgAddRouter("router", router)
+
+	done, msg := gronos.MsgRequestStatusAsync("setup", gronos.StatusRunning)
+	com <- msg
+	<-done
 
 	return nil
 }
@@ -152,17 +144,17 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
 		return err
 	}
 
-	com <- watermillext.AddHandlerMessage[string]{
-		KeyMessage:     gronos.KeyMessage[string]{Key: "router"},
-		HandlerName:    "example-handler",
-		SubscribeTopic: "example.topic",
-		PublishTopic:   "example.processed.topic",
-		HandlerFunc: func(msg *message.Message) ([]*message.Message, error) {
+	com <- watermillext.MsgAddHandler(
+		"router",
+		"example-handler",
+		"example.topic",
+		"example.processed.topic",
+		func(msg *message.Message) ([]*message.Message, error) {
 			fmt.Printf("Processing message: %s\n", string(msg.Payload))
 			processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
 			return message.Messages{processedMsg}, nil
 		},
-	}
+	)
 
 	<-shutdown
 	return nil

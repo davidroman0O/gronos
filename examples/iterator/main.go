@@ -21,8 +21,8 @@ func main() {
 			if err != nil {
 				return err
 			}
-			bus <- gronos.MsgContextTerminated("iteratorApp", nil) // will execute the extra cancel
-			bus <- gronos.MsgDeadLetter("asideWorker", nil)        // will just stop shutdown
+			bus <- gronos.MsgCancelShutdown("iteratorApp", nil)
+			bus <- gronos.MsgTerminateShutdown("asideWorker") // will stop shutdown
 			return nil
 		},
 	})

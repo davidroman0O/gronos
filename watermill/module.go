@@ -27,6 +27,120 @@ func NewWatermillMiddleware[K comparable](logger watermill.LoggerAdapter) *Water
 	}
 }
 
+// Message types
+type AddPublisherMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	Publisher message.Publisher
+}
+
+type AddSubscriberMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	Subscriber message.Subscriber
+}
+
+type AddRouterMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	Router *message.Router
+}
+
+type ClosePublisherMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+}
+
+type CloseSubscriberMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+}
+
+type AddHandlerMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	HandlerName    string
+	SubscribeTopic string
+	PublishTopic   string
+	HandlerFunc    message.HandlerFunc
+}
+
+// Sync pools for message types
+var addPublisherPool = sync.Pool{
+	New: func() interface{} {
+		return &AddPublisherMessage[string]{}
+	},
+}
+
+var addSubscriberPool = sync.Pool{
+	New: func() interface{} {
+		return &AddSubscriberMessage[string]{}
+	},
+}
+
+var addRouterPool = sync.Pool{
+	New: func() interface{} {
+		return &AddRouterMessage[string]{}
+	},
+}
+
+var closePublisherPool = sync.Pool{
+	New: func() interface{} {
+		return &ClosePublisherMessage[string]{}
+	},
+}
+
+var closeSubscriberPool = sync.Pool{
+	New: func() interface{} {
+		return &CloseSubscriberMessage[string]{}
+	},
+}
+
+var addHandlerPool = sync.Pool{
+	New: func() interface{} {
+		return &AddHandlerMessage[string]{}
+	},
+}
+
+// Message creation functions
+func MsgAddPublisher[K comparable](key K, publisher message.Publisher) *AddPublisherMessage[K] {
+	msg := addPublisherPool.Get().(*AddPublisherMessage[K])
+	msg.Key = key
+	msg.Publisher = publisher
+	return msg
+}
+
+func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) *AddSubscriberMessage[K] {
+	msg := addSubscriberPool.Get().(*AddSubscriberMessage[K])
+	msg.Key = key
+	msg.Subscriber = subscriber
+	return msg
+}
+
+func MsgAddRouter[K comparable](key K, router *message.Router) *AddRouterMessage[K] {
+	msg := addRouterPool.Get().(*AddRouterMessage[K])
+	msg.Key = key
+	msg.Router = router
+	return msg
+}
+
+func MsgClosePublisher[K comparable](key K) *ClosePublisherMessage[K] {
+	msg := closePublisherPool.Get().(*ClosePublisherMessage[K])
+	msg.Key = key
+	return msg
+}
+
+func MsgCloseSubscriber[K comparable](key K) *CloseSubscriberMessage[K] {
+	msg := closeSubscriberPool.Get().(*CloseSubscriberMessage[K])
+	msg.Key = key
+	return msg
+}
+
+func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopic string, handlerFunc message.HandlerFunc) *AddHandlerMessage[K] {
+	msg := addHandlerPool.Get().(*AddHandlerMessage[K])
+	msg.Key = key
+	msg.HandlerName = handlerName
+	msg.SubscribeTopic = subscribeTopic
+	msg.PublishTopic = publishTopic
+	msg.HandlerFunc = handlerFunc
+	return msg
+}
+
+// Extension methods
 func (w *WatermillMiddleware[K]) OnStart(ctx context.Context, errChan chan<- error) error {
 	w.logger.Info("Starting Watermill middleware", nil)
 	return nil
@@ -94,69 +208,44 @@ func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) error 
 	return errs
 }
 
-type AddPublisherMessage[K comparable] struct {
-	gronos.KeyMessage[K]
-	Publisher message.Publisher
-}
-
-type AddSubscriberMessage[K comparable] struct {
-	gronos.KeyMessage[K]
-	Subscriber message.Subscriber
-}
-
-type AddRouterMessage[K comparable] struct {
-	gronos.KeyMessage[K]
-	Router *message.Router
-}
-
-type ClosePublisherMessage[K comparable] struct {
-	gronos.KeyMessage[K]
-}
-
-type CloseSubscriberMessage[K comparable] struct {
-	gronos.KeyMessage[K]
-}
-
-type AddHandlerMessage[K comparable] struct {
-	gronos.KeyMessage[K] // Key here represents the router key
-	HandlerName          string
-	SubscribeTopic       string
-	PublishTopic         string
-	HandlerFunc          message.HandlerFunc
-}
-
 func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) error {
 	switch msg := m.(type) {
-	case AddPublisherMessage[K]:
+	case *AddPublisherMessage[K]:
+		defer addPublisherPool.Put(msg)
 		return w.handleAddPublisher(ctx, msg)
-	case AddSubscriberMessage[K]:
+	case *AddSubscriberMessage[K]:
+		defer addSubscriberPool.Put(msg)
 		return w.handleAddSubscriber(ctx, msg)
-	case AddRouterMessage[K]:
+	case *AddRouterMessage[K]:
+		defer addRouterPool.Put(msg)
 		return w.handleAddRouter(ctx, msg)
-	case AddHandlerMessage[K]:
+	case *AddHandlerMessage[K]:
+		defer addHandlerPool.Put(msg)
 		return w.handleAddHandler(ctx, msg)
-	case ClosePublisherMessage[K]:
+	case *ClosePublisherMessage[K]:
+		defer closePublisherPool.Put(msg)
 		return w.handleClosePublisher(ctx, msg)
-	case CloseSubscriberMessage[K]:
+	case *CloseSubscriberMessage[K]:
+		defer closeSubscriberPool.Put(msg)
 		return w.handleCloseSubscriber(ctx, msg)
 	default:
-		return fmt.Errorf("unknown message type: %T", msg)
+		return gronos.ErrUnmanageExtensionMessage
 	}
 }
 
-func (w *WatermillMiddleware[K]) handleAddPublisher(ctx context.Context, msg AddPublisherMessage[K]) error {
+func (w *WatermillMiddleware[K]) handleAddPublisher(ctx context.Context, msg *AddPublisherMessage[K]) error {
 	w.pubs.Store(msg.Key, msg.Publisher)
 	w.logger.Info("Added publisher", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddSubscriber(ctx context.Context, msg AddSubscriberMessage[K]) error {
+func (w *WatermillMiddleware[K]) handleAddSubscriber(ctx context.Context, msg *AddSubscriberMessage[K]) error {
 	w.subs.Store(msg.Key, msg.Subscriber)
 	w.logger.Info("Added subscriber", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg ClosePublisherMessage[K]) error {
+func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg *ClosePublisherMessage[K]) error {
 	pub, ok := w.pubs.LoadAndDelete(msg.Key)
 	if !ok {
 		return fmt.Errorf("publisher not found: %v", msg.Key)
@@ -169,7 +258,7 @@ func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg C
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleCloseSubscriber(ctx context.Context, msg CloseSubscriberMessage[K]) error {
+func (w *WatermillMiddleware[K]) handleCloseSubscriber(ctx context.Context, msg *CloseSubscriberMessage[K]) error {
 	sub, ok := w.subs.LoadAndDelete(msg.Key)
 	if !ok {
 		return fmt.Errorf("subscriber not found: %v", msg.Key)
@@ -187,7 +276,7 @@ type RouterStatus struct {
 	Running bool
 }
 
-func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg AddRouterMessage[K]) error {
+func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg *AddRouterMessage[K]) error {
 	w.routers.Store(msg.Key, &RouterStatus{Router: msg.Router, Running: false})
 	w.logger.Info("Added router", watermill.LogFields{"key": msg.Key})
 
@@ -205,7 +294,7 @@ func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg AddRou
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg AddHandlerMessage[K]) error {
+func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg *AddHandlerMessage[K]) error {
 	routerStatus, ok := w.routers.Load(msg.Key)
 	if !ok {
 		return fmt.Errorf("router not found: %v", msg.Key)
