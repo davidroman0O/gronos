@@ -26,13 +26,12 @@ func main() {
 				go func() {
 					<-time.After(time.Second * 1)
 
-					com <- gronos.MsgAdd("worker3",
-						gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
-							log.Println("worker3 tick")
-							return nil
-						}))
+					com <- gronos.MsgAddRuntimeApplication("worker3", gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
+						log.Println("worker3 tick")
+						return nil
+					}))
 
-					com <- gronos.MsgDeadLetter("app1", nil)
+					com <- gronos.MsgTerminateShutdown("app1")
 				}()
 
 				select {
@@ -55,11 +54,11 @@ func main() {
 					}
 					go func() {
 						<-time.After(time.Second * 1)
-						com <- gronos.MsgDeadLetter("worker2", nil)
+						com <- gronos.MsgTerminateShutdown("worker2")
 					}()
 					go func() {
 						<-time.After(time.Second * 2)
-						com <- gronos.MsgDeadLetter("worker3", nil)
+						com <- gronos.MsgTerminateShutdown("worker3")
 					}()
 					<-ctx.Done()
 					return nil

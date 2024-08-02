@@ -13,6 +13,11 @@ import (
 	"github.com/charmbracelet/log"
 )
 
+type ctxKey string
+
+var comKey ctxKey = "com"
+var keyKey ctxKey = "key"
+
 type ShutdownBehavior int
 
 const (
@@ -83,9 +88,6 @@ func stateNumber(state StatusState) int {
 // RuntimeApplication is a function type representing an application that can be run concurrently.
 // It takes a context and a shutdown channel as parameters and returns an error.
 type RuntimeApplication func(ctx context.Context, shutdown <-chan struct{}) error
-
-// Message is an interface type for internal communication within gronos.
-type Message interface{}
 
 type gronosConfig struct {
 	shutdownBehavior ShutdownBehavior
@@ -158,6 +160,8 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts 
 		errChan:    make(chan error, 100),
 		extensions: []ExtensionHooks[K]{},
 		config: gronosConfig{
+			// TODO: make it configurable
+			// TODO: make a sub shutdown struct
 			shutdownBehavior: ShutdownAutomatic,
 			gracePeriod:      2 * time.Second,
 			minRuntime:       2 * time.Second,
@@ -488,10 +492,6 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 	return proxy
 }
 
-type ctxKey string
-
-var comKey ctxKey = "com"
-
 // createContext creates a new context with the gronos communication channel embedded.
 func (g *gronos[K]) createContext() (context.Context, context.CancelFunc) {
 	ctx := context.WithValue(context.Background(), comKey, g.com)
@@ -507,6 +507,33 @@ func UseBus(ctx context.Context) (chan<- Message, error) {
 	}
 	return value.(chan Message), nil
 }
+
+// func UseBus[K comparable](ctx context.Context) (chan<- Message, error) {
+// 	comValue := ctx.Value(comKey)
+// 	if comValue == nil {
+// 		return nil, fmt.Errorf("com not found in context")
+// 	}
+
+// 	keyValue := ctx.Value(keyKey)
+// 	if keyValue == nil {
+// 		return nil, fmt.Errorf("key not found in context")
+// 	}
+
+// 	comChan := comValue.(chan Message)
+
+// 	proxyChan := make(chan Message)
+
+// 	go func() {
+// 		for msg := range proxyChan {
+// 			comChan <- Envelope[K]{
+// 				From:    keyValue.(K),
+// 				Message: msg,
+// 			}
+// 		}
+// 	}()
+
+// 	return proxyChan, nil
+// }
 
 func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {
 	return func(g *gronos[K]) {
