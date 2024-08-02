@@ -3,6 +3,8 @@ package gronos
 import (
 	"context"
 	"errors"
+
+	"github.com/charmbracelet/log"
 )
 
 // IteratorOption is a function type for configuring the Iterator middleware.
@@ -25,21 +27,25 @@ func Iterator(iterCtx context.Context, tasks []CancellableTask, opts ...Iterator
 	for _, opt := range opts {
 		opt(config)
 	}
-
+	log.Info("[Iterator] Creating iterator")
 	return func(appCtx context.Context, shutdown <-chan struct{}) error {
 
 		li := NewLoopableIterator(tasks, config.loopOpts...) // only the loopable iterator will define when to stop
 		errChan := li.Run(iterCtx)
+		log.Info("[Iterator] Starting iterator")
 
 		var finalErr error
 		select {
 		case <-iterCtx.Done():
+			log.Info("[Iterator] Context done")
 			li.Cancel()
 			finalErr = iterCtx.Err()
 		case <-appCtx.Done():
+			log.Info("[Iterator] App context done")
 			li.Cancel()
 			finalErr = appCtx.Err()
 		case <-shutdown:
+			log.Info("[Iterator] Shutdown")
 			li.Cancel()
 		case err, ok := <-errChan:
 			if !ok {
@@ -50,6 +56,7 @@ func Iterator(iterCtx context.Context, tasks []CancellableTask, opts ...Iterator
 				li.Cancel()
 				finalErr = err
 			}
+			log.Info("[Iterator] Error", finalErr)
 		}
 
 		li.Wait() // Wait for the iterator to finish

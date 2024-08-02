@@ -3,6 +3,8 @@ package gronos
 import (
 	"context"
 	"time"
+
+	"github.com/charmbracelet/log"
 )
 
 // TickingApplication is a function type representing an application that performs periodic tasks.
@@ -33,7 +35,9 @@ func (t tickerWrapper) Tick() {
 //	})
 //	g.Add("periodicTask", worker)
 func Worker(interval time.Duration, mode ExecutionMode, app TickingApplication) RuntimeApplication {
+	log.Info("[Worker] Creating worker")
 	return func(ctx context.Context, shutdown <-chan struct{}) error {
+		log.Info("[Worker] Starting worker")
 		w := &tickerWrapper{
 			clock: NewClock(WithInterval(interval)),
 			ctx:   ctx,
@@ -45,12 +49,15 @@ func Worker(interval time.Duration, mode ExecutionMode, app TickingApplication) 
 
 		select {
 		case <-ctx.Done():
+			log.Info("[Worker] Context done")
 			w.clock.Stop()
 			return ctx.Err()
 		case <-shutdown:
+			log.Info("[Worker] Shutdown")
 			w.clock.Stop()
 			return nil
 		case err := <-w.cerr:
+			log.Info("[Worker] Error")
 			w.clock.Stop()
 			return err
 		}
