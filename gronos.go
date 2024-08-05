@@ -241,6 +241,19 @@ func (g *gronos[K]) Shutdown() {
 	g.askShutting <- struct{}{}
 }
 
+func (g *gronos[K]) shutdownCancel() {
+	log.Info("[Gronos] shutdownCancel")
+	if g.isShutting.Load() {
+		log.Error("[Gronos] shutdownCancel already called")
+		return
+	}
+	log.Info("[Gronos] shutdownCancel isShutting to ", true)
+	// prevent multiple shutdowns
+	g.isShutting.Store(true)
+	log.Info("[Gronos] shutdownCancel trigger askShutting ", g.askShutting)
+	g.askShutting <- struct{}{}
+}
+
 // Wait blocks until all applications managed by the gronos instance have terminated.
 func (g *gronos[K]) Wait() {
 	log.Info("[Gronos] wait", g.done)
@@ -327,7 +340,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 		return
 	case <-g.ctx.Done():
 		log.Info("[Gronos] context done")
-		g.com <- MsgAllCancelShutdown[K]()
+
 		return
 	}
 }

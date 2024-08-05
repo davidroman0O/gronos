@@ -255,7 +255,7 @@ func (g *gronos[K]) handleGronosMessage(m Message) error {
 	case *AddRuntimeApplicationMessage[K]:
 		log.Info("[GronosMessage] [AddRuntimeApplicationMessage]", msg.Key)
 		defer addRuntimeApplicationPool.Put(msg)
-		return g.handleAddRuntimeApplicationMessage(msg)
+		return g.handleAddRuntimeApplication(msg)
 	case *CancelShutdown[K]:
 		log.Info("[GronosMessage] [CancelShutdown]", msg.Key)
 		defer cancelShutdownPool.Put(msg)
@@ -293,7 +293,7 @@ func (g *gronos[K]) handleGronosMessage(m Message) error {
 	}
 }
 
-func (g *gronos[K]) handleAddRuntimeApplicationMessage(msg *AddRuntimeApplicationMessage[K]) error {
+func (g *gronos[K]) handleAddRuntimeApplication(msg *AddRuntimeApplicationMessage[K]) error {
 	var ok bool
 
 	log.Info("[GronosMessage] [AddRuntimeApplicationMessage] add application", msg.Key)

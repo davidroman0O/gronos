@@ -7,13 +7,13 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-// TickingApplication is a function type representing an application that performs periodic tasks.
-type TickingApplication func(context.Context) error
+// TickingRuntime is a function type representing an application that performs periodic tasks.
+type TickingRuntime func(context.Context) error
 
 type tickerWrapper struct {
 	clock *Clock
 	ctx   context.Context
-	app   TickingApplication
+	app   TickingRuntime
 	cerr  chan error
 }
 
@@ -24,8 +24,8 @@ func (t tickerWrapper) Tick() {
 	}
 }
 
-// Worker creates a RuntimeApplication that executes a TickingApplication at specified intervals.
-// It takes an interval duration, execution mode, and a TickingApplication as parameters.
+// Worker creates a RuntimeApplication that executes a TickingRuntime at specified intervals.
+// It takes an interval duration, execution mode, and a TickingRuntime as parameters.
 //
 // Example usage:
 //
@@ -34,7 +34,7 @@ func (t tickerWrapper) Tick() {
 //		return nil
 //	})
 //	g.Add("periodicTask", worker)
-func Worker(interval time.Duration, mode ExecutionMode, app TickingApplication) RuntimeApplication {
+func Worker(interval time.Duration, mode ExecutionMode, app TickingRuntime) RuntimeApplication {
 	log.Info("[Worker] Creating worker")
 	return func(ctx context.Context, shutdown <-chan struct{}) error {
 		log.Info("[Worker] Starting worker")

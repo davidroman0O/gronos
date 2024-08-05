@@ -11,6 +11,10 @@ import (
 	"github.com/davidroman0O/gronos"
 )
 
+type ctxWatermill string
+
+var ctxWatermillKey ctxWatermill
+
 type WatermillMiddleware[K comparable] struct {
 	pubs    sync.Map
 	subs    sync.Map
@@ -147,7 +151,7 @@ func (w *WatermillMiddleware[K]) OnStart(ctx context.Context, errChan chan<- err
 }
 
 func (w *WatermillMiddleware[K]) OnNewRuntime(ctx context.Context) context.Context {
-	return context.WithValue(ctx, "watermill_middleware", w)
+	return context.WithValue(ctx, ctxWatermillKey, w)
 }
 
 func (w *WatermillMiddleware[K]) OnStopRuntime(ctx context.Context) context.Context {
@@ -376,7 +380,7 @@ func UseSubscriber[K comparable](ctx context.Context, name K) (func(ctx context.
 }
 
 func getMiddleware[K comparable](ctx context.Context) (*WatermillMiddleware[K], error) {
-	middleware, ok := ctx.Value("watermill_middleware").(*WatermillMiddleware[K])
+	middleware, ok := ctx.Value(ctxWatermillKey).(*WatermillMiddleware[K])
 	if !ok {
 		return nil, fmt.Errorf("watermill middleware not found in context")
 	}
