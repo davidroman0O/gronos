@@ -11,7 +11,7 @@ import (
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	g := gronos.New[string](
+	g, cer := gronos.New[string](
 		ctx,
 		map[string]gronos.RuntimeApplication{
 			"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
@@ -24,8 +24,6 @@ func main() {
 			},
 		},
 	)
-
-	cer := g.Start()
 
 	go func() {
 		for v := range cer {

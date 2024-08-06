@@ -15,7 +15,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gronos.New[string](
+	g, cerr := gronos.New[string](
 		ctx,
 		map[string]gronos.RuntimeApplication{
 			// "stopper": func(ctx context.Context, shutdown <-chan struct{}) error {
@@ -48,6 +48,12 @@ func main() {
 			return nil
 		},
 	}
+
+	go func() {
+		for m := range cerr {
+			log.Println("error:", m)
+		}
+	}()
 
 	extraCtx, extraCancel := context.WithCancel(context.Background())
 	defer extraCancel()
@@ -87,8 +93,6 @@ func main() {
 			}),
 		),
 	))
-
-	g.Start()
 
 	go func() {
 		c := make(chan os.Signal, 1)

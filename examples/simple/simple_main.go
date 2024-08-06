@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"os"
-	"os/signal"
 	"sync/atomic"
 	"time"
 
@@ -15,7 +13,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	nono := gronos.New[string](
+	nono, cerr := gronos.New[string](
 		ctx,
 		map[string]gronos.RuntimeApplication{
 			"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
@@ -29,12 +27,15 @@ func main() {
 				go func() {
 					<-time.After(time.Second * 1)
 
-					com <- gronos.MsgAddRuntimeApplication("worker3", gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
-						log.Println("worker3 tick")
-						return nil
-					}))
+					done, msg := gronos.MsgAddRuntimeApplication("worker3",
+						gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
+							log.Println("worker3 tick")
+							return nil
+						}))
+					com(msg)
+					<-done
 
-					com <- gronos.MsgTerminateShutdown("app1")
+					com(gronos.MsgForceTerminateShutdown("app1"))
 				}()
 
 				select {
@@ -57,11 +58,11 @@ func main() {
 					}
 					go func() {
 						<-time.After(time.Second * 1)
-						com <- gronos.MsgTerminateShutdown("worker2")
+						com(gronos.MsgForceTerminateShutdown("worker2"))
 					}()
 					go func() {
 						<-time.After(time.Second * 2)
-						com <- gronos.MsgTerminateShutdown("worker3")
+						com(gronos.MsgForceTerminateShutdown("worker3"))
 					}()
 					<-ctx.Done()
 					return nil
@@ -77,10 +78,8 @@ func main() {
 		gronos.WithShutdownBehavior[string](gronos.ShutdownManual),
 	)
 
-	e := nono.Start()
-
 	go func() {
-		for msg := range e {
+		for msg := range cerr {
 			println(msg.Error())
 		}
 	}()
@@ -88,18 +87,18 @@ func main() {
 	ctrlc := atomic.Bool{}
 	timour := atomic.Bool{}
 
-	go func() {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt)
-		<-c
-		ctrlc.Store(true)
-		if !timour.Load() {
-			nono.Shutdown()
-		}
-	}()
+	// go func() {
+	// 	c := make(chan os.Signal, 1)
+	// 	signal.Notify(c, os.Interrupt)
+	// 	<-c
+	// 	ctrlc.Store(true)
+	// 	if !timour.Load() {
+	// 		nono.Shutdown()
+	// 	}
+	// }()
 
 	go func() {
-		<-time.After(time.Second * 3)
+		<-time.After(time.Second * 1)
 		if !ctrlc.Load() {
 			timour.Store(true)
 			nono.Shutdown()

@@ -10,66 +10,66 @@ import (
 
 func main() {
 	ctx := context.Background()
-	g := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
+	g, cerr := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
 		"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
-			log.Info("App1 started")
-			defer log.Info("[App1] defer done")
+			log.Debug("App1 started")
+			defer log.Debug("[App1] defer done")
 			timer := time.NewTimer(2 * time.Second)
 			for {
 				select {
 				case <-shutdown:
 					timer.Stop()
-					log.Info("[App1] shutting down")
+					log.Debug("[App1] shutting down")
 					return nil
 				case <-ctx.Done():
 					timer.Stop()
-					log.Info("[App1] context done")
+					log.Debug("[App1] context done")
 					return nil
 				case <-timer.C:
-					log.Info("[App1] tick")
+					log.Debug("[App1] tick")
 				}
 			}
 			return nil
 		},
 		"app3": func(ctx context.Context, shutdown <-chan struct{}) error {
-			log.Info("App3 started")
-			defer log.Info("[App3] defer done")
+			log.Debug("App3 started")
+			defer log.Debug("[App3] defer done")
 			timer := time.NewTimer(2 * time.Second)
 			for {
 				select {
 				case <-shutdown:
 					timer.Stop()
-					log.Info("[App3] shutting down")
+					log.Debug("[App3] shutting down")
 					return nil
 				case <-ctx.Done():
 					timer.Stop()
-					log.Info("[App3] context done")
+					log.Debug("[App3] context done")
 					return nil
 				case <-timer.C:
-					log.Info("[App3] tick")
+					log.Debug("[App3] tick")
 				}
 			}
 			return nil
 		},
 	})
 
-	log.Info("[Example] Starting")
-	cerr := g.Start()
+	log.Debug("[Example] Starting")
+
 	go func() {
 		for m := range cerr {
-			log.Info("error:", m)
+			log.Debug("error:", m)
 		}
 	}()
 
-	log.Info("[Example] Adding App2")
+	log.Debug("[Example] Adding App2")
 	if started := g.Add("app2", func(ctx context.Context, shutdown <-chan struct{}) error {
-		log.Info("[App2] started")
-		defer log.Info("[App2] defer done")
+		log.Debug("[App2] started")
+		defer log.Debug("[App2] defer done")
 		select {
 		case <-ctx.Done():
-			log.Info("[App2] context done")
+			log.Debug("[App2] context done")
 		case <-shutdown:
-			log.Info("[App2] shutting down")
+			log.Debug("[App2] shutting down")
 		}
 		return nil
 	}); started != nil {
@@ -77,10 +77,10 @@ func main() {
 	}
 
 	<-time.After(1 * time.Second)
-	log.Info("[Example] Shutting down")
+	log.Debug("[Example] Shutting down")
 	g.Shutdown()
-	log.Info("[Example] Waiting")
+	log.Debug("[Example] Waiting")
 	g.Wait()
-	log.Info("[Example] Done")
+	log.Debug("[Example] Done")
 
 }

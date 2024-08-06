@@ -18,7 +18,7 @@ func main() {
 
 	watermillMiddleware := watermillext.NewWatermillMiddleware[string](watermill.NewStdLogger(true, true))
 
-	g := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
+	g, errChan := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
 		"setup": setupApp,
 	},
 		gronos.WithShutdownBehavior[string](gronos.ShutdownAutomatic),
@@ -26,8 +26,6 @@ func main() {
 		gronos.WithMinRuntime[string](5*time.Second),
 		gronos.WithExtension[string](watermillMiddleware),
 	)
-
-	errChan := g.Start()
 
 	go func() {
 		for err := range errChan {
@@ -67,19 +65,19 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 
 	pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
 
-	com <- watermillext.MsgAddPublisher("pubsub", pubSub)
+	com(watermillext.MsgAddPublisher("pubsub", pubSub))
 
-	com <- watermillext.MsgAddSubscriber("pubsub", pubSub)
+	com(watermillext.MsgAddSubscriber("pubsub", pubSub))
 
 	router, err := message.NewRouter(message.RouterConfig{}, watermill.NewStdLogger(false, false))
 	if err != nil {
 		return err
 	}
 
-	com <- watermillext.MsgAddRouter("router", router)
+	com(watermillext.MsgAddRouter("router", router))
 
 	done, msg := gronos.MsgRequestStatusAsync("setup", gronos.StatusRunning)
-	com <- msg
+	com(msg)
 	<-done
 
 	return nil
@@ -144,16 +142,18 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
 		return err
 	}
 
-	com <- watermillext.MsgAddHandler(
-		"router",
-		"example-handler",
-		"example.topic",
-		"example.processed.topic",
-		func(msg *message.Message) ([]*message.Message, error) {
-			fmt.Printf("Processing message: %s\n", string(msg.Payload))
-			processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
-			return message.Messages{processedMsg}, nil
-		},
+	com(
+		watermillext.MsgAddHandler(
+			"router",
+			"example-handler",
+			"example.topic",
+			"example.processed.topic",
+			func(msg *message.Message) ([]*message.Message, error) {
+				fmt.Printf("Processing message: %s\n", string(msg.Payload))
+				processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
+				return message.Messages{processedMsg}, nil
+			},
+		),
 	)
 
 	<-shutdown
