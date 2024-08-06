@@ -17,7 +17,7 @@ func TestGronos(t *testing.T) {
 		appStarted := make(chan struct{})
 		appFinished := make(chan struct{})
 
-		g := New[string](
+		g, cerrors := New[string](
 			ctx,
 			map[string]RuntimeApplication{
 				"test-app": func(ctx context.Context, shutdown <-chan struct{}) error {
@@ -35,9 +35,8 @@ func TestGronos(t *testing.T) {
 			WithMinRuntime[string](time.Second/2), WithGracePeriod[string](time.Second/2),
 		)
 
-		errors := g.Start()
-
 		<-appStarted
+
 		g.Shutdown()
 
 		select {
@@ -50,7 +49,7 @@ func TestGronos(t *testing.T) {
 		g.Wait()
 
 		select {
-		case err, ok := <-errors:
+		case err, ok := <-cerrors:
 			if ok {
 				if err != nil && err != context.Canceled {
 					t.Fatalf("Unexpected error: %v", err)
@@ -82,8 +81,7 @@ func TestGronos(t *testing.T) {
 			}
 		}
 
-		g := New[string](ctx, apps)
-		errors := g.Start()
+		g, cerrors := New[string](ctx, apps)
 
 		for i := 0; i < appCount; i++ {
 			select {
@@ -108,7 +106,7 @@ func TestGronos(t *testing.T) {
 		g.Wait()
 
 		select {
-		case err, ok := <-errors:
+		case err, ok := <-cerrors:
 			if ok {
 				if err != context.Canceled && err != nil {
 					t.Fatalf("Unexpected error: %v", err)
@@ -125,16 +123,14 @@ func TestGronos(t *testing.T) {
 
 		expectedError := fmt.Errorf("test error")
 
-		g := New[string](ctx, map[string]RuntimeApplication{
+		g, cerrors := New[string](ctx, map[string]RuntimeApplication{
 			"error-app": func(ctx context.Context, shutdown <-chan struct{}) error {
 				return expectedError
 			},
 		})
 
-		errors := g.Start()
-
 		select {
-		case err := <-errors:
+		case err := <-cerrors:
 			fmt.Println(err)
 			if err == nil {
 				t.Fatal("Expected an error, got nil")
@@ -154,21 +150,17 @@ func TestGronos(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		g := New[string](ctx, nil)
-		errors := g.Start()
+		g, cerrors := New[string](ctx, nil)
 
 		appStarted := make(chan struct{})
 		appFinished := make(chan struct{})
 
-		err := g.Add("dynamic-app", func(ctx context.Context, shutdown <-chan struct{}) error {
+		g.Add("dynamic-app", func(ctx context.Context, shutdown <-chan struct{}) error {
 			close(appStarted)
 			<-ctx.Done()
 			close(appFinished)
 			return ctx.Err()
 		})
-		if err != nil {
-			t.Fatalf("Failed to add dynamic app: %v", err)
-		}
 
 		select {
 		case <-appStarted:
@@ -189,7 +181,7 @@ func TestGronos(t *testing.T) {
 		g.Wait()
 
 		select {
-		case err, ok := <-errors:
+		case err, ok := <-cerrors:
 			if ok {
 				if err != context.Canceled && err != nil {
 					t.Fatalf("Unexpected error: %v", err)
@@ -200,52 +192,6 @@ func TestGronos(t *testing.T) {
 		}
 	})
 
-	// t.Run("Race condition test", func(t *testing.T) {
-	// 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	// 	defer cancel()
-
-	// 	g := New[string](ctx, nil)
-	// 	errors := g.Start()
-
-	// 	var wg sync.WaitGroup
-	// 	appCount := 100
-
-	// 	for i := 0; i < appCount; i++ {
-	// 		wg.Add(1)
-	// 		go func(index int) {
-	// 			defer wg.Done()
-	// 			appKey := fmt.Sprintf("app-%d", index)
-	// 			app := func(ctx context.Context, shutdown <-chan struct{}) error {
-	// 				<-ctx.Done()
-	// 				return ctx.Err()
-	// 			}
-
-	// 			if err := g.Add(appKey, app); err != nil {
-	// 				t.Errorf("Failed to add app %s: %v", appKey, err)
-	// 			}
-	// 		}(i)
-	// 	}
-
-	// 	wg.Wait()
-
-	// 	if g.keys.Length() != appCount {
-	// 		t.Errorf("Expected %d apps, got %d", appCount, g.keys.Length())
-	// 	}
-
-	// 	cancel() // Cancel the context to trigger shutdown
-	// 	g.Wait()
-
-	// 	select {
-	// 	case err, ok := <-errors:
-	// 		if ok {
-	// 			if err != context.Canceled && err != nil {
-	// 				t.Fatalf("Unexpected error: %v", err)
-	// 			}
-	// 		}
-	// 	case <-time.After(time.Second):
-	// 		t.Fatal("Timeout waiting for error channel to close")
-	// 	}
-	// })
 }
 
 func TestWorker(t *testing.T) {

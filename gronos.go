@@ -265,6 +265,7 @@ func (g *gronos[K]) Wait() {
 	}
 
 	_, ok := <-g.doneChan
+	close(g.errChan)
 	log.Debug("[Gronos] wait done", ok)
 }
 
@@ -318,7 +319,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 				errChan <- fmt.Errorf("extension error on stop: %w", err)
 			}
 		}
-		g.sendMessage(MsgDestroy[K](g.errChan))
+		g.sendMessage(MsgDestroy[K]())
 	}()
 
 	state := &gronosState[K]{}

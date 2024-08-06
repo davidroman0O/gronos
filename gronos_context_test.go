@@ -49,8 +49,7 @@ func TestGronosContextCancellation(t *testing.T) {
 			}
 		}
 
-		g := New[string](ctx, apps)
-		errChan := g.Start()
+		g, errChan := New[string](ctx, apps)
 
 		for {
 			allRunning := true
@@ -107,8 +106,7 @@ func TestGronosContextCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		g := New(ctx, map[string]RuntimeApplication{"long-running": app})
-		errChan := g.Start()
+		g, errChan := New(ctx, map[string]RuntimeApplication{"long-running": app})
 
 		<-appStarted
 		cancel()
@@ -138,8 +136,7 @@ func TestGronosContextCancellation(t *testing.T) {
 	t.Run("Adding application after context cancellation", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
-		g := New[string](ctx, nil)
-		errChan := g.Start()
+		g, errChan := New[string](ctx, nil)
 
 		// Cancel the context immediately
 		cancel()
@@ -178,8 +175,7 @@ func TestGronosContextCancellation(t *testing.T) {
 			return nil
 		})
 
-		g := New(ctx, map[string]RuntimeApplication{"worker": workerApp})
-		errChan := g.Start()
+		g, errChan := New(ctx, map[string]RuntimeApplication{"worker": workerApp})
 
 		// Allow some ticks to occur
 		time.Sleep(250 * time.Millisecond)

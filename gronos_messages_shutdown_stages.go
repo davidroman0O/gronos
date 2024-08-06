@@ -44,11 +44,10 @@ func MsgInitiateContextCancellation[K comparable]() *InitiateContextCancellation
 }
 
 type Destroy[K comparable] struct {
-	cerr chan error
 }
 
-func MsgDestroy[K comparable](cerr chan error) *Destroy[K] {
-	return &Destroy[K]{cerr}
+func MsgDestroy[K comparable]() *Destroy[K] {
+	return &Destroy[K]{}
 }
 
 func (g *gronos[K]) handleShutdownStagesMessage(state *gronosState[K], m Message) (error, bool) {
@@ -64,7 +63,7 @@ func (g *gronos[K]) handleShutdownStagesMessage(state *gronosState[K], m Message
 		return g.handleCheckAutomaticShutdown(state, msg.Response), true
 	case *Destroy[K]:
 		log.Debug("[GronosMessage] [Destroy]")
-		return g.handleDestroy(state, msg.cerr), true
+		return g.handleDestroy(state), true
 	case *GracePeriodExceededMessage[K]:
 		log.Debug("[GronosMessage] [GracePeriodExceeded]")
 		defer gracePeriodExceededPool.Put(msg)
@@ -113,7 +112,7 @@ func (g *gronos[K]) checkRemainingApps(state *gronosState[K]) {
 
 func (g *gronos[K]) handleShutdownComplete(state *gronosState[K]) error {
 	log.Debug("[GronosMessage] Shutdown complete")
-	g.com <- &Destroy[K]{cerr: make(chan error)}
+	g.com <- &Destroy[K]{}
 	return nil
 }
 
@@ -145,10 +144,9 @@ func (g *gronos[K]) handleCheckAutomaticShutdown(state *gronosState[K], response
 	return nil
 }
 
-func (g *gronos[K]) handleDestroy(state *gronosState[K], cerr chan error) error {
+func (g *gronos[K]) handleDestroy(state *gronosState[K]) error {
 	log.Debug("[GronosMessage] Destroying gronos")
 	g.comClosed.Store(true)
-	close(cerr)
 	log.Debug("[GronosMessage] run closing")
 	close(g.com)
 	close(g.doneChan)

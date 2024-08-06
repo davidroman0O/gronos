@@ -384,6 +384,9 @@ func (g *gronos[K]) handlePanicShutdown(state *gronosState[K], key K, err error)
 	log.Debug("[GronosMessage] [PanickedShutdown] panic", key, err)
 	state.mrea.Store(key, err)
 	state.mstatus.Store(key, StatusShutdownPanicked)
+	if value.(bool) {
+		state.mali.Store(key, false)
+	}
 
 	return nil
 }
@@ -401,6 +404,11 @@ func (g *gronos[K]) handleErrorShutdown(state *gronosState[K], key K, err error)
 	log.Debug("[GronosMessage] [ErroredShutdown] error", key, err)
 	state.mrea.Store(key, err)
 	state.mstatus.Store(key, StatusShutdownError)
+	if value.(bool) {
+		state.mali.Store(key, false)
+	}
+
+	g.com <- MsgRuntimeError(key, err)
 
 	return nil
 }

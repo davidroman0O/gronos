@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync/atomic"
 	"time"
@@ -106,4 +107,5 @@ func main() {
 	}()
 
 	nono.Wait()
+	fmt.Println("done")
 }

@@ -248,11 +248,9 @@ func TestIteratorMiddleware(t *testing.T) {
 			WithExtraCancel(cleanup),
 		))
 
-		g := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]RuntimeApplication{
 			"iterator": iterApp,
 		})
-
-		errChan := g.Start()
 
 		// Wait a bit to ensure the task has a chance to execute
 		time.Sleep(50 * time.Millisecond)
