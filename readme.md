@@ -23,6 +23,7 @@ Gronos is a concurrent application management library for Go, designed to simpli
 - [Configuration](#configuration)
 - [Best Practices](#best-practices)
 - [Examples](#examples)
+- [Detailed Documentation](#detailed-documentation)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -210,7 +211,6 @@ func communicatingApp(ctx context.Context, shutdown <-chan struct{}) error {
 
 These messages allow you to dynamically add new applications, force cancel a shutdown, or force terminate a shutdown for specific applications.
 
-
 ## Configuration
 
 Gronos supports various configuration options:
@@ -364,6 +364,15 @@ func main() {
     g.Wait()
 }
 ```
+
+## Detailed Documentation
+
+For more detailed information about specific features, please refer to the following documents:
+
+- [Core Concepts](./docs/core-concepts.md)
+- [Worker Functionality](./docs/worker.md)
+- [Iterator Functionality](./docs/iterator.md)
+- [Internal Messaging](./docs/messaging.md)
 
 ## Contributing
 
