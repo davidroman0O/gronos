@@ -6,6 +6,8 @@
 
 Gronos is a concurrent application management library for Go, designed to simplify the process of managing multiple concurrent applications within a single program. It provides a structured approach to application lifecycle management, error handling, and inter-application communication.
 
+<img src="gronos.webp" alt="Gronos" height="400">
+
 ## Table of Contents
 
 - [Features](#features)
