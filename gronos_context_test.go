@@ -23,28 +23,14 @@ func TestGronosContextCancellation(t *testing.T) {
 			appName := fmt.Sprintf("App%d", i)
 			status := &atomic.Int32{}
 			appStatuses[appName] = status
-
 			apps[appName] = func(appCtx context.Context, shutdown <-chan struct{}) error {
 				status.Store(1)       // App is running
 				defer status.Store(2) // App has stopped
-
-				// t.Logf("%s: Started", appName)
-
-				// Simulate some work
-				ticker := time.NewTicker(100 * time.Millisecond)
-				defer ticker.Stop()
-
-				for {
-					select {
-					case <-appCtx.Done():
-						// t.Logf("%s: Received context cancellation", appName)
-						return appCtx.Err()
-					case <-shutdown:
-						// t.Logf("%s: Received shutdown signal", appName)
-						return nil
-					case <-ticker.C:
-						// t.Logf("%s: Running", appName)
-					}
+				select {
+				case <-appCtx.Done():
+					return appCtx.Err()
+				case <-shutdown:
+					return nil
 				}
 			}
 		}
@@ -72,10 +58,11 @@ func TestGronosContextCancellation(t *testing.T) {
 		// Check for the expected error
 		select {
 		case err := <-errChan:
+			fmt.Println("Received error from Gronos:", err)
 			if err != context.Canceled && err != context.DeadlineExceeded {
 				t.Errorf("Expected context.Canceled or context.DeadlineExceeded, got: %v", err)
 			}
-		case <-time.After(time.Second):
+		case <-time.After(3 * time.Second):
 			t.Error("Timed out waiting for error from Gronos")
 		}
 

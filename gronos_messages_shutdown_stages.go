@@ -39,10 +39,6 @@ func MsgInitiateShutdown[K comparable]() *InitiateShutdown[K] {
 	return &InitiateShutdown[K]{}
 }
 
-func MsgInitiateContextCancellation[K comparable]() *InitiateContextCancellation[K] {
-	return &InitiateContextCancellation[K]{}
-}
-
 type Destroy[K comparable] struct {
 }
 

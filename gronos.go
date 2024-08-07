@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -165,7 +166,7 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts 
 
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
-		com:    make(chan Message, 200),
+		com:    make(chan Message, 500),
 		cancel: cancel,
 		// Context will be monitored to detect cancellation and trigger ForceCancelShutdown
 		ctx: ctx,
@@ -312,6 +313,10 @@ func (g *gronos[K]) automaticShutdown() {
 
 // run is the main loop of the gronos instance, handling messages and managing applications.
 func (g *gronos[K]) run(errChan chan<- error) {
+
+	log.Debug("[Gronos] Entering run method")
+	defer log.Debug("[Gronos] Exiting run method")
+
 	defer func() {
 		// Apply extensions' OnStop hooks
 		for _, ext := range g.extensions {
@@ -328,13 +333,16 @@ func (g *gronos[K]) run(errChan chan<- error) {
 	go func() {
 		select {
 		case <-g.ctx.Done():
+			log.Debug("[Gronos] Context cancelled, initiating shutdown")
 			g.sendMessage(MsgInitiateContextCancellation[K]())
 		case <-g.shutdownChan:
+			log.Debug("[Gronos] Shutdown initiated, initiating shutdown")
 			g.sendMessage(MsgInitiateShutdown[K]())
 		}
 	}()
 
 	for m := range g.com {
+		fmt.Println("message", m, reflect.TypeOf(m))
 		if err := g.handleMessage(state, m); err != nil {
 			errChan <- err
 		}

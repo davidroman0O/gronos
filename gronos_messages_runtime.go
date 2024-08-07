@@ -248,14 +248,17 @@ func (g *gronos[K]) handleForceCancelShutdown(state *gronosState[K], key K, err 
 	var value any
 	var ok bool
 	if value, ok = state.mali.Load(key); !ok {
+		log.Debug("[GronosMessage] [ForceCancelShutdown] app not found (alive property)", key)
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
 	if !value.(bool) {
+		log.Debug("[GronosMessage] [ForceCancelShutdown] app already dead", key)
 		return fmt.Errorf("app already dead %v", key)
 	}
 
 	log.Debug("[GronosMessage] [ForceCancelShutdown] cancel", key, err)
 	if value, ok = state.mcancel.Load(key); !ok {
+		log.Debug("[GronosMessage] [ForceCancelShutdown] app not found (cancel property)", key)
 		return fmt.Errorf("app not found (closer property) %v", key)
 	}
 
@@ -323,6 +326,7 @@ func (g *gronos[K]) handleCancelledShutdown(state *gronosState[K], key K, err er
 		}
 
 		state.mstatus.Store(key, StatusShutdownCancelled)
+		g.com <- MsgRuntimeError(key, err)
 
 		log.Debug("[GronosMessage] [CancelledShutdown] terminate cancelled shutdown terminated", key)
 
@@ -387,6 +391,7 @@ func (g *gronos[K]) handlePanicShutdown(state *gronosState[K], key K, err error)
 	if value.(bool) {
 		state.mali.Store(key, false)
 	}
+	g.com <- MsgRuntimeError(key, err)
 
 	return nil
 }

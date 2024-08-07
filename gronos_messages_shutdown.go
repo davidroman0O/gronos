@@ -12,6 +12,10 @@ type ShutdownProgress[K comparable] struct {
 	RemainingApps int
 }
 
+func MsgInitiateContextCancellation[K comparable]() *InitiateContextCancellation[K] {
+	return &InitiateContextCancellation[K]{}
+}
+
 func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m Message) (error, bool) {
 	switch m.(type) {
 	case *InitiateShutdown[K]:
@@ -50,11 +54,16 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 	localKeys := g.getLocalKeys(state)
 	dones := g.triggerShutdownForApps(state, localKeys, kind)
 
-	time.AfterFunc(g.config.gracePeriod, func() {
-		g.sendMessage(MsgGracePeriodExceeded[K]())
-	})
+	// FixMe: I'm not happy by that
+	go func() {
+		g.checkRemainingApps(state)
 
-	g.watchForShutdownCompletion(dones)
+		<-time.AfterFunc(g.config.gracePeriod, func() {
+			g.sendMessage(MsgGracePeriodExceeded[K]())
+		}).C
+
+		g.watchForShutdownCompletion(dones)
+	}()
 
 	return nil
 }
@@ -88,10 +97,14 @@ func (g *gronos[K]) triggerShutdownForApps(state *gronosState[K], localKeys []K,
 func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
 	if kind == ShutdownKindTerminate {
 		log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
-		g.sendMessage(MsgForceTerminateShutdown(key))
+		if !g.sendMessage(MsgForceTerminateShutdown(key)) {
+			log.Error("[GronosMessage] failed to send forced shutdown process terminate", key)
+		}
 	} else {
 		log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
-		g.sendMessage(MsgForceCancelShutdown(key, nil))
+		if !g.sendMessage(MsgForceCancelShutdown(key, nil)) {
+			log.Error("[GronosMessage] failed to send forced shutdown process cancel", key)
+		}
 	}
 }
 
