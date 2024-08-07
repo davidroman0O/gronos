@@ -64,44 +64,34 @@ type AddHandlerMessage[K comparable] struct {
 }
 
 // Sync pools for message types
-var addPublisherPool = sync.Pool{
-	New: func() interface{} {
-		return &AddPublisherMessage[string]{}
-	},
-}
+var addPublisherPoolInited bool
+var addPublisherPool sync.Pool
 
-var addSubscriberPool = sync.Pool{
-	New: func() interface{} {
-		return &AddSubscriberMessage[string]{}
-	},
-}
+var addSubscriberPoolInited bool
+var addSubscriberPool sync.Pool
 
-var addRouterPool = sync.Pool{
-	New: func() interface{} {
-		return &AddRouterMessage[string]{}
-	},
-}
+var addRouterPoolInited bool
+var addRouterPool sync.Pool
 
-var closePublisherPool = sync.Pool{
-	New: func() interface{} {
-		return &ClosePublisherMessage[string]{}
-	},
-}
+var closePublisherPoolInited bool
+var closePublisherPool sync.Pool
 
-var closeSubscriberPool = sync.Pool{
-	New: func() interface{} {
-		return &CloseSubscriberMessage[string]{}
-	},
-}
+var closeSubscriberPoolInited bool
+var closeSubscriberPool sync.Pool
 
-var addHandlerPool = sync.Pool{
-	New: func() interface{} {
-		return &AddHandlerMessage[string]{}
-	},
-}
+var addHandlerPoolInited bool
+var addHandlerPool sync.Pool
 
 // Message creation functions
 func MsgAddPublisher[K comparable](key K, publisher message.Publisher) *AddPublisherMessage[K] {
+	if !addPublisherPoolInited {
+		addPublisherPoolInited = true
+		addPublisherPool = sync.Pool{
+			New: func() interface{} {
+				return &AddPublisherMessage[K]{}
+			},
+		}
+	}
 	msg := addPublisherPool.Get().(*AddPublisherMessage[K])
 	msg.Key = key
 	msg.Publisher = publisher
@@ -109,6 +99,14 @@ func MsgAddPublisher[K comparable](key K, publisher message.Publisher) *AddPubli
 }
 
 func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) *AddSubscriberMessage[K] {
+	if !addSubscriberPoolInited {
+		addSubscriberPoolInited = true
+		addSubscriberPool = sync.Pool{
+			New: func() interface{} {
+				return &AddSubscriberMessage[K]{}
+			},
+		}
+	}
 	msg := addSubscriberPool.Get().(*AddSubscriberMessage[K])
 	msg.Key = key
 	msg.Subscriber = subscriber
@@ -116,6 +114,14 @@ func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) *AddSu
 }
 
 func MsgAddRouter[K comparable](key K, router *message.Router) *AddRouterMessage[K] {
+	if !addRouterPoolInited {
+		addRouterPoolInited = true
+		addRouterPool = sync.Pool{
+			New: func() interface{} {
+				return &AddRouterMessage[K]{}
+			},
+		}
+	}
 	msg := addRouterPool.Get().(*AddRouterMessage[K])
 	msg.Key = key
 	msg.Router = router
@@ -123,18 +129,42 @@ func MsgAddRouter[K comparable](key K, router *message.Router) *AddRouterMessage
 }
 
 func MsgClosePublisher[K comparable](key K) *ClosePublisherMessage[K] {
+	if !closePublisherPoolInited {
+		closePublisherPoolInited = true
+		closePublisherPool = sync.Pool{
+			New: func() interface{} {
+				return &ClosePublisherMessage[K]{}
+			},
+		}
+	}
 	msg := closePublisherPool.Get().(*ClosePublisherMessage[K])
 	msg.Key = key
 	return msg
 }
 
 func MsgCloseSubscriber[K comparable](key K) *CloseSubscriberMessage[K] {
+	if !closeSubscriberPoolInited {
+		closeSubscriberPoolInited = true
+		closeSubscriberPool = sync.Pool{
+			New: func() interface{} {
+				return &CloseSubscriberMessage[K]{}
+			},
+		}
+	}
 	msg := closeSubscriberPool.Get().(*CloseSubscriberMessage[K])
 	msg.Key = key
 	return msg
 }
 
 func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopic string, handlerFunc message.HandlerFunc) *AddHandlerMessage[K] {
+	if !addHandlerPoolInited {
+		addHandlerPoolInited = true
+		addHandlerPool = sync.Pool{
+			New: func() interface{} {
+				return &AddHandlerMessage[K]{}
+			},
+		}
+	}
 	msg := addHandlerPool.Get().(*AddHandlerMessage[K])
 	msg.Key = key
 	msg.HandlerName = handlerName
