@@ -54,15 +54,16 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 	localKeys := g.getLocalKeys(state)
 	dones := g.triggerShutdownForApps(state, localKeys, kind)
 
-	// FixMe: I'm not happy by that
+	// Now that we triggered the shutdown for all the apps, we need to monitor the situation
 	go func() {
-		g.checkRemainingApps(state)
-
-		<-time.AfterFunc(g.config.gracePeriod, func() {
+		select {
+		case <-g.watchForShutdownCompletion(dones):
+			log.Debug("[GronosMessage] all app really shutdown")
+		case <-time.AfterFunc(g.config.gracePeriod, func() {
 			g.sendMessage(MsgGracePeriodExceeded[K]())
-		}).C
-
-		g.watchForShutdownCompletion(dones)
+		}).C:
+			log.Debug("[GronosMessage] grace period exceeded")
+		}
 	}()
 
 	return nil
@@ -108,7 +109,8 @@ func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
 	}
 }
 
-func (g *gronos[K]) watchForShutdownCompletion(dones []chan struct{}) {
+func (g *gronos[K]) watchForShutdownCompletion(dones []chan struct{}) <-chan struct{} {
+	finished := make(chan struct{})
 	go func() {
 		log.Debug("[GronosMessage] waiting for all applications to be shutdown")
 		for _, done := range dones {
@@ -118,4 +120,5 @@ func (g *gronos[K]) watchForShutdownCompletion(dones []chan struct{}) {
 		g.com <- &ShutdownComplete[K]{}
 		log.Debug("[GronosMessage] sent shutdown complete")
 	}()
+	return finished
 }

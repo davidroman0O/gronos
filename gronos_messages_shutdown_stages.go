@@ -70,14 +70,8 @@ func (g *gronos[K]) handleShutdownStagesMessage(state *gronosState[K], m Message
 
 func (g *gronos[K]) handleGracePeriodExceeded(state *gronosState[K]) error {
 	if !state.allApplicationsTerminated() {
-		log.Error("[Gronos] Shutdown grace period exceeded, some applications failed to terminate")
-		// Implement forced termination logic here
-		state.mkeys.Range(func(key, value interface{}) bool {
-			if alive, ok := state.mali.Load(key.(K)); ok && alive.(bool) {
-				g.sendMessage(MsgForceTerminateShutdown(key.(K)))
-			}
-			return true
-		})
+		log.Error("[Gronos] Shutdown grace period exceeded, some applications failed to terminate in a timely manner")
+		panic("grace period exceeded")
 	}
 	return nil
 }
