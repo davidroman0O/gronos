@@ -1,8 +1,16 @@
-# Core Concepts in Gronos
+# Gronos Core Concepts
 
-Understanding the core concepts of Gronos is crucial for effectively using the library. This document outlines the key components and ideas behind Gronos.
+Gronos is a concurrent application management library for Go. It provides a framework for managing multiple concurrent applications within a single program. This document covers the core concepts and basic usage of Gronos.
 
-## 1. RuntimeApplication
+## Table of Contents
+
+1. [RuntimeApplication](#runtimeapplication)
+2. [Creating a Gronos Instance](#creating-a-gronos-instance)
+3. [Adding Applications](#adding-applications)
+4. [Shutdown and Wait](#shutdown-and-wait)
+5. [Error Handling](#error-handling)
+
+## RuntimeApplication
 
 A `RuntimeApplication` is the basic unit of execution in Gronos. It's defined as a function with the following signature:
 
@@ -10,149 +18,102 @@ A `RuntimeApplication` is the basic unit of execution in Gronos. It's defined as
 type RuntimeApplication func(ctx context.Context, shutdown <-chan struct{}) error
 ```
 
-This function represents a long-running process that can be managed by Gronos. It should respect both the context and the shutdown channel for proper termination.
+- `ctx`: A context for cancellation and value passing.
+- `shutdown`: A channel that signals when the application should shut down.
+- The function should return an error if any occurs during execution.
 
 Example:
+
 ```go
 func myApp(ctx context.Context, shutdown <-chan struct{}) error {
+    ticker := time.NewTicker(time.Second)
+    defer ticker.Stop()
+
     for {
         select {
+        case <-ticker.C:
+            fmt.Println("Working...")
         case <-ctx.Done():
             return ctx.Err()
         case <-shutdown:
             return nil
-        default:
-            // Do work here
         }
     }
 }
 ```
 
-## 2. Gronos Instance
+## Creating a Gronos Instance
 
-The Gronos instance is the main controller for managing multiple RuntimeApplications. It's created using the `New` function:
+To create a new Gronos instance, use the `New` function:
 
 ```go
-g := gronos.New[K](ctx, initialApps, opts...)
+func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts ...Option[K]) (*gronos[K], chan error)
 ```
 
-Where:
-- `K` is a comparable type used as keys for applications (often `string`)
-- `ctx` is a context for overall control
-- `initialApps` is a map of initial applications
-- `opts` are optional configuration options
+- `K`: The type of keys used to identify applications (must be comparable).
+- `ctx`: A context for the Gronos instance.
+- `init`: A map of initial applications to start with.
+- `opts`: Optional configuration options.
 
 Example:
+
 ```go
-g := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
-    "app1": myApp1,
-    "app2": myApp2,
+ctx := context.Background()
+g, errChan := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
+    "app1": myApp,
 })
 ```
 
-## 3. Application Lifecycle
+## Adding Applications
 
-Applications in Gronos go through several stages:
+You can add applications dynamically using the `Add` method:
 
-- **Added**: The application is registered with Gronos
-- **Starting**: The application is beginning its execution
-- **Running**: The application is actively executing
-- **Completed**: The application has finished successfully
-- **Failed**: The application has terminated with an error
+```go
+func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan struct{}
+```
 
-You can check the status of an application using methods like `IsStarted` and `IsComplete`.
-
-## 4. Execution Modes
-
-Gronos supports different execution modes for workers and clock tickers:
-
-- **NonBlocking**: Tasks are executed asynchronously in their own goroutine
-- **ManagedTimeline**: Tasks are executed sequentially, maintaining order
-- **BestEffort**: Tasks are scheduled to run as close to their intended time as possible
+- `k`: The key to identify the application.
+- `v`: The RuntimeApplication to add.
+- `opts`: Optional configuration options for adding the application.
 
 Example:
+
 ```go
-worker := gronos.Worker(time.Second, gronos.NonBlocking, func(ctx context.Context) error {
-    // Periodic task logic
-    return nil
-})
+done := g.Add("app2", myOtherApp)
+<-done // Wait for the application to be added
 ```
 
-## 5. Message System
+## Shutdown and Wait
 
-Gronos uses an internal message system for communication between components. Key message types include:
-
-- **DeadLetter**: Indicates an application has terminated with an error
-- **Terminated**: Indicates an application has terminated normally
-- **ContextTerminated**: Indicates an application's context has been terminated
-
-You can send messages within a RuntimeApplication using the `UseBus` function:
+To initiate a shutdown of all applications:
 
 ```go
-bus, err := gronos.UseBus(ctx)
-if err != nil {
-    return err
-}
-bus <- gronos.MsgDeadLetter("appKey", errors.New("some error"))
+func (g *gronos[K]) Shutdown()
 ```
 
-## 6. Worker and Clock
+To wait for all applications to finish:
 
-Gronos provides a `Worker` function for creating applications that perform periodic tasks, and a `Clock` system for timed executions.
-
-Example of a Worker:
 ```go
-worker := gronos.Worker(time.Second, gronos.NonBlocking, func(ctx context.Context) error {
-    fmt.Println("Periodic task executed")
-    return nil
-})
-g.Add("periodicTask", worker)
+func (g *gronos[K]) Wait()
 ```
 
-## 7. Iterator and Loopable Iterator
-
-These components allow for managing sequences of tasks and provide advanced control over task execution and error handling.
-
-Example of an Iterator:
-```go
-tasks := []gronos.CancellableTask{
-    func(ctx context.Context) error {
-        // Task 1 logic
-        return nil
-    },
-    func(ctx context.Context) error {
-        // Task 2 logic
-        return nil
-    },
-}
-
-iterApp := gronos.Iterator(context.Background(), tasks)
-g.Add("iteratorApp", iterApp)
-```
-
-## 8. Shutdown and Error Handling
-
-Gronos provides mechanisms for graceful shutdown and comprehensive error handling:
+Example:
 
 ```go
-// Initiate shutdown
 g.Shutdown()
-
-// Wait for all applications to finish
 g.Wait()
-
-// Handle errors
-for err := range errChan {
-    if err != nil {
-        fmt.Printf("Error: %v\n", err)
-    }
-}
 ```
 
-Understanding these core concepts provides a solid foundation for working with Gronos. In the following sections, we'll explore how to use these concepts in practice and dive deeper into advanced usage patterns.
+## Error Handling
 
-## Next Steps
+Errors from applications are sent to the error channel returned by `New`:
 
-- For detailed information about Gronos functions and types, refer to the [API Reference](api-reference.md).
-- To see more complex examples of Gronos in action, check out the [Examples](examples.md) page.
-- For tips on using Gronos effectively, see the [Best Practices](best-practices.md) section.
+```go
+go func() {
+    for err := range errChan {
+        log.Printf("Error: %v\n", err)
+    }
+}()
+```
+
+This allows for centralized error handling for all managed applications.
