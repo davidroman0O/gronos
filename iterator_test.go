@@ -128,11 +128,11 @@ func TestLoopableIterator(t *testing.T) {
 					return nil
 				},
 			},
-			WithBeforeLoop(func() error {
+			WithBeforeLoop(func(_ context.Context) error {
 				atomic.AddInt32(&beforeCount, 1)
 				return nil
 			}),
-			WithAfterLoop(func() error {
+			WithAfterLoop(func(_ context.Context) error {
 				atomic.AddInt32(&afterCount, 1)
 				return nil
 			}),

@@ -17,8 +17,8 @@ type LoopableIterator struct {
 	mu          sync.Mutex
 	onError     func(error) error
 	shouldStop  func(error) bool
-	beforeLoop  func() error
-	afterLoop   func() error
+	beforeLoop  func(ctx context.Context) error
+	afterLoop   func(ctx context.Context) error
 	extraCancel []context.CancelFunc
 	running     atomic.Bool
 	stopCh      chan struct{}
@@ -47,13 +47,13 @@ func WithShouldStop(shouldStop func(error) bool) LoopableIteratorOption {
 	}
 }
 
-func WithBeforeLoop(beforeLoop func() error) LoopableIteratorOption {
+func WithBeforeLoop(beforeLoop func(ctx context.Context) error) LoopableIteratorOption {
 	return func(li *LoopableIterator) {
 		li.beforeLoop = beforeLoop
 	}
 }
 
-func WithAfterLoop(afterLoop func() error) LoopableIteratorOption {
+func WithAfterLoop(afterLoop func(ctx context.Context) error) LoopableIteratorOption {
 	return func(li *LoopableIterator) {
 		li.afterLoop = afterLoop
 	}
@@ -157,7 +157,7 @@ func (li *LoopableIterator) checkError(err error) error {
 
 func (li *LoopableIterator) runIteration() error {
 	if li.beforeLoop != nil {
-		if err := li.checkError(li.beforeLoop()); err != nil {
+		if err := li.checkError(li.beforeLoop(li.ctx)); err != nil {
 			return err
 		}
 	}
@@ -167,7 +167,7 @@ func (li *LoopableIterator) runIteration() error {
 	}
 
 	if li.afterLoop != nil {
-		if err := li.checkError(li.afterLoop()); err != nil {
+		if err := li.checkError(li.afterLoop(li.ctx)); err != nil {
 			return err
 		}
 	}

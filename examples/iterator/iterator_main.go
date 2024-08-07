@@ -88,11 +88,11 @@ func main() {
 			gronos.WithShouldStop(func(err error) bool {
 				return err != nil // Stop on any error
 			}),
-			gronos.WithBeforeLoop(func() error {
+			gronos.WithBeforeLoop(func(_ context.Context) error {
 				log.Println("Starting new iteration")
 				return nil
 			}),
-			gronos.WithAfterLoop(func() error {
+			gronos.WithAfterLoop(func(_ context.Context) error {
 				log.Println("Finished iteration")
 				return nil
 			}),
