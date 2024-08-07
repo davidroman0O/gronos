@@ -57,49 +57,37 @@ type ErroredShutdown[K comparable] struct {
 	Error error
 }
 
-var addRuntimeApplicationPool = sync.Pool{
-	New: func() any {
-		return &AddRuntimeApplicationMessage[string]{}
-	},
-}
+var addRuntimeApplicationPoolInited bool = false
 
-var cancelShutdownPool = sync.Pool{
-	New: func() any {
-		return &CancelledShutdown[string]{}
-	},
-}
+var addRuntimeApplicationPool sync.Pool
 
-var terminatedShutdownPool = sync.Pool{
-	New: func() any {
-		return &TerminatedShutdown[string]{}
-	},
-}
+var cancelShutdownPoolInited bool = false
+var cancelShutdownPool sync.Pool
 
-var forceCancelShutdownPool = sync.Pool{
-	New: func() any {
-		return &ForceCancelShutdown[string]{}
-	},
-}
+var terminatedShutdownPoolInited bool = false
+var terminatedShutdownPool sync.Pool
 
-var forceTerminateShutdownPool = sync.Pool{
-	New: func() any {
-		return &ForceTerminateShutdown[string]{}
-	},
-}
+var forceCancelShutdownPoolInited bool = false
+var forceCancelShutdownPool sync.Pool
 
-var panickedShutdownPool = sync.Pool{
-	New: func() any {
-		return &PanickedShutdown[string]{}
-	},
-}
+var forceTerminateShutdownPoolInited bool = false
+var forceTerminateShutdownPool sync.Pool
 
-var erroredShutdownPool = sync.Pool{
-	New: func() any {
-		return &ErroredShutdown[string]{}
-	},
-}
+var panicShutdownPoolInited bool = false
+var panickedShutdownPool sync.Pool
+
+var erroredShutdownPoolInited bool = false
+var erroredShutdownPool sync.Pool
 
 func MsgAddRuntimeApplication[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddRuntimeApplicationMessage[K]) {
+	if !addRuntimeApplicationPoolInited {
+		addRuntimeApplicationPoolInited = true
+		addRuntimeApplicationPool = sync.Pool{
+			New: func() any {
+				return &AddRuntimeApplicationMessage[K]{}
+			},
+		}
+	}
 	msg := addRuntimeApplicationPool.Get().(*AddRuntimeApplicationMessage[K])
 	msg.Key = key
 	msg.RuntimeApplication = app
@@ -108,6 +96,14 @@ func MsgAddRuntimeApplication[K comparable](key K, app RuntimeApplication) (<-ch
 }
 
 func MsgForceCancelShutdown[K comparable](key K, err error) *ForceCancelShutdown[K] {
+	if !forceCancelShutdownPoolInited {
+		forceCancelShutdownPoolInited = true
+		forceCancelShutdownPool = sync.Pool{
+			New: func() any {
+				return &ForceCancelShutdown[K]{}
+			},
+		}
+	}
 	msg := forceCancelShutdownPool.Get().(*ForceCancelShutdown[K])
 	msg.Key = key
 	msg.Error = err
@@ -115,12 +111,28 @@ func MsgForceCancelShutdown[K comparable](key K, err error) *ForceCancelShutdown
 }
 
 func MsgForceTerminateShutdown[K comparable](key K) *ForceTerminateShutdown[K] {
+	if !forceTerminateShutdownPoolInited {
+		forceTerminateShutdownPoolInited = true
+		forceTerminateShutdownPool = sync.Pool{
+			New: func() any {
+				return &ForceTerminateShutdown[K]{}
+			},
+		}
+	}
 	msg := forceTerminateShutdownPool.Get().(*ForceTerminateShutdown[K])
 	msg.Key = key
 	return msg
 }
 
 func msgCancelledShutdown[K comparable](key K, err error) (<-chan struct{}, *CancelledShutdown[K]) {
+	if !cancelShutdownPoolInited {
+		cancelShutdownPoolInited = true
+		cancelShutdownPool = sync.Pool{
+			New: func() any {
+				return &CancelledShutdown[K]{}
+			},
+		}
+	}
 	msg := cancelShutdownPool.Get().(*CancelledShutdown[K])
 	msg.Key = key
 	msg.Error = err
@@ -130,6 +142,14 @@ func msgCancelledShutdown[K comparable](key K, err error) (<-chan struct{}, *Can
 }
 
 func msgTerminatedShutdown[K comparable](key K) (<-chan struct{}, *TerminatedShutdown[K]) {
+	if !terminatedShutdownPoolInited {
+		terminatedShutdownPoolInited = true
+		terminatedShutdownPool = sync.Pool{
+			New: func() any {
+				return &TerminatedShutdown[K]{}
+			},
+		}
+	}
 	msg := terminatedShutdownPool.Get().(*TerminatedShutdown[K])
 	msg.Key = key
 	response := make(chan struct{}, 1)
@@ -138,6 +158,14 @@ func msgTerminatedShutdown[K comparable](key K) (<-chan struct{}, *TerminatedShu
 }
 
 func msgPanickedShutdown[K comparable](key K, err error) *PanickedShutdown[K] {
+	if !panicShutdownPoolInited {
+		panicShutdownPoolInited = true
+		panickedShutdownPool = sync.Pool{
+			New: func() any {
+				return &PanickedShutdown[K]{}
+			},
+		}
+	}
 	msg := panickedShutdownPool.Get().(*PanickedShutdown[K])
 	msg.Key = key
 	msg.Error = err
@@ -145,6 +173,14 @@ func msgPanickedShutdown[K comparable](key K, err error) *PanickedShutdown[K] {
 }
 
 func msgErroredShutdown[K comparable](key K, err error) *ErroredShutdown[K] {
+	if !erroredShutdownPoolInited {
+		erroredShutdownPoolInited = true
+		erroredShutdownPool = sync.Pool{
+			New: func() any {
+				return &ErroredShutdown[K]{}
+			},
+		}
+	}
 	msg := erroredShutdownPool.Get().(*ErroredShutdown[K])
 	msg.Key = key
 	msg.Error = err

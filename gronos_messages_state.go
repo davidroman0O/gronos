@@ -34,37 +34,30 @@ type RequestStatusAsync[K comparable] struct {
 	RequestMessage[K, struct{}]
 }
 
-var requestStatusPool = sync.Pool{
-	New: func() any {
-		return &RequestStatus[string]{}
-	},
-}
+var requestStatusPoolInited bool
+var requestStatusPool sync.Pool
 
-var requestAlivePool = sync.Pool{
-	New: func() any {
-		return &RequestAlive[string]{}
-	},
-}
+var requestAlivePoolInited bool
+var requestAlivePool sync.Pool
 
-var requestReasonPool = sync.Pool{
-	New: func() any {
-		return &RequestReason[string]{}
-	},
-}
+var requestReasonPoolInited bool
+var requestReasonPool sync.Pool
 
-var requestAllAlivePool = sync.Pool{
-	New: func() any {
-		return &RequestAllAlive[string]{}
-	},
-}
+var requestAllAlivePoolInited bool
+var requestAllAlivePool sync.Pool
 
-var requestStatusAsyncPool = sync.Pool{
-	New: func() any {
-		return &RequestStatusAsync[string]{}
-	},
-}
+var requestStatusAsyncPoolInited bool
+var requestStatusAsyncPool sync.Pool
 
 func MsgRequestStatus[K comparable](key K) (<-chan StatusState, *RequestStatus[K]) {
+	if !requestStatusPoolInited {
+		requestStatusPoolInited = true
+		requestStatusPool = sync.Pool{
+			New: func() any {
+				return &RequestStatus[K]{}
+			},
+		}
+	}
 	response := make(chan StatusState, 1)
 	msg := requestStatusPool.Get().(*RequestStatus[K])
 	msg.Key = key
@@ -73,6 +66,14 @@ func MsgRequestStatus[K comparable](key K) (<-chan StatusState, *RequestStatus[K
 }
 
 func MsgRequestAlive[K comparable](key K) *RequestAlive[K] {
+	if !requestAlivePoolInited {
+		requestAlivePoolInited = true
+		requestAlivePool = sync.Pool{
+			New: func() any {
+				return &RequestAlive[K]{}
+			},
+		}
+	}
 	msg := requestAlivePool.Get().(*RequestAlive[K])
 	msg.Key = key
 	msg.Response = make(chan bool, 1)
@@ -80,6 +81,14 @@ func MsgRequestAlive[K comparable](key K) *RequestAlive[K] {
 }
 
 func MsgRequestReason[K comparable](key K) *RequestReason[K] {
+	if !requestReasonPoolInited {
+		requestReasonPoolInited = true
+		requestReasonPool = sync.Pool{
+			New: func() any {
+				return &RequestReason[K]{}
+			},
+		}
+	}
 	msg := requestReasonPool.Get().(*RequestReason[K])
 	msg.Key = key
 	msg.Response = make(chan error, 1)
@@ -87,6 +96,14 @@ func MsgRequestReason[K comparable](key K) *RequestReason[K] {
 }
 
 func MsgRequestAllAlive[K comparable]() (<-chan bool, *RequestAllAlive[K]) {
+	if !requestAllAlivePoolInited {
+		requestAllAlivePoolInited = true
+		requestAllAlivePool = sync.Pool{
+			New: func() any {
+				return &RequestAllAlive[K]{}
+			},
+		}
+	}
 	response := make(chan bool, 1)
 	msg := requestAllAlivePool.Get().(*RequestAllAlive[K])
 	msg.Response = response
@@ -94,6 +111,14 @@ func MsgRequestAllAlive[K comparable]() (<-chan bool, *RequestAllAlive[K]) {
 }
 
 func MsgRequestStatusAsync[K comparable](key K, when StatusState) (<-chan struct{}, *RequestStatusAsync[K]) {
+	if !requestStatusAsyncPoolInited {
+		requestStatusAsyncPoolInited = true
+		requestStatusAsyncPool = sync.Pool{
+			New: func() any {
+				return &RequestStatusAsync[K]{}
+			},
+		}
+	}
 	response := make(chan struct{}, 1)
 	msg := requestStatusAsyncPool.Get().(*RequestStatusAsync[K])
 	msg.Key = key
