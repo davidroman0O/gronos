@@ -176,7 +176,7 @@ func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopi
 
 // Extension methods
 func (w *WatermillMiddleware[K]) OnStart(ctx context.Context, errChan chan<- error) error {
-	w.logger.Info("Starting Watermill middleware", nil)
+	w.logger.Debug("Starting Watermill middleware", nil)
 	return nil
 }
 
@@ -189,7 +189,7 @@ func (w *WatermillMiddleware[K]) OnStopRuntime(ctx context.Context) context.Cont
 }
 
 func (w *WatermillMiddleware[K]) OnStop(ctx context.Context, errChan chan<- error) error {
-	w.logger.Info("Stopping Watermill middleware", nil)
+	w.logger.Debug("Stopping Watermill middleware", nil)
 	w.closeAllComponents(errChan)
 	return nil
 }
@@ -269,13 +269,13 @@ func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) er
 
 func (w *WatermillMiddleware[K]) handleAddPublisher(ctx context.Context, msg *AddPublisherMessage[K]) error {
 	w.pubs.Store(msg.Key, msg.Publisher)
-	w.logger.Info("Added publisher", watermill.LogFields{"key": msg.Key})
+	w.logger.Debug("Added publisher", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
 func (w *WatermillMiddleware[K]) handleAddSubscriber(ctx context.Context, msg *AddSubscriberMessage[K]) error {
 	w.subs.Store(msg.Key, msg.Subscriber)
-	w.logger.Info("Added subscriber", watermill.LogFields{"key": msg.Key})
+	w.logger.Debug("Added subscriber", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
@@ -288,7 +288,7 @@ func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg *
 	if err != nil {
 		return fmt.Errorf("error closing publisher %v: %w", msg.Key, err)
 	}
-	w.logger.Info("Closed publisher", watermill.LogFields{"key": msg.Key})
+	w.logger.Debug("Closed publisher", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
@@ -301,7 +301,7 @@ func (w *WatermillMiddleware[K]) handleCloseSubscriber(ctx context.Context, msg 
 	if err != nil {
 		return fmt.Errorf("error closing subscriber %v: %w", msg.Key, err)
 	}
-	w.logger.Info("Closed subscriber", watermill.LogFields{"key": msg.Key})
+	w.logger.Debug("Closed subscriber", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
@@ -312,7 +312,7 @@ type RouterStatus struct {
 
 func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg *AddRouterMessage[K]) error {
 	w.routers.Store(msg.Key, &RouterStatus{Router: msg.Router, Running: false})
-	w.logger.Info("Added router", watermill.LogFields{"key": msg.Key})
+	w.logger.Debug("Added router", watermill.LogFields{"key": msg.Key})
 
 	go func() {
 		if err := msg.Router.Run(ctx); err != nil {
@@ -370,7 +370,7 @@ func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg *AddH
 		return fmt.Errorf("error running handlers: %w", err)
 	}
 
-	w.logger.Info("Added and ran handler", watermill.LogFields{
+	w.logger.Debug("Added and ran handler", watermill.LogFields{
 		"routerKey":   msg.Key,
 		"handlerName": msg.HandlerName,
 		"subTopic":    msg.SubscribeTopic,
