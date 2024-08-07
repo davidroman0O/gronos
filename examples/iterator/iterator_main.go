@@ -33,13 +33,15 @@ func main() {
 
 	steps := []gronos.CancellableTask{
 		func(ctx context.Context) error {
+			ptrTime := ctx.Value("key").(*time.Time)
+			*ptrTime = time.Now()
 			// Step 1 logic
 			log.Println("Step 1")
 			return nil
 		},
 		func(ctx context.Context) error {
 			// Step 2 logic
-			log.Println("Step 2")
+			log.Println("Step 2", ctx.Value("key"))
 			return nil
 		},
 		func(ctx context.Context) error {
@@ -67,6 +69,9 @@ func main() {
 			log.Println("work work work")
 			return nil
 		}))
+
+	valueOfTime := time.Now()
+	extraCtx = context.WithValue(extraCtx, "key", &valueOfTime)
 
 	g.Add("iteratorApp", gronos.Iterator(
 		extraCtx,
