@@ -167,3 +167,6 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
 This example demonstrates how to set up a Watermill router with a handler in a Gronos application.
 
 For more information on Watermill's features and capabilities, please refer to the [Watermill documentation](https://watermill.io/docs/).
+
+TODO: 
+- if you use custom generics, you need to specify it on all UsePublisher and UseSubscriber
