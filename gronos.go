@@ -258,6 +258,7 @@ func (g *gronos[K]) Shutdown() {
 
 // Wait blocks until all applications managed by the gronos instance have terminated.
 func (g *gronos[K]) Wait() {
+	defer close(g.errChan) // at the very very end
 	log.Debug("[Gronos] wait", g.doneChan)
 	if !g.started.Load() {
 		// wasn't even started
@@ -266,7 +267,6 @@ func (g *gronos[K]) Wait() {
 	}
 
 	_, ok := <-g.doneChan
-	close(g.errChan)
 	log.Debug("[Gronos] wait done", ok)
 }
 

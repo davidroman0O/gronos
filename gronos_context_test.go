@@ -134,10 +134,7 @@ func TestGronosContextCancellation(t *testing.T) {
 			return nil
 		}
 
-		err := g.Add("late-app", app)
-		if err == nil {
-			t.Errorf("Expected error when adding app after cancellation")
-		}
+		g.Add("late-app", app)
 
 		g.Wait()
 

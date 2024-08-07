@@ -66,6 +66,14 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m Message) error {
 func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m Message) error {
 	log.Debug("[GronosMessage] handle gronos message", reflect.TypeOf(m).Name(), m)
 
+	// Error should always be the highest priority
+	switch msg := m.(type) {
+	case *RuntimeError[K]:
+		log.Debug("[GronosMessage] [RuntimeError]")
+		g.errChan <- msg.Error
+		return nil
+	}
+
 	// - add runtime application
 	// - force cancel shutdown
 	// - force terminate shutdown
@@ -100,13 +108,6 @@ func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m Message) error 
 	// - grace period exceeded
 	if err, handled := g.handleShutdownStagesMessage(state, m); handled {
 		return err
-	}
-
-	switch msg := m.(type) {
-	case *RuntimeError[K]:
-		log.Debug("[GronosMessage] [RuntimeError]")
-		g.errChan <- msg.Error
-		return nil
 	}
 
 	return ErrUnhandledMessage

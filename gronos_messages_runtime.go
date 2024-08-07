@@ -198,7 +198,7 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 		return fmt.Errorf("application with key %v already exists", key)
 	}
 	if g.ctx.Err() != nil {
-		return fmt.Errorf("context is already cancelled")
+		return g.ctx.Err()
 	}
 	if g.isShutting.Load() {
 		return fmt.Errorf("gronos is shutting down")
@@ -325,12 +325,13 @@ func (g *gronos[K]) handleCancelledShutdown(state *gronosState[K], key K, err er
 			state.mali.Store(key, false)
 		}
 
-		state.mstatus.Store(key, StatusShutdownCancelled)
 		g.com <- MsgRuntimeError(key, err)
+		close(response)
+
+		state.mstatus.Store(key, StatusShutdownCancelled)
 
 		log.Debug("[GronosMessage] [CancelledShutdown] terminate cancelled shutdown terminated", key)
 
-		close(response)
 	}()
 
 	return nil
