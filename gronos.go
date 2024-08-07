@@ -420,9 +420,9 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 	go func() {
 		select {
 		case <-time.After(5 * time.Second):
-			log.Printf("Timeout waiting for application %v to reach state %v", k, cfg.whenState)
+			log.Debug("Timeout waiting for application to reach state", k, cfg.whenState)
 		case <-doneStatus:
-			log.Printf("Application %v reached state %v", k, cfg.whenState)
+			log.Debug("Application reached state", k, cfg.whenState)
 		}
 		close(proxy)
 	}()
