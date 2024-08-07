@@ -1,0 +1,5 @@
+Fixing:
+- [ ] Proper shutdown message orchestration
+
+Features todo:
+- [ ] Implement a supervisor

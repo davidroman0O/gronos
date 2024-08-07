@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
+	"os/signal"
 	"time"
 
 	"github.com/davidroman0O/gronos"
@@ -13,19 +15,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
-		"stopper": func(ctx context.Context, shutdown <-chan struct{}) error {
-			<-time.After(time.Second * 3)
-			log.Println("Shooting others")
-			bus, err := gronos.UseBus(ctx)
-			if err != nil {
-				return err
-			}
-			bus <- gronos.MsgContextTerminated("iteratorApp", nil) // will execute the extra cancel
-			bus <- gronos.MsgDeadLetter("asideWorker", nil)        // will just stop shutdown
-			return nil
-		},
-	})
+	g, cerr := gronos.New[string](
+		ctx,
+		map[string]gronos.RuntimeApplication{
+			// "stopper": func(ctx context.Context, shutdown <-chan struct{}) error {
+			// 	<-time.After(time.Second * 3)
+			// 	log.Println("Shooting others")
+			// 	bus, err := gronos.UseBus(ctx)
+			// 	if err != nil {
+			// 		return err
+			// 	}
+			// 	bus <- gronos.MsgCancelShutdown("iteratorApp", nil)
+			// 	bus <- gronos.MsgTerminateShutdown("asideWorker") // will stop shutdown
+			// 	return nil
+			// },
+		})
 
 	steps := []gronos.CancellableTask{
 		func(ctx context.Context) error {
@@ -45,6 +49,12 @@ func main() {
 		},
 	}
 
+	go func() {
+		for m := range cerr {
+			log.Println("error:", m)
+		}
+	}()
+
 	extraCtx, extraCancel := context.WithCancel(context.Background())
 	defer extraCancel()
 
@@ -52,17 +62,13 @@ func main() {
 		log.Println("Extra cancel")
 	}
 
-	err := g.Add("asideWorker", gronos.Worker(
+	g.Add("asideWorker", gronos.Worker(
 		time.Second/2, gronos.ManagedTimeline, func(ctx context.Context) error {
 			log.Println("work work work")
 			return nil
 		}))
-	if err != nil {
-		// Handle error
-		panic(err)
-	}
 
-	err = g.Add("iteratorApp", gronos.Iterator(
+	g.Add("iteratorApp", gronos.Iterator(
 		extraCtx,
 		steps,
 		gronos.WithLoopableIteratorOptions(
@@ -87,17 +93,12 @@ func main() {
 			}),
 		),
 	))
-	if err != nil {
-		// Handle error
-		panic(err)
-	}
-
-	e := g.Start()
 
 	go func() {
-		for msg := range e {
-			println(msg.Error())
-		}
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		<-c
+		g.Shutdown()
 	}()
 
 	g.Wait()
