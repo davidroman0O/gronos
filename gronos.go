@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -162,7 +161,7 @@ func WithExtension[K comparable](ext ExtensionHooks[K]) Option[K] {
 // New creates a new gronos instance with the given context and initial applications.
 func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts ...Option[K]) (*gronos[K], chan error) {
 
-	log.Default().SetLevel(log.DebugLevel) // debug
+	// log.Default().SetLevel(log.DebugLevel) // debug
 
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
@@ -342,7 +341,6 @@ func (g *gronos[K]) run(errChan chan<- error) {
 	}()
 
 	for m := range g.com {
-		fmt.Println("message", m, reflect.TypeOf(m))
 		if err := g.handleMessage(state, m); err != nil {
 			errChan <- err
 		}
