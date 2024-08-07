@@ -20,6 +20,7 @@ Gronos is a concurrent application management library for Go, designed to simpli
   - [Worker](#worker)
   - [Iterator](#iterator)
   - [Internal Messaging](#internal-messaging)
+  - [Watermill Integration](#watermill-integration)
 - [Configuration](#configuration)
 - [Best Practices](#best-practices)
 - [Examples](#examples)
@@ -38,6 +39,7 @@ Gronos is a concurrent application management library for Go, designed to simpli
 - **Iterator Pattern**: Implement repeating sequences of tasks effortlessly.
 - **Internal Messaging System**: Allow inter-application communication.
 - **Flexible Configuration**: Customize behavior with various options.
+- **Watermill Integration**: Incorporate event-driven architecture and message routing.
 
 ## Installation
 
@@ -211,6 +213,47 @@ func communicatingApp(ctx context.Context, shutdown <-chan struct{}) error {
 
 These messages allow you to dynamically add new applications, force cancel a shutdown, or force terminate a shutdown for specific applications.
 
+### Watermill Integration
+
+Gronos provides integration with the Watermill library, allowing you to easily incorporate event-driven architecture and message routing into your applications.
+
+```go
+import (
+    "github.com/davidroman0O/gronos"
+    watermillext "github.com/davidroman0O/gronos/watermill"
+)
+
+func main() {
+    ctx := context.Background()
+    watermillMiddleware := watermillext.NewWatermillMiddleware[string](watermill.NewStdLogger(true, true))
+
+    g, errChan := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
+        "setup": setupApp,
+    },
+        gronos.WithExtension[string](watermillMiddleware),
+    )
+
+    // ... rest of your Gronos setup
+}
+
+func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
+    com, err := gronos.UseBus(ctx)
+    if err != nil {
+        return err
+    }
+
+    pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
+
+    com(watermillext.MsgAddPublisher("pubsub", pubSub))
+    com(watermillext.MsgAddSubscriber("pubsub", pubSub))
+
+    // ... rest of your setup
+    return nil
+}
+```
+
+This integration allows you to use Watermill's powerful messaging capabilities within your Gronos applications, enabling sophisticated pub/sub patterns and message routing.
+
 ## Configuration
 
 Gronos supports various configuration options:
@@ -373,6 +416,7 @@ For more detailed information about specific features, please refer to the follo
 - [Worker Functionality](./docs/worker.md)
 - [Iterator Functionality](./docs/iterator.md)
 - [Internal Messaging](./docs/messaging.md)
+- [Watermill Integration](./docs/watermill.md)
 
 ## Contributing
 
