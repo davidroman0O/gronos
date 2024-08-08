@@ -52,8 +52,13 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 
     pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
 
-    com(watermillext.MsgAddPublisher("pubsub", pubSub))
-    com(watermillext.MsgAddSubscriber("pubsub", pubSub))
+    doneAddPublisher, msgAddPublisher := watermillext.MsgAddPublisher("pubsub", pubSub)
+    come(msgAddPublisher)
+    <-doneAddPublisher
+
+    doneAddSubscriber, msgAddSubscriber := watermillext.MsgAddSubscriber("pubsub", pubSub)
+    come(msgAddSubscriber)
+    <-doneAddSubscriber
 
     return nil
 }
@@ -69,7 +74,9 @@ if err != nil {
     return err
 }
 
-com(watermillext.MsgAddRouter("router", router))
+done, msg := watermillext.MsgAddRouter("router", router)
+com(msg)
+<-done
 ```
 
 ## Available Messages
@@ -145,8 +152,7 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
         return err
     }
 
-    com(
-        watermillext.MsgAddHandler(
+    done, msg := watermillext.MsgAddHandler(
             "router",
             "example-handler",
             "example.topic",
@@ -156,8 +162,9 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
                 processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
                 return message.Messages{processedMsg}, nil
             },
-        ),
-    )
+        )
+    com(msg)
+    <-done
 
     <-shutdown
     return nil
