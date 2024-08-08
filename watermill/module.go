@@ -397,7 +397,7 @@ func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg *AddH
 	return nil
 }
 
-func UsePublisher[K comparable](ctx context.Context, name K) (func(topic string, messages ...*message.Message) error, error) {
+func UsePublish[K comparable](ctx context.Context, name K) (func(topic string, messages ...*message.Message) error, error) {
 	middleware, err := getMiddleware[K](ctx)
 	if err != nil {
 		return nil, err
@@ -412,7 +412,7 @@ func UsePublisher[K comparable](ctx context.Context, name K) (func(topic string,
 	return pub.Publish, nil
 }
 
-func UseSubscriber[K comparable](ctx context.Context, name K) (func(ctx context.Context, topic string) (<-chan *message.Message, error), error) {
+func UseSubscribe[K comparable](ctx context.Context, name K) (func(ctx context.Context, topic string) (<-chan *message.Message, error), error) {
 	middleware, err := getMiddleware[K](ctx)
 	if err != nil {
 		return nil, err
@@ -425,6 +425,36 @@ func UseSubscriber[K comparable](ctx context.Context, name K) (func(ctx context.
 	sub := subInterface.(message.Subscriber)
 
 	return sub.Subscribe, nil
+}
+
+func UsePublisher[K comparable](ctx context.Context, name K) (message.Publisher, error) {
+	middleware, err := getMiddleware[K](ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	pubInterface, ok := middleware.pubs.Load(name)
+	if !ok {
+		return nil, fmt.Errorf("publisher not found: %v", name)
+	}
+	pub := pubInterface.(message.Publisher)
+
+	return pub, nil
+}
+
+func UseSubscriber[K comparable](ctx context.Context, name K) (message.Subscriber, error) {
+	middleware, err := getMiddleware[K](ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	subInterface, ok := middleware.subs.Load(name)
+	if !ok {
+		return nil, fmt.Errorf("subscriber not found: %v", name)
+	}
+	sub := subInterface.(message.Subscriber)
+
+	return sub, nil
 }
 
 func getMiddleware[K comparable](ctx context.Context) (*WatermillMiddleware[K], error) {

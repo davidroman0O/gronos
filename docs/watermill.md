@@ -1,4 +1,4 @@
-# Gronos Watermill Integration
+    # Gronos Watermill Integration
 
 Gronos provides seamless integration with the Watermill library, allowing you to incorporate event-driven architecture and message routing into your Gronos applications. This document covers the usage and configuration of Watermill integration in Gronos.
 
@@ -52,11 +52,11 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 
     pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
 
-    doneAddPublisher, msgAddPublisher := watermillext.MsgAddPublisher("pubsub", pubSub)
+    doneAddPublisher, msgAddPublisher := watermillext.MsgAddPublish("pubsub", pubSub)
     come(msgAddPublisher)
     <-doneAddPublisher
 
-    doneAddSubscriber, msgAddSubscriber := watermillext.MsgAddSubscriber("pubsub", pubSub)
+    doneAddSubscriber, msgAddSubscriber := watermillext.MsgAddSubscrib("pubsub", pubSub)
     come(msgAddSubscriber)
     <-doneAddSubscriber
 
@@ -73,6 +73,20 @@ router, err := message.NewRouter(message.RouterConfig{}, watermill.NewStdLogger(
 if err != nil {
     return err
 }
+
+// return the real message.Subscriber
+subscriber, err := watermillext.UseSubscriber(ctx, "pubsub")
+if err != nil {
+    return err
+}
+
+router.AddNoPublisherHandler(
+    "request_account", 
+    "request_account", 
+    subscriber, 
+    func(msg *message.Message) error {
+        return nil
+    })
 
 done, msg := watermillext.MsgAddRouter("router", router)
 com(msg)
@@ -94,7 +108,7 @@ Gronos provides several Watermill-specific messages:
 
 ```go
 func publisherApp(ctx context.Context, shutdown <-chan struct{}) error {
-    publish, err := watermillext.UsePublisher(ctx, "pubsub")
+    publish, err := watermillext.UsePublish(ctx, "pubsub")
     if err != nil {
         return err
     }
@@ -119,7 +133,7 @@ func publisherApp(ctx context.Context, shutdown <-chan struct{}) error {
 }
 
 func subscriberApp(ctx context.Context, shutdown <-chan struct{}) error {
-    subscribe, err := watermillext.UseSubscriber(ctx, "pubsub")
+    subscribe, err := watermillext.UseSubscrib(ctx, "pubsub")
     if err != nil {
         return err
     }

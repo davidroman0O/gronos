@@ -87,7 +87,7 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 }
 
 func publisherApp(ctx context.Context, shutdown <-chan struct{}) error {
-	publish, err := watermillext.UsePublisher(ctx, "pubsub")
+	publish, err := watermillext.UsePublish(ctx, "pubsub")
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func publisherApp(ctx context.Context, shutdown <-chan struct{}) error {
 }
 
 func subscriberApp(ctx context.Context, shutdown <-chan struct{}) error {
-	subscribe, err := watermillext.UseSubscriber(ctx, "pubsub")
+	subscribe, err := watermillext.UseSubscribe(ctx, "pubsub")
 	if err != nil {
 		return err
 	}
