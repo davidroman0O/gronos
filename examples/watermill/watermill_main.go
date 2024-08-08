@@ -64,17 +64,20 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 	}
 
 	pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
-
-	com(watermillext.MsgAddPublisher("pubsub", pubSub))
-
-	com(watermillext.MsgAddSubscriber("pubsub", pubSub))
+	doneAddPublisher, msgAddPublisher := watermillext.MsgAddPublisher("pubsub", pubSub)
+	com(msgAddPublisher)
+	<-doneAddPublisher
+	doneAddSubscriber, msgAddSubscriber := watermillext.MsgAddSubscriber("pubsub", pubSub)
+	com(msgAddSubscriber)
+	<-doneAddSubscriber
 
 	router, err := message.NewRouter(message.RouterConfig{}, watermill.NewStdLogger(false, false))
 	if err != nil {
 		return err
 	}
-
-	com(watermillext.MsgAddRouter("router", router))
+	doneAddRouter, msgAddRouter := watermillext.MsgAddRouter("router", router)
+	com(msgAddRouter)
+	<-doneAddRouter
 
 	done, msg := gronos.MsgRequestStatusAsync("setup", gronos.StatusRunning)
 	com(msg)
@@ -142,19 +145,19 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
 		return err
 	}
 
-	com(
-		watermillext.MsgAddHandler(
-			"router",
-			"example-handler",
-			"example.topic",
-			"example.processed.topic",
-			func(msg *message.Message) ([]*message.Message, error) {
-				fmt.Printf("Processing message: %s\n", string(msg.Payload))
-				processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
-				return message.Messages{processedMsg}, nil
-			},
-		),
+	done, msg := watermillext.MsgAddHandler(
+		"router",
+		"example-handler",
+		"example.topic",
+		"example.processed.topic",
+		func(msg *message.Message) ([]*message.Message, error) {
+			fmt.Printf("Processing message: %s\n", string(msg.Payload))
+			processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
+			return message.Messages{processedMsg}, nil
+		},
 	)
+	com(msg)
+	<-done
 
 	<-shutdown
 	return nil

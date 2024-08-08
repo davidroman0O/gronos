@@ -34,33 +34,39 @@ func NewWatermillMiddleware[K comparable](logger watermill.LoggerAdapter) *Water
 // Message types
 type AddPublisherMessage[K comparable] struct {
 	gronos.KeyMessage[K]
-	Publisher message.Publisher
+	Publisher                          message.Publisher
+	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
 type AddSubscriberMessage[K comparable] struct {
 	gronos.KeyMessage[K]
-	Subscriber message.Subscriber
+	Subscriber                         message.Subscriber
+	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
 type AddRouterMessage[K comparable] struct {
 	gronos.KeyMessage[K]
-	Router *message.Router
+	Router                             *message.Router
+	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
 type ClosePublisherMessage[K comparable] struct {
 	gronos.KeyMessage[K]
+	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
 type CloseSubscriberMessage[K comparable] struct {
 	gronos.KeyMessage[K]
+	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
 type AddHandlerMessage[K comparable] struct {
 	gronos.KeyMessage[K]
-	HandlerName    string
-	SubscribeTopic string
-	PublishTopic   string
-	HandlerFunc    message.HandlerFunc
+	HandlerName                        string
+	SubscribeTopic                     string
+	PublishTopic                       string
+	HandlerFunc                        message.HandlerFunc
+	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
 // Sync pools for message types
@@ -83,7 +89,7 @@ var addHandlerPoolInited bool
 var addHandlerPool sync.Pool
 
 // Message creation functions
-func MsgAddPublisher[K comparable](key K, publisher message.Publisher) *AddPublisherMessage[K] {
+func MsgAddPublisher[K comparable](key K, publisher message.Publisher) (<-chan struct{}, *AddPublisherMessage[K]) {
 	if !addPublisherPoolInited {
 		addPublisherPoolInited = true
 		addPublisherPool = sync.Pool{
@@ -95,10 +101,11 @@ func MsgAddPublisher[K comparable](key K, publisher message.Publisher) *AddPubli
 	msg := addPublisherPool.Get().(*AddPublisherMessage[K])
 	msg.Key = key
 	msg.Publisher = publisher
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
-func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) *AddSubscriberMessage[K] {
+func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) (<-chan struct{}, *AddSubscriberMessage[K]) {
 	if !addSubscriberPoolInited {
 		addSubscriberPoolInited = true
 		addSubscriberPool = sync.Pool{
@@ -110,10 +117,11 @@ func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) *AddSu
 	msg := addSubscriberPool.Get().(*AddSubscriberMessage[K])
 	msg.Key = key
 	msg.Subscriber = subscriber
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
-func MsgAddRouter[K comparable](key K, router *message.Router) *AddRouterMessage[K] {
+func MsgAddRouter[K comparable](key K, router *message.Router) (<-chan struct{}, *AddRouterMessage[K]) {
 	if !addRouterPoolInited {
 		addRouterPoolInited = true
 		addRouterPool = sync.Pool{
@@ -125,10 +133,11 @@ func MsgAddRouter[K comparable](key K, router *message.Router) *AddRouterMessage
 	msg := addRouterPool.Get().(*AddRouterMessage[K])
 	msg.Key = key
 	msg.Router = router
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
-func MsgClosePublisher[K comparable](key K) *ClosePublisherMessage[K] {
+func MsgClosePublisher[K comparable](key K) (<-chan struct{}, *ClosePublisherMessage[K]) {
 	if !closePublisherPoolInited {
 		closePublisherPoolInited = true
 		closePublisherPool = sync.Pool{
@@ -139,10 +148,11 @@ func MsgClosePublisher[K comparable](key K) *ClosePublisherMessage[K] {
 	}
 	msg := closePublisherPool.Get().(*ClosePublisherMessage[K])
 	msg.Key = key
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
-func MsgCloseSubscriber[K comparable](key K) *CloseSubscriberMessage[K] {
+func MsgCloseSubscriber[K comparable](key K) (<-chan struct{}, *CloseSubscriberMessage[K]) {
 	if !closeSubscriberPoolInited {
 		closeSubscriberPoolInited = true
 		closeSubscriberPool = sync.Pool{
@@ -153,10 +163,11 @@ func MsgCloseSubscriber[K comparable](key K) *CloseSubscriberMessage[K] {
 	}
 	msg := closeSubscriberPool.Get().(*CloseSubscriberMessage[K])
 	msg.Key = key
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
-func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopic string, handlerFunc message.HandlerFunc) *AddHandlerMessage[K] {
+func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopic string, handlerFunc message.HandlerFunc) (<-chan struct{}, *AddHandlerMessage[K]) {
 	if !addHandlerPoolInited {
 		addHandlerPoolInited = true
 		addHandlerPool = sync.Pool{
@@ -171,7 +182,8 @@ func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopi
 	msg.SubscribeTopic = subscribeTopic
 	msg.PublishTopic = publishTopic
 	msg.HandlerFunc = handlerFunc
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
 // Extension methods
@@ -268,18 +280,21 @@ func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) er
 }
 
 func (w *WatermillMiddleware[K]) handleAddPublisher(ctx context.Context, msg *AddPublisherMessage[K]) error {
+	defer close(msg.Response)
 	w.pubs.Store(msg.Key, msg.Publisher)
 	w.logger.Debug("Added publisher", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
 func (w *WatermillMiddleware[K]) handleAddSubscriber(ctx context.Context, msg *AddSubscriberMessage[K]) error {
+	defer close(msg.Response)
 	w.subs.Store(msg.Key, msg.Subscriber)
 	w.logger.Debug("Added subscriber", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
 func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg *ClosePublisherMessage[K]) error {
+	defer close(msg.Response)
 	pub, ok := w.pubs.LoadAndDelete(msg.Key)
 	if !ok {
 		return fmt.Errorf("publisher not found: %v", msg.Key)
@@ -293,6 +308,7 @@ func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg *
 }
 
 func (w *WatermillMiddleware[K]) handleCloseSubscriber(ctx context.Context, msg *CloseSubscriberMessage[K]) error {
+	defer close(msg.Response)
 	sub, ok := w.subs.LoadAndDelete(msg.Key)
 	if !ok {
 		return fmt.Errorf("subscriber not found: %v", msg.Key)
@@ -311,6 +327,7 @@ type RouterStatus struct {
 }
 
 func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg *AddRouterMessage[K]) error {
+	defer close(msg.Response)
 	w.routers.Store(msg.Key, &RouterStatus{Router: msg.Router, Running: false})
 	w.logger.Debug("Added router", watermill.LogFields{"key": msg.Key})
 
@@ -329,6 +346,7 @@ func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg *AddRo
 }
 
 func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg *AddHandlerMessage[K]) error {
+	defer close(msg.Response)
 	routerStatus, ok := w.routers.Load(msg.Key)
 	if !ok {
 		return fmt.Errorf("router not found: %v", msg.Key)
