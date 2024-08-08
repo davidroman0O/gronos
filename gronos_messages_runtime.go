@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-type AddRuntimeApplicationMessage[K comparable] struct {
+type AddMessage[K comparable] struct {
 	KeyMessage[K]
 	RuntimeApplication
 	done chan struct{}
@@ -79,16 +79,16 @@ var panickedShutdownPool sync.Pool
 var erroredShutdownPoolInited bool = false
 var erroredShutdownPool sync.Pool
 
-func MsgAddRuntimeApplication[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddRuntimeApplicationMessage[K]) {
+func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddMessage[K]) {
 	if !addRuntimeApplicationPoolInited {
 		addRuntimeApplicationPoolInited = true
 		addRuntimeApplicationPool = sync.Pool{
 			New: func() any {
-				return &AddRuntimeApplicationMessage[K]{}
+				return &AddMessage[K]{}
 			},
 		}
 	}
-	msg := addRuntimeApplicationPool.Get().(*AddRuntimeApplicationMessage[K])
+	msg := addRuntimeApplicationPool.Get().(*AddMessage[K])
 	msg.Key = key
 	msg.RuntimeApplication = app
 	msg.done = make(chan struct{}, 1)
@@ -189,8 +189,8 @@ func msgErroredShutdown[K comparable](key K, err error) *ErroredShutdown[K] {
 
 func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m Message) (error, bool) {
 	switch msg := m.(type) {
-	case *AddRuntimeApplicationMessage[K]:
-		log.Debug("[GronosMessage] [AddRuntimeApplicationMessage]", msg.Key)
+	case *AddMessage[K]:
+		log.Debug("[GronosMessage] [AddMessage]", msg.Key)
 		defer addRuntimeApplicationPool.Put(msg)
 		return g.handleAddRuntimeApplication(state, msg.Key, msg.done, msg.RuntimeApplication), true
 	case *CancelledShutdown[K]:
@@ -228,7 +228,7 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 		return fmt.Errorf("gronos is shutting down")
 	}
 
-	log.Debug("[GronosMessage] [AddRuntimeApplicationMessage] add application", key)
+	log.Debug("[GronosMessage] [AddMessage] add application", key)
 
 	if _, ok := state.mkeys.Load(key); ok {
 		return fmt.Errorf("application with key %v already exists", key)
@@ -243,7 +243,7 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 	ctx, cancel := g.createContext()
 	shutdown := make(chan struct{})
 
-	log.Debug("[GronosMessage] [AddRuntimeApplicationMessage] add application with extensions", key, app)
+	log.Debug("[GronosMessage] [AddMessage] add application with extensions", key, app)
 	for _, ext := range g.extensions {
 		ctx = ext.OnNewRuntime(ctx)
 	}
@@ -264,18 +264,18 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 	state.mdone.Store(key, realDone)
 
 	state.mcloser.Store(key, sync.OnceFunc(func() {
-		log.Debug("[GronosMessage] [AddRuntimeApplicationMessage] close", key)
+		log.Debug("[GronosMessage] [AddMessage] close", key)
 		close(shutdown)
 	}))
 
 	state.mcancel.Store(key, sync.OnceFunc(func() {
-		log.Debug("[GronosMessage] [AddRuntimeApplicationMessage] cancel", key)
+		log.Debug("[GronosMessage] [AddMessage] cancel", key)
 		cancel()
 	}))
 
 	go g.handleRuntimeApplication(state, key, g.com)
 
-	log.Debug("[GronosMessage] [AddRuntimeApplicationMessage] application added", key)
+	log.Debug("[GronosMessage] [AddMessage] application added", key)
 
 	return nil
 }

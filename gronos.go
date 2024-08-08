@@ -52,7 +52,7 @@ type StatusState string
 /// - ShutdownByRequested: The state when the framework is triggered by developer code to shut down.
 /// - ShutdownByOS: The state when the operating system requests a shutdown.
 /// Messages:
-/// - AddRuntimeApplicationMessage: Transitions from Added to Running.
+/// - AddMessage: Transitions from Added to Running.
 /// - CancelShutdown: Transitions from Running to Cancelled.
 /// - TerminateShutdown: Transitions from Running to Terminated.
 /// - PanicShutdown: Transitions from Running to Panicked.
@@ -232,7 +232,7 @@ func (g *gronos[K]) Start() chan error {
 
 	// TODO: might send them all at once and wait for all of them to be added
 	for k, v := range g.init {
-		wait, msg := MsgAddRuntimeApplication[K](k, v)
+		wait, msg := MsgAdd[K](k, v)
 		g.sendMessage(msg)
 		<-wait
 	}
@@ -390,7 +390,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 		opt(&cfg)
 	}
 
-	done, msgAdd := MsgAddRuntimeApplication(k, v)
+	done, msgAdd := MsgAdd(k, v)
 
 	// Add new runtime application
 	if !g.sendMessage(msgAdd) {

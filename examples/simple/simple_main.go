@@ -28,7 +28,7 @@ func main() {
 				go func() {
 					<-time.After(time.Second * 1)
 
-					done, msg := gronos.MsgAddRuntimeApplication("worker3",
+					done, msg := gronos.MsgAdd("worker3",
 						gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
 							log.Println("worker3 tick")
 							return nil

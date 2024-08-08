@@ -2143,11 +2143,11 @@
       "locked": false,
       "fontSize": 16,
       "fontFamily": 3,
-      "text": "AddRuntimeApplicationMessage",
+      "text": "AddMessage",
       "textAlign": "center",
       "verticalAlign": "middle",
       "containerId": "KngG1X3_QUx6U3v7Lq_9L",
-      "originalText": "AddRuntimeApplicationMessage",
+      "originalText": "AddMessage",
       "lineHeight": 1.2,
       "baseline": 15
     },
