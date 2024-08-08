@@ -200,7 +200,7 @@ func communicatingApp(ctx context.Context, shutdown <-chan struct{}) error {
     
     // Available messages:
     // Add a new runtime application
-    done, addMsg := gronos.MsgAddRuntimeApplication("newApp", newAppFunc)
+    done, addMsg := gronos.MsgAdd("newApp", newAppFunc)
     bus(addMsg)
     <-done
 
