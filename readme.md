@@ -246,8 +246,13 @@ func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
 
     pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
 
-    com(watermillext.MsgAddPublisher("pubsub", pubSub))
-    com(watermillext.MsgAddSubscriber("pubsub", pubSub))
+    doneAddPublisher, msgAddPublisher := watermillext.MsgAddPublisher("pubsub", pubSub)
+    com(msgAddPublisher) // send message
+    <- doneAddPublisher // wait for it to be processed (you're not forced to but cool to have)
+
+    doneAddSubscriber, msgAddSubscriber := watermillext.MsgAddSubscriber("pubsub", pubSub)
+    com(msgAddSubscriber)
+    <- doneAddSubscriber
 
     // ... rest of your setup
     return nil
