@@ -1,5 +1,3 @@
-Fixing:
-- [ ] Proper shutdown message orchestration
 
 Features todo:
-- [ ] Implement a supervisor
+- [ ] Implement a supervisor: a runtime application can panic or return an error, it should be restarted
