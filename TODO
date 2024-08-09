@@ -5,5 +5,7 @@ Improvements todo:
 
 Features todo:
     - [ ] Implement a supervisor: a runtime application can panic or return an error, it should be restarted
-    - [ ] `events` package containing helpers to deploy minimalist EDA systems 
+    - [ ] `evelope` package containing helpers to deploy minimalist EDA systems 
+    - [ ] lot of examples about evelope
+
 

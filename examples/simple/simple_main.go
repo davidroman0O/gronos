@@ -20,7 +20,7 @@ func main() {
 			"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
 				log.Println("app1 started")
 
-				com, err := gronos.UseBus(ctx)
+				bus, err := gronos.UseBusWait(ctx)
 				if err != nil {
 					return err
 				}
@@ -28,15 +28,19 @@ func main() {
 				go func() {
 					<-time.After(time.Second * 1)
 
-					done, msg := gronos.MsgAdd("worker3",
-						gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
-							log.Println("worker3 tick")
-							return nil
-						}))
-					com(msg)
-					<-done
+					<-bus(func() (<-chan struct{}, gronos.Message) {
+						return gronos.MsgAdd("worker3",
+							gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
+								log.Println("worker3 tick")
+								return nil
+							}))
+					})
 
-					com(gronos.MsgForceTerminateShutdown("app1"))
+					<-bus(func() (<-chan struct{}, gronos.Message) {
+
+						return gronos.MsgForceTerminateShutdown("app1")
+					})
+
 				}()
 
 				select {
@@ -53,17 +57,21 @@ func main() {
 				gronos.ManagedTimeline,
 				func(ctx context.Context) error {
 					log.Println("worker1 tick")
-					com, err := gronos.UseBus(ctx)
+					bus, err := gronos.UseBusWait(ctx)
 					if err != nil {
 						return err
 					}
 					go func() {
 						<-time.After(time.Second * 1)
-						com(gronos.MsgForceTerminateShutdown("worker2"))
+						<-bus(func() (<-chan struct{}, gronos.Message) {
+							return gronos.MsgForceTerminateShutdown("worker2")
+						})
 					}()
 					go func() {
 						<-time.After(time.Second * 2)
-						com(gronos.MsgForceTerminateShutdown("worker3"))
+						<-bus(func() (<-chan struct{}, gronos.Message) {
+							return gronos.MsgForceTerminateShutdown("worker3")
+						})
 					}()
 					<-ctx.Done()
 					return nil

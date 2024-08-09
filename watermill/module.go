@@ -2,7 +2,6 @@ package watermillextension
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
@@ -10,6 +9,8 @@ import (
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/davidroman0O/gronos"
 )
+
+/// The main goal of middlewares is to manage resources for the user
 
 type ctxWatermill string
 
@@ -22,7 +23,7 @@ type WatermillMiddleware[K comparable] struct {
 	logger  watermill.LoggerAdapter
 }
 
-func NewWatermillMiddleware[K comparable](logger watermill.LoggerAdapter) *WatermillMiddleware[K] {
+func New[K comparable](logger watermill.LoggerAdapter) *WatermillMiddleware[K] {
 	if logger == nil {
 		logger = watermill.NewStdLogger(false, false)
 	}
@@ -60,12 +61,36 @@ type CloseSubscriberMessage[K comparable] struct {
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
+// func(handlerName string, subscribeTopic string, subscriber message.Subscriber, handlerFunc message.NoPublishHandlerFunc) *message.Handler
+type AddNoPublisherHandlerMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	HandlerName                        string
+	SubscribeTopic                     string
+	SubscriberName                     string
+	HandlerFunc                        message.NoPublishHandlerFunc
+	gronos.RequestMessage[K, struct{}] // when it is done
+}
+
 type AddHandlerMessage[K comparable] struct {
 	gronos.KeyMessage[K]
 	HandlerName                        string
 	SubscribeTopic                     string
 	PublishTopic                       string
+	SubscriberName                     string
+	PublisherName                      string
 	HandlerFunc                        message.HandlerFunc
+	gronos.RequestMessage[K, struct{}] // when it is done
+}
+
+type AddRouterPlugins[K comparable] struct {
+	gronos.KeyMessage[K]
+	Plugins                            []message.RouterPlugin
+	gronos.RequestMessage[K, struct{}] // when it is done
+}
+
+type AddRouterMiddlewares[K comparable] struct {
+	gronos.KeyMessage[K]
+	Middlewares                        []message.HandlerMiddleware
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
@@ -87,6 +112,15 @@ var closeSubscriberPool sync.Pool
 
 var addHandlerPoolInited bool
 var addHandlerPool sync.Pool
+
+var addNoPublisherHandlerPoolInited bool
+var addNoPublisherHandlerPool sync.Pool
+
+var addPluginsPoolInited bool
+var addPluginsPool sync.Pool
+
+var addMiddlewaresPoolInited bool
+var addMiddlewaresPool sync.Pool
 
 // Message creation functions
 func MsgAddPublisher[K comparable](key K, publisher message.Publisher) (<-chan struct{}, *AddPublisherMessage[K]) {
@@ -167,10 +201,10 @@ func MsgCloseSubscriber[K comparable](key K) (<-chan struct{}, *CloseSubscriberM
 	return msg.Response, msg
 }
 
-func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopic string, handlerFunc message.HandlerFunc) (<-chan struct{}, *AddHandlerMessage[K]) {
+func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, subscriberName string, publishTopic string, publisherName string, handlerFunc message.HandlerFunc) (<-chan struct{}, *AddHandlerMessage[K]) {
 	if !addHandlerPoolInited {
 		addHandlerPoolInited = true
-		addHandlerPool = sync.Pool{
+		addNoPublisherHandlerPool = sync.Pool{
 			New: func() interface{} {
 				return &AddHandlerMessage[K]{}
 			},
@@ -182,6 +216,60 @@ func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, publishTopi
 	msg.SubscribeTopic = subscribeTopic
 	msg.PublishTopic = publishTopic
 	msg.HandlerFunc = handlerFunc
+	msg.SubscriberName = subscriberName
+	msg.PublisherName = publisherName
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
+}
+
+// func(handlerName string, subscribeTopic string, subscriber message.Subscriber, handlerFunc message.NoPublishHandlerFunc) *message.Handler
+func MsgAddNoPublisherHandler[K comparable](key K, handlerName, subscribeTopic, subscriberName string, handlerFunc message.NoPublishHandlerFunc) (<-chan struct{}, *AddNoPublisherHandlerMessage[K]) {
+	if !addNoPublisherHandlerPoolInited {
+		addNoPublisherHandlerPoolInited = true
+		addNoPublisherHandlerPool = sync.Pool{
+			New: func() interface{} {
+				return &AddNoPublisherHandlerMessage[K]{}
+			},
+		}
+	}
+	msg := addNoPublisherHandlerPool.Get().(*AddNoPublisherHandlerMessage[K])
+	msg.Key = key
+	msg.HandlerName = handlerName
+	msg.SubscribeTopic = subscribeTopic
+	msg.HandlerFunc = handlerFunc
+	msg.SubscriberName = subscriberName
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
+}
+
+func MsgAddPlugins[K comparable](key K, plugins ...message.RouterPlugin) (<-chan struct{}, *AddRouterPlugins[K]) {
+	if !addPluginsPoolInited {
+		addPluginsPoolInited = true
+		addPluginsPool = sync.Pool{
+			New: func() interface{} {
+				return &AddRouterPlugins[K]{}
+			},
+		}
+	}
+	msg := addPluginsPool.Get().(*AddRouterPlugins[K])
+	msg.Key = key
+	msg.Plugins = plugins
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
+}
+
+func MsgAddMiddlewares[K comparable](key K, middlewares ...message.HandlerMiddleware) (<-chan struct{}, *AddRouterMiddlewares[K]) {
+	if !addMiddlewaresPoolInited {
+		addMiddlewaresPoolInited = true
+		addMiddlewaresPool = sync.Pool{
+			New: func() interface{} {
+				return &AddRouterMiddlewares[K]{}
+			},
+		}
+	}
+	msg := addMiddlewaresPool.Get().(*AddRouterMiddlewares[K])
+	msg.Key = key
+	msg.Middlewares = middlewares
 	msg.Response = make(chan struct{}, 1)
 	return msg.Response, msg
 }
@@ -202,8 +290,7 @@ func (w *WatermillMiddleware[K]) OnStopRuntime(ctx context.Context) context.Cont
 
 func (w *WatermillMiddleware[K]) OnStop(ctx context.Context, errChan chan<- error) error {
 	w.logger.Debug("Stopping Watermill middleware", nil)
-	w.closeAllComponents(errChan)
-	return nil
+	return w.closeAllComponents(errChan)
 }
 
 func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) error {
@@ -246,12 +333,11 @@ func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) error 
 	wg.Wait()
 	close(errCh)
 
-	var errs error
 	for err := range errCh {
-		errs = errors.Join(errs, err)
+		errChan <- err
 	}
 
-	return errs
+	return nil
 }
 
 func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) error {
@@ -274,6 +360,15 @@ func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) er
 	case *CloseSubscriberMessage[K]:
 		defer closeSubscriberPool.Put(msg)
 		return w.handleCloseSubscriber(ctx, msg)
+	case *AddNoPublisherHandlerMessage[K]:
+		defer addNoPublisherHandlerPool.Put(msg)
+		return w.handleAddNoPublisherHandler(ctx, msg)
+	case *AddRouterPlugins[K]:
+		defer addPluginsPool.Put(msg)
+		return w.handleAddRouterPlugins(ctx, msg)
+	case *AddRouterMiddlewares[K]:
+		defer addMiddlewaresPool.Put(msg)
+		return w.handleAddRouterMiddlewares(ctx, msg)
 	default:
 		return gronos.ErrUnmanageExtensionMessage
 	}
@@ -345,6 +440,92 @@ func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg *AddRo
 	return nil
 }
 
+func (w *WatermillMiddleware[K]) handleAddNoPublisherHandler(ctx context.Context, msg *AddNoPublisherHandlerMessage[K]) error {
+	defer close(msg.Response)
+	routerStatus, ok := w.routers.Load(msg.Key)
+	if !ok {
+		return fmt.Errorf("router not found: %v", msg.Key)
+	}
+	rs := routerStatus.(*RouterStatus)
+
+	if !rs.Running {
+		return fmt.Errorf("router is not running: %v", msg.Key)
+	}
+
+	// Find the appropriate subscriber
+	var sub message.Subscriber
+	var value any
+
+	if value, ok = w.subs.Load(msg.SubscriberName); !ok {
+		return fmt.Errorf("subscriber not found: %v", msg.SubscriberName)
+	}
+	sub = value.(message.Subscriber)
+
+	if sub == nil {
+		return fmt.Errorf("subscriber not found")
+	}
+
+	rs.Router.AddNoPublisherHandler(
+		msg.HandlerName,
+		msg.SubscribeTopic,
+		sub,
+		msg.HandlerFunc,
+	)
+
+	if err := rs.Router.RunHandlers(ctx); err != nil {
+		return fmt.Errorf("error running handlers: %w", err)
+	}
+
+	w.logger.Debug("Added and ran no-publisher handler", watermill.LogFields{
+		"routerKey":   msg.Key,
+		"handlerName": msg.HandlerName,
+		"subTopic":    msg.SubscribeTopic,
+	})
+	return nil
+}
+
+func (w *WatermillMiddleware[K]) handleAddRouterPlugins(ctx context.Context, msg *AddRouterPlugins[K]) error {
+	defer close(msg.Response)
+	routerStatus, ok := w.routers.Load(msg.Key)
+	if !ok {
+		return fmt.Errorf("router not found: %v", msg.Key)
+	}
+	rs := routerStatus.(*RouterStatus)
+
+	if !rs.Running {
+		return fmt.Errorf("router is not running: %v", msg.Key)
+	}
+
+	rs.Router.AddPlugin(msg.Plugins...)
+
+	w.logger.Debug("Added plugins to router", watermill.LogFields{
+		"routerKey": msg.Key,
+		"plugins":   msg.Plugins,
+	})
+	return nil
+}
+
+func (w *WatermillMiddleware[K]) handleAddRouterMiddlewares(ctx context.Context, msg *AddRouterMiddlewares[K]) error {
+	defer close(msg.Response)
+	routerStatus, ok := w.routers.Load(msg.Key)
+	if !ok {
+		return fmt.Errorf("router not found: %v", msg.Key)
+	}
+	rs := routerStatus.(*RouterStatus)
+
+	if !rs.Running {
+		return fmt.Errorf("router is not running: %v", msg.Key)
+	}
+
+	rs.Router.AddMiddleware(msg.Middlewares...)
+
+	w.logger.Debug("Added Middlewares to router", watermill.LogFields{
+		"routerKey":   msg.Key,
+		"middlewares": msg.Middlewares,
+	})
+	return nil
+}
+
 func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg *AddHandlerMessage[K]) error {
 	defer close(msg.Response)
 	routerStatus, ok := w.routers.Load(msg.Key)
@@ -360,16 +541,17 @@ func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg *AddH
 	// Find the appropriate subscriber and publisher
 	var sub message.Subscriber
 	var pub message.Publisher
+	var value any
 
-	w.subs.Range(func(key, value interface{}) bool {
-		sub = value.(message.Subscriber)
-		return false // Stop after finding the first subscriber
-	})
+	if value, ok = w.subs.Load(msg.SubscriberName); !ok {
+		return fmt.Errorf("subscriber not found: %v", msg.SubscriberName)
+	}
+	sub = value.(message.Subscriber)
 
-	w.pubs.Range(func(key, value interface{}) bool {
-		pub = value.(message.Publisher)
-		return false // Stop after finding the first publisher
-	})
+	if value, ok = w.pubs.Load(msg.PublisherName); !ok {
+		return fmt.Errorf("publisher not found: %v", msg.SubscriberName)
+	}
+	pub = value.(message.Publisher)
 
 	if sub == nil || pub == nil {
 		return fmt.Errorf("subscriber or publisher not found")

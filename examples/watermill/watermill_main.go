@@ -16,7 +16,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	watermillMiddleware := watermillext.NewWatermillMiddleware[string](watermill.NewStdLogger(true, true))
+	watermillMiddleware := watermillext.New[string](watermill.NewStdLogger(true, true))
 
 	g, errChan := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
 		"setup": setupApp,
@@ -58,30 +58,33 @@ func main() {
 }
 
 func setupApp(ctx context.Context, shutdown <-chan struct{}) error {
-	com, err := gronos.UseBus(ctx)
+	com, err := gronos.UseBusWait(ctx)
 	if err != nil {
 		return err
 	}
 
 	pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
-	doneAddPublisher, msgAddPublisher := watermillext.MsgAddPublisher("pubsub", pubSub)
-	com(msgAddPublisher)
-	<-doneAddPublisher
-	doneAddSubscriber, msgAddSubscriber := watermillext.MsgAddSubscriber("pubsub", pubSub)
-	com(msgAddSubscriber)
-	<-doneAddSubscriber
+
+	<-com(func() (<-chan struct{}, gronos.Message) {
+		return watermillext.MsgAddPublisher("pubsub", pubSub)
+	})
+
+	<-com(func() (<-chan struct{}, gronos.Message) {
+		return watermillext.MsgAddSubscriber("pubsub", pubSub)
+	})
 
 	router, err := message.NewRouter(message.RouterConfig{}, watermill.NewStdLogger(false, false))
 	if err != nil {
 		return err
 	}
-	doneAddRouter, msgAddRouter := watermillext.MsgAddRouter("router", router)
-	com(msgAddRouter)
-	<-doneAddRouter
 
-	done, msg := gronos.MsgRequestStatusAsync("setup", gronos.StatusRunning)
-	com(msg)
-	<-done
+	<-com(func() (<-chan struct{}, gronos.Message) {
+		return watermillext.MsgAddRouter("router", router)
+	})
+
+	<-com(func() (<-chan struct{}, gronos.Message) {
+		return gronos.MsgRequestStatusAsync("setup", gronos.StatusRunning)
+	})
 
 	return nil
 }
@@ -140,24 +143,27 @@ func subscriberApp(ctx context.Context, shutdown <-chan struct{}) error {
 }
 
 func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
-	com, err := gronos.UseBus(ctx)
+	com, err := gronos.UseBusWait(ctx)
 	if err != nil {
 		return err
 	}
 
-	done, msg := watermillext.MsgAddHandler(
-		"router",
-		"example-handler",
-		"example.topic",
-		"example.processed.topic",
-		func(msg *message.Message) ([]*message.Message, error) {
-			fmt.Printf("Processing message: %s\n", string(msg.Payload))
-			processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
-			return message.Messages{processedMsg}, nil
-		},
-	)
-	com(msg)
-	<-done
+	// send a wait for it
+	<-com(func() (<-chan struct{}, gronos.Message) {
+		return watermillext.MsgAddHandler(
+			"router",
+			"example-handler",
+			"example.topic",
+			"pubsub",
+			"example.processed.topic",
+			"pubsub",
+			func(msg *message.Message) ([]*message.Message, error) {
+				fmt.Printf("Processing message: %s\n", string(msg.Payload))
+				processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
+				return message.Messages{processedMsg}, nil
+			},
+		)
+	})
 
 	<-shutdown
 	return nil

@@ -130,12 +130,14 @@ func (g *gronos[K]) triggerShutdownForApps(state *gronosState[K], localKeys []K,
 func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
 	if kind == ShutdownKindTerminate {
 		log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
-		if !g.sendMessage(MsgForceTerminateShutdown(key)) {
+		_, msg := MsgForceTerminateShutdown(key)
+		if !g.sendMessage(msg) {
 			log.Error("[GronosMessage] failed to send forced shutdown process terminate", key)
 		}
 	} else {
 		log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
-		if !g.sendMessage(MsgForceCancelShutdown(key, nil)) {
+		_, msg := MsgForceCancelShutdown(key, nil)
+		if !g.sendMessage(msg) {
 			log.Error("[GronosMessage] failed to send forced shutdown process cancel", key)
 		}
 	}

@@ -16,6 +16,7 @@ import (
 type ctxKey string
 
 var comKey ctxKey = "com"
+var comKeyWait ctxKey = "comwait"
 var keyKey ctxKey = "key"
 
 type ShutdownBehavior int
@@ -287,6 +288,25 @@ func (g *gronos[K]) sendMessage(m Message) bool {
 	return false
 }
 
+type FnWait func() (<-chan struct{}, Message)
+
+func (g *gronos[K]) sendMessageWait(fn FnWait) <-chan struct{} {
+	// fn is supposed to be a function that returns a `<-chan struct` and `message`
+	// execute the function and return the channel and message
+	done, msg := fn()
+
+	if !g.comClosed.Load() {
+		select {
+		case g.com <- msg:
+			return done
+		default:
+			log.Debug("[Gronos] Unable to send message, channel might be full")
+			return done
+		}
+	}
+	return done
+}
+
 // if configured on automatic shutdown, it will check the status of the applications
 func (g *gronos[K]) automaticShutdown() {
 	ticker := time.NewTicker(1 * time.Second)
@@ -434,6 +454,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 // createContext creates a new context with the gronos communication channel embedded.
 func (g *gronos[K]) createContext() (context.Context, context.CancelFunc) {
 	ctx := context.WithValue(context.Background(), comKey, g.sendMessage)
+	ctx = context.WithValue(ctx, comKeyWait, g.sendMessageWait)
 	ctx, cancel := context.WithCancel(ctx)
 	return ctx, cancel
 }
@@ -445,6 +466,14 @@ func UseBus(ctx context.Context) (func(m Message) bool, error) {
 		return nil, fmt.Errorf("com not found in context")
 	}
 	return value.(func(m Message) bool), nil
+}
+
+func UseBusWait(ctx context.Context) (func(fn FnWait) <-chan struct{}, error) {
+	value := ctx.Value(comKeyWait)
+	if value == nil {
+		return nil, fmt.Errorf("com not found in context")
+	}
+	return value.(func(fn FnWait) <-chan struct{}), nil
 }
 
 func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {
