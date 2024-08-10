@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill"
@@ -17,17 +18,17 @@ import (
 )
 
 func preparePublisherSubscriber(ctx context.Context, shutdown <-chan struct{}) error {
-	bus, err := gronos.UseBusWait(ctx)
+	wait, err := gronos.UseBusWait(ctx)
 	if err != nil {
 		return err
 	}
 
 	pubSub := gochannel.NewGoChannel(gochannel.Config{}, watermill.NewStdLogger(false, false))
-	<-bus(func() (<-chan struct{}, gronos.Message) {
+	<-wait(func() (<-chan struct{}, gronos.Message) {
 		return watermillextension.MsgAddPublisher("pubsub", pubSub)
 	})
 
-	<-bus(func() (<-chan struct{}, gronos.Message) {
+	<-wait(func() (<-chan struct{}, gronos.Message) {
 		return watermillextension.MsgAddSubscriber("pubsub", pubSub)
 	})
 
@@ -35,7 +36,7 @@ func preparePublisherSubscriber(ctx context.Context, shutdown <-chan struct{}) e
 }
 
 func prepareRouter(ctx context.Context, shutdown <-chan struct{}) error {
-	bus, err := gronos.UseBusWait(ctx)
+	wait, err := gronos.UseBusWait(ctx)
 	if err != nil {
 		return err
 	}
@@ -46,7 +47,7 @@ func prepareRouter(ctx context.Context, shutdown <-chan struct{}) error {
 		return err
 	}
 
-	<-bus(func() (<-chan struct{}, gronos.Message) {
+	<-wait(func() (<-chan struct{}, gronos.Message) {
 		return watermillextension.MsgAddRouter("router", router)
 	})
 
@@ -54,16 +55,16 @@ func prepareRouter(ctx context.Context, shutdown <-chan struct{}) error {
 }
 
 func prepareRouterPluginsMiddlewares(ctx context.Context, shutdown <-chan struct{}) error {
-	busConfirm, err := gronos.UseBusConfirm(ctx)
+	confirm, err := gronos.UseBusConfirm(ctx)
 	if err != nil {
 		return err
 	}
-	bus, err := gronos.UseBusWait(ctx)
+	wait, err := gronos.UseBusWait(ctx)
 	if err != nil {
 		return err
 	}
 
-	for !<-busConfirm(func() (<-chan bool, gronos.Message) {
+	for !<-confirm(func() (<-chan bool, gronos.Message) {
 		return watermillextension.MsgHasPublisher("pubsub")
 	}) {
 		time.Sleep(100 * time.Millisecond)
@@ -79,7 +80,7 @@ func prepareRouterPluginsMiddlewares(ctx context.Context, shutdown <-chan struct
 		panic(err)
 	}
 
-	<-bus(func() (<-chan struct{}, gronos.Message) {
+	<-wait(func() (<-chan struct{}, gronos.Message) {
 		return watermillextension.MsgAddMiddlewares(
 			"router",
 			middleware.Recoverer,
@@ -93,7 +94,7 @@ func prepareRouterPluginsMiddlewares(ctx context.Context, shutdown <-chan struct
 		)
 	})
 
-	<-bus(func() (<-chan struct{}, gronos.Message) {
+	<-wait(func() (<-chan struct{}, gronos.Message) {
 		return watermillextension.MsgAddPlugins(
 			"router",
 			plugin.SignalsHandler,
@@ -104,24 +105,24 @@ func prepareRouterPluginsMiddlewares(ctx context.Context, shutdown <-chan struct
 }
 
 func signalReadyness(ctx context.Context, shutdown <-chan struct{}) error {
-	busConfirm, err := gronos.UseBusConfirm(ctx)
+	confirm, err := gronos.UseBusConfirm(ctx)
 	if err != nil {
 		panic(err)
 	}
 
-	for !<-busConfirm(func() (<-chan bool, gronos.Message) {
+	for !<-confirm(func() (<-chan bool, gronos.Message) {
 		return watermillextension.MsgHasPublisher("pubsub")
 	}) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	for !<-busConfirm(func() (<-chan bool, gronos.Message) {
+	for !<-confirm(func() (<-chan bool, gronos.Message) {
 		return watermillextension.MsgHasSubscriber("pubsub")
 	}) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	for !<-busConfirm(func() (<-chan bool, gronos.Message) {
+	for !<-confirm(func() (<-chan bool, gronos.Message) {
 		return watermillextension.MsgHasRouter("router")
 	}) {
 		time.Sleep(100 * time.Millisecond)
@@ -142,11 +143,14 @@ func main() {
 
 	g, cerrs := gronos.New[string](
 		ctx,
+		// > BuT wHy aRe yoU DoInG tHiS aND WhY NoT jUsT UsE FuNC NoRmAlLy?
+		// well because you can re-use the same RuntimeApplication function with a complete different context and it forces you to write code that is more modular and reusable
+		// using messages to communicate, lifecycle functions, and middleware that manage resources for you will allow your code to be more idempotent and easier to test
 		map[string]gronos.RuntimeApplication{
 			"setup-pubsub":                     preparePublisherSubscriber,
+			"ready":                            signalReadyness,
 			"setup-router":                     prepareRouter,
 			"setup-router-plugins-middlewares": prepareRouterPluginsMiddlewares,
-			"ready":                            signalReadyness,
 		},
 		gronos.WithExtension[string](watermillExt))
 
@@ -172,12 +176,12 @@ func main() {
 	<-g.Add(
 		"consumer",
 		func(ctx context.Context, shutdown <-chan struct{}) error {
-			bus, err := gronos.UseBusWait(ctx)
+			wait, err := gronos.UseBusWait(ctx)
 			if err != nil {
 				return err
 			}
 
-			<-bus(func() (<-chan struct{}, gronos.Message) {
+			<-wait(func() (<-chan struct{}, gronos.Message) {
 				return watermillextension.MsgAddHandler(
 					"router",
 					"posts_counter",
@@ -205,11 +209,10 @@ func main() {
 
 	go func() {
 		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 		<-c
 		g.Shutdown()
 	}()
 
 	g.Wait()
-
 }
