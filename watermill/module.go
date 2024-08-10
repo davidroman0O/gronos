@@ -45,10 +45,31 @@ type AddSubscriberMessage[K comparable] struct {
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
+type HasPublisherMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	gronos.RequestMessage[K, bool] // when it is done
+}
+
+type HasSubscriberMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	gronos.RequestMessage[K, bool] // when it is done
+}
+
 type AddRouterMessage[K comparable] struct {
 	gronos.KeyMessage[K]
 	Router                             *message.Router
 	gronos.RequestMessage[K, struct{}] // when it is done
+}
+
+type HasRouterMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	gronos.RequestMessage[K, bool] // when it is done
+}
+
+type HasHandlerMessage[K comparable] struct {
+	gronos.KeyMessage[K]
+	HandlerName                    string
+	gronos.RequestMessage[K, bool] // when it is done
 }
 
 type ClosePublisherMessage[K comparable] struct {
@@ -101,8 +122,17 @@ var addPublisherPool sync.Pool
 var addSubscriberPoolInited bool
 var addSubscriberPool sync.Pool
 
+var hasPublisherPoolInited bool
+var hasPublisherPool sync.Pool
+
+var hasSubscriberPoolInited bool
+var hasSubscriberPool sync.Pool
+
 var addRouterPoolInited bool
 var addRouterPool sync.Pool
+
+var hasRouterPoolInited bool
+var hasRouterPool sync.Pool
 
 var closePublisherPoolInited bool
 var closePublisherPool sync.Pool
@@ -112,6 +142,9 @@ var closeSubscriberPool sync.Pool
 
 var addHandlerPoolInited bool
 var addHandlerPool sync.Pool
+
+var hasHandlerPoolInited bool
+var hasHandlerPool sync.Pool
 
 var addNoPublisherHandlerPoolInited bool
 var addNoPublisherHandlerPool sync.Pool
@@ -152,6 +185,36 @@ func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) (<-cha
 	msg.Key = key
 	msg.Subscriber = subscriber
 	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
+}
+
+func MsgHasPublisher[K comparable](key K) (<-chan bool, *HasPublisherMessage[K]) {
+	if !hasPublisherPoolInited {
+		hasPublisherPoolInited = true
+		hasPublisherPool = sync.Pool{
+			New: func() interface{} {
+				return &HasPublisherMessage[K]{}
+			},
+		}
+	}
+	msg := hasPublisherPool.Get().(*HasPublisherMessage[K])
+	msg.Key = key
+	msg.Response = make(chan bool, 1)
+	return msg.Response, msg
+}
+
+func MsgHasSubscriber[K comparable](key K) (<-chan bool, *HasSubscriberMessage[K]) {
+	if !hasSubscriberPoolInited {
+		hasSubscriberPoolInited = true
+		hasSubscriberPool = sync.Pool{
+			New: func() interface{} {
+				return &HasSubscriberMessage[K]{}
+			},
+		}
+	}
+	msg := hasSubscriberPool.Get().(*HasSubscriberMessage[K])
+	msg.Key = key
+	msg.Response = make(chan bool, 1)
 	return msg.Response, msg
 }
 
@@ -204,7 +267,7 @@ func MsgCloseSubscriber[K comparable](key K) (<-chan struct{}, *CloseSubscriberM
 func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, subscriberName string, publishTopic string, publisherName string, handlerFunc message.HandlerFunc) (<-chan struct{}, *AddHandlerMessage[K]) {
 	if !addHandlerPoolInited {
 		addHandlerPoolInited = true
-		addNoPublisherHandlerPool = sync.Pool{
+		addHandlerPool = sync.Pool{
 			New: func() interface{} {
 				return &AddHandlerMessage[K]{}
 			},
@@ -219,6 +282,37 @@ func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, subscriberN
 	msg.SubscriberName = subscriberName
 	msg.PublisherName = publisherName
 	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
+}
+
+func MsgHasRouter[K comparable](key K) (<-chan bool, *HasRouterMessage[K]) {
+	if !hasRouterPoolInited {
+		hasRouterPoolInited = true
+		hasRouterPool = sync.Pool{
+			New: func() interface{} {
+				return &HasRouterMessage[K]{}
+			},
+		}
+	}
+	msg := hasRouterPool.Get().(*HasRouterMessage[K])
+	msg.Key = key
+	msg.Response = make(chan bool, 1)
+	return msg.Response, msg
+}
+
+func MsgHasHandler[K comparable](key K, handlerName string) (<-chan bool, *HasHandlerMessage[K]) {
+	if !hasHandlerPoolInited {
+		hasHandlerPoolInited = true
+		hasHandlerPool = sync.Pool{
+			New: func() interface{} {
+				return &HasHandlerMessage[K]{}
+			},
+		}
+	}
+	msg := hasHandlerPool.Get().(*HasHandlerMessage[K])
+	msg.Key = key
+	msg.HandlerName = handlerName
+	msg.Response = make(chan bool, 1)
 	return msg.Response, msg
 }
 
@@ -369,9 +463,57 @@ func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) er
 	case *AddRouterMiddlewares[K]:
 		defer addMiddlewaresPool.Put(msg)
 		return w.handleAddRouterMiddlewares(ctx, msg)
+
+	case *HasPublisherMessage[K]:
+		defer hasPublisherPool.Put(msg)
+		return w.handleHasPublisher(ctx, msg)
+	case *HasSubscriberMessage[K]:
+		defer hasSubscriberPool.Put(msg)
+		return w.handleHasSubscriber(ctx, msg)
+	case *HasHandlerMessage[K]:
+		defer hasHandlerPool.Put(msg)
+		return w.handleHasHandler(ctx, msg)
+	case *HasRouterMessage[K]:
+		defer hasRouterPool.Put(msg)
+		return w.handleHasRouter(ctx, msg)
 	default:
 		return gronos.ErrUnmanageExtensionMessage
 	}
+}
+
+func (w *WatermillMiddleware[K]) handleHasPublisher(ctx context.Context, msg *HasPublisherMessage[K]) error {
+	defer close(msg.Response)
+	_, ok := w.pubs.Load(msg.Key)
+	msg.Response <- ok
+	return nil
+}
+
+func (w *WatermillMiddleware[K]) handleHasSubscriber(ctx context.Context, msg *HasSubscriberMessage[K]) error {
+	defer close(msg.Response)
+	_, ok := w.subs.Load(msg.Key)
+	msg.Response <- ok
+	return nil
+}
+
+func (w *WatermillMiddleware[K]) handleHasHandler(ctx context.Context, msg *HasHandlerMessage[K]) error {
+	defer close(msg.Response)
+	var value any
+	var ok bool
+	value, ok = w.routers.Load(msg.Key)
+	if !ok {
+		msg.Response <- false
+	}
+	router := value.(*message.Router)
+	_, ok = router.Handlers()[msg.HandlerName]
+	msg.Response <- ok
+	return nil
+}
+
+func (w *WatermillMiddleware[K]) handleHasRouter(ctx context.Context, msg *HasRouterMessage[K]) error {
+	defer close(msg.Response)
+	_, ok := w.routers.Load(msg.Key)
+	msg.Response <- ok
+	return nil
 }
 
 func (w *WatermillMiddleware[K]) handleAddPublisher(ctx context.Context, msg *AddPublisherMessage[K]) error {
