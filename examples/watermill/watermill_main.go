@@ -158,7 +158,7 @@ func routerApp(ctx context.Context, shutdown <-chan struct{}) error {
 			"example.processed.topic",
 			"pubsub",
 			func(msg *message.Message) ([]*message.Message, error) {
-				fmt.Printf("Processing message: %s\n", string(msg.Payload))
+				fmt.Printf("Processing message from router: %s\n", string(msg.Payload))
 				processedMsg := message.NewMessage(watermill.NewUUID(), []byte("Processed: "+string(msg.Payload)))
 				return message.Messages{processedMsg}, nil
 			},

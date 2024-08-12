@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
 	"sync"
 	"syscall"
@@ -21,7 +20,6 @@ import (
 	"github.com/ThreeDotsLabs/watermill/pubsub/gochannel"
 	"github.com/davidroman0O/gronos"
 	watermillextension "github.com/davidroman0O/gronos/watermill"
-	"golang.org/x/exp/rand"
 )
 
 const (
@@ -29,8 +27,10 @@ const (
 	symbol              = "BTCUSDT"
 	interval            = "1w"
 	limit               = 1000
+	topicFetchRequest   = "fetch_request"
 	topicWeeklyPrices   = "weekly_prices"
 	topicTradingSignals = "trading_signals"
+	topicProcessedWeek  = "processed_week"
 )
 
 type WeeklyKline struct {
@@ -49,15 +49,14 @@ type TradingSignal struct {
 	Reason string
 }
 
-// Add this function to get a random time between two times
-func getRandomTimeBetween(start, end time.Time) time.Time {
-	delta := end.Sub(start)
-	randomDelta := time.Duration(rand.Int63n(int64(delta)))
-	return start.Add(randomDelta)
+type FetchRequest struct {
+	StartTime time.Time
+	EndTime   time.Time
 }
 
 type PriceManagerMiddleware struct {
 	priceHistory []WeeklyKline
+	mu           sync.Mutex
 }
 
 func NewPriceManagerMiddleware() *PriceManagerMiddleware {
@@ -77,15 +76,8 @@ type GetPriceHistoryMessage struct {
 	gronos.RequestMessage[string, []WeeklyKline]
 }
 
-type ComputeSignalMessage struct {
-	gronos.KeyMessage[string]
-	Timestamp time.Time
-	gronos.RequestMessage[string, *TradingSignal]
-}
-
 var addKlinePool sync.Pool
 var getPriceHistoryPool sync.Pool
-var computeSignalPool sync.Pool
 
 func init() {
 	addKlinePool = sync.Pool{
@@ -96,11 +88,6 @@ func init() {
 	getPriceHistoryPool = sync.Pool{
 		New: func() interface{} {
 			return &GetPriceHistoryMessage{}
-		},
-	}
-	computeSignalPool = sync.Pool{
-		New: func() interface{} {
-			return &ComputeSignalMessage{}
 		},
 	}
 }
@@ -120,22 +107,7 @@ func MsgGetPriceHistory() (<-chan []WeeklyKline, *GetPriceHistoryMessage) {
 	return msg.Response, msg
 }
 
-func MsgComputeSignal(timestamp time.Time) (<-chan *TradingSignal, *ComputeSignalMessage) {
-	msg := computeSignalPool.Get().(*ComputeSignalMessage)
-	msg.Key = "price_manager"
-	msg.Timestamp = timestamp
-	msg.Response = make(chan *TradingSignal, 1)
-	return msg.Response, msg
-}
-
 func (pm *PriceManagerMiddleware) OnStart(ctx context.Context, errChan chan<- error) error {
-	historicalData, err := fetchHistoricalData(ctx)
-	if err != nil {
-		return fmt.Errorf("error fetching historical data: %v", err)
-	}
-	pm.priceHistory = historicalData
-	fmt.Printf("Loaded %d historical klines. Latest historical price: $%.2f\n",
-		len(historicalData), historicalData[len(historicalData)-1].Close)
 	return nil
 }
 
@@ -154,38 +126,24 @@ func (pm *PriceManagerMiddleware) OnStopRuntime(ctx context.Context) context.Con
 func (pm *PriceManagerMiddleware) OnMsg(ctx context.Context, m gronos.Message) error {
 	switch msg := m.(type) {
 	case *AddKlineMessage:
+		pm.mu.Lock()
 		pm.priceHistory = append(pm.priceHistory, msg.Kline)
+		pm.mu.Unlock()
 		close(msg.Response)
 		addKlinePool.Put(msg)
 		return nil
 	case *GetPriceHistoryMessage:
+		pm.mu.Lock()
 		history := make([]WeeklyKline, len(pm.priceHistory))
 		copy(history, pm.priceHistory)
+		pm.mu.Unlock()
 		msg.Response <- history
 		close(msg.Response)
 		getPriceHistoryPool.Put(msg)
 		return nil
-	case *ComputeSignalMessage:
-		history := pm.getPriceHistoryUntil(msg.Timestamp)
-		signal := generateTradingSignal(history)
-		msg.Response <- signal
-		close(msg.Response)
-		computeSignalPool.Put(msg)
-		return nil
 	default:
 		return gronos.ErrUnmanageExtensionMessage
 	}
-}
-
-func (pm *PriceManagerMiddleware) getPriceHistoryUntil(timestamp time.Time) []WeeklyKline {
-	var history []WeeklyKline
-	for _, kline := range pm.priceHistory {
-		if kline.OpenTime.After(timestamp) {
-			break
-		}
-		history = append(history, kline)
-	}
-	return history
 }
 
 func preparePublisherSubscriber(ctx context.Context, shutdown <-chan struct{}) error {
@@ -306,22 +264,35 @@ func getBinanceData(symbol, interval string, startTime, endTime int64) ([]Weekly
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("HTTP GET request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	var rawKlines [][]interface{}
 	if err := json.Unmarshal(body, &rawKlines); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal JSON: %w\nBody: %s", err, string(body))
+	}
+
+	if len(rawKlines) == 0 {
+		return nil, fmt.Errorf("no data returned from API")
 	}
 
 	klines := make([]WeeklyKline, len(rawKlines))
 	for i, k := range rawKlines {
+		if len(k) < 6 {
+			return nil, fmt.Errorf("invalid kline data format at index %d: %v", i, k)
+		}
+
 		openTime := time.Unix(int64(k[0].(float64))/1000, 0)
 		open, _ := strconv.ParseFloat(k[1].(string), 64)
 		high, _ := strconv.ParseFloat(k[2].(string), 64)
@@ -342,113 +313,207 @@ func getBinanceData(symbol, interval string, startTime, endTime int64) ([]Weekly
 	return klines, nil
 }
 
-func fetchHistoricalData(ctx context.Context) ([]WeeklyKline, error) {
-	endTime := time.Now().Unix() * 1000
-	startTime := endTime - (200 * 7 * 24 * 60 * 60 * 1000) // 200 weeks
-
-	klines, err := getBinanceData(symbol, interval, startTime, endTime)
-	if err != nil {
-		return nil, err
-	}
-
-	sort.Slice(klines, func(i, j int) bool {
-		return klines[i].OpenTime.Before(klines[j].OpenTime)
-	})
-
-	return klines, nil
-}
-
-func bitcoinPriceProducer(ctx context.Context) error {
+func plannerWorker(ctx context.Context) error {
 	publish, err := watermillextension.UsePublish(ctx, "pubsub")
 	if err != nil {
 		return err
 	}
 
-	wait, err := gronos.UseBusWait(ctx)
+	subscribe, err := watermillextension.UseSubscribe(ctx, "pubsub")
 	if err != nil {
 		return err
 	}
 
-	histChan, histMsg := MsgGetPriceHistory()
-	<-wait(func() (<-chan struct{}, gronos.Message) {
-		return nil, histMsg
-	})
-
-	priceHistory := <-histChan
-
-	latestTime := time.Now().Add(-7*24*time.Hour).Unix() * 1000
-	if len(priceHistory) > 0 {
-		latestTime = priceHistory[len(priceHistory)-1].OpenTime.Unix() * 1000
-	}
-
-	klines, err := getBinanceData(symbol, interval, latestTime, time.Now().Unix()*1000)
+	processedWeeks, err := subscribe(ctx, topicProcessedWeek)
 	if err != nil {
 		return err
 	}
 
-	for _, kline := range klines {
-		doneChan, addMsg := MsgAddKline(kline)
-		<-wait(func() (<-chan struct{}, gronos.Message) {
-			return doneChan, addMsg
-		})
+	// Start from the oldest available data (e.g., 5 years ago)
+	currentWeekStart := time.Now().AddDate(-5, 0, 0).Truncate(7 * 24 * time.Hour)
+	processedWeekMap := make(map[time.Time]bool)
 
-		payload, _ := json.Marshal(kline)
-		msg := message.NewMessage(watermill.NewUUID(), payload)
-		if err := publish(topicWeeklyPrices, msg); err != nil {
-			fmt.Printf("Error publishing message: %v\n", err)
+	for currentWeekStart.Before(time.Now()) {
+		weekEndTime := currentWeekStart.Add(7 * 24 * time.Hour)
+
+		if !processedWeekMap[currentWeekStart] {
+			fetchRequest := FetchRequest{
+				StartTime: currentWeekStart,
+				EndTime:   weekEndTime,
+			}
+
+			payload, _ := json.Marshal(fetchRequest)
+			msg := message.NewMessage(watermill.NewUUID(), payload)
+
+			if err := publish(topicFetchRequest, msg); err != nil {
+
+				return err
+			}
+
+			// Wait for the week to be processed
+			select {
+			case processedMsg := <-processedWeeks:
+
+				processedMsg.Ack()
+				processedWeekMap[currentWeekStart] = true
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 
-		// Compute and print signal for this kline
-		signalChan, computeMsg := MsgComputeSignal(kline.OpenTime)
-		<-wait(func() (<-chan struct{}, gronos.Message) {
-			return nil, computeMsg
-		})
-		signal := <-signalChan
-		if signal != nil {
-			fmt.Printf("Computed Signal for %s: %s at $%.2f\nReason: %s\n\n",
-				kline.OpenTime.Format(time.RFC3339), signal.Signal, signal.Price, signal.Reason)
-		}
+		currentWeekStart = weekEndTime
 	}
 
-	if len(klines) > 0 {
-		fmt.Printf("Updated with %d new klines. Latest price: $%.2f\n", len(klines), klines[len(klines)-1].Close)
-	}
-
+	fmt.Println("All historical data processed.")
 	return nil
 }
 
-func bitcoinPriceHandler(msg *message.Message) ([]*message.Message, error) {
-	var kline WeeklyKline
-	if err := json.Unmarshal(msg.Payload, &kline); err != nil {
-		return nil, err
-	}
-
-	wait, err := gronos.UseBusWait(msg.Context())
+func fetcherWorker(ctx context.Context, shutdown <-chan struct{}) error {
+	subscribe, err := watermillextension.UseSubscribe(ctx, "pubsub")
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	doneChan, addMsg := MsgAddKline(kline)
-	<-wait(func() (<-chan struct{}, gronos.Message) {
-		return doneChan, addMsg
-	})
-
-	histChan, histMsg := MsgGetPriceHistory()
-	<-wait(func() (<-chan struct{}, gronos.Message) {
-		return nil, histMsg
-	})
-
-	priceHistory := <-histChan
-
-	signal := generateTradingSignal(priceHistory)
-
-	if signal != nil && signal.Signal != "HOLD" {
-		payload, _ := json.Marshal(signal)
-		signalMsg := message.NewMessage(watermill.NewUUID(), payload)
-		return []*message.Message{signalMsg}, nil
+	publish, err := watermillextension.UsePublish(ctx, "pubsub")
+	if err != nil {
+		return err
 	}
 
-	return nil, nil
+	fetchRequests, err := subscribe(ctx, topicFetchRequest)
+	if err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case msg := <-fetchRequests:
+			var request FetchRequest
+			if err := json.Unmarshal(msg.Payload, &request); err != nil {
+
+				continue
+			}
+
+			klines, err := getBinanceData(symbol, interval, request.StartTime.Unix()*1000, request.EndTime.Unix()*1000)
+			if err != nil {
+
+				// Publish an error message or handle the error appropriately
+				errorPayload, _ := json.Marshal(map[string]string{"error": err.Error()})
+				errorMsg := message.NewMessage(watermill.NewUUID(), errorPayload)
+				if err := publish(topicProcessedWeek, errorMsg); err != nil {
+					fmt.Printf("Error publishing error message: %v\n", err)
+				}
+				time.Sleep(5 * time.Second) // Wait before retrying
+				continue
+			}
+
+			for _, kline := range klines {
+				payload, _ := json.Marshal(kline)
+				weeklyPriceMsg := message.NewMessage(watermill.NewUUID(), payload)
+				if err := publish(topicWeeklyPrices, weeklyPriceMsg); err != nil {
+					fmt.Printf("Error publishing weekly price: %v\n", err)
+				}
+			}
+
+			// Publish a message indicating that the week has been processed
+			processedMsg := message.NewMessage(watermill.NewUUID(), []byte("processed"))
+			if err := publish(topicProcessedWeek, processedMsg); err != nil {
+				fmt.Printf("Error publishing processed week message: %v\n", err)
+			}
+
+			msg.Ack()
+			time.Sleep(1 * time.Second) // Rate limiting
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-shutdown:
+			fmt.Println("Fetcher worker shutting down")
+			return nil
+		}
+	}
+}
+
+func bitcoinPriceHandler(ctx context.Context) func(msg *message.Message) ([]*message.Message, error) {
+	return func(msg *message.Message) ([]*message.Message, error) {
+		var kline WeeklyKline
+		if err := json.Unmarshal(msg.Payload, &kline); err != nil {
+
+			return nil, err
+		}
+
+		send, err := gronos.UseBus(ctx)
+		if err != nil {
+
+			return nil, err
+		}
+
+		doneChan, addMsg := MsgAddKline(kline)
+		if !send(addMsg) {
+
+			return nil, fmt.Errorf("error sending AddKline message to price manager")
+		}
+		<-doneChan
+
+		histChan, histMsg := MsgGetPriceHistory()
+		if !send(histMsg) {
+
+			return nil, fmt.Errorf("error sending GetPriceHistory message to price manager")
+		}
+
+		priceHistory := <-histChan
+
+		signal := generateTradingSignal(priceHistory)
+
+		messages := []*message.Message{}
+
+		if signal != nil {
+			payload, _ := json.Marshal(signal)
+			signalMsg := message.NewMessage(watermill.NewUUID(), payload)
+			messages = append(messages, signalMsg)
+
+			fmt.Printf("Signal generated for %s: %s at $%.2f\nReason: %s\n",
+				kline.OpenTime.Format("2006-01-02"), signal.Signal, signal.Price, signal.Reason)
+		} else {
+			fmt.Printf("No signal generated for %s\n", kline.OpenTime.Format("2006-01-02"))
+		}
+
+		fmt.Printf("Processed week: %s, Open: $%.2f, Close: $%.2f\n",
+			kline.OpenTime.Format("2006-01-02"), kline.Open, kline.Close)
+
+		// Notify that the week has been processed
+		processedMsg := message.NewMessage(watermill.NewUUID(), []byte("processed"))
+		messages = append(messages, processedMsg)
+
+		return messages, nil
+	}
+}
+
+func bitcoinSignalConsumer(ctx context.Context, shutdown <-chan struct{}) error {
+	subscribe, err := watermillextension.UseSubscribe(ctx, "pubsub")
+	if err != nil {
+		return err
+	}
+
+	messages, err := subscribe(ctx, topicTradingSignals)
+	if err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case msg := <-messages:
+			var signal TradingSignal
+			if err := json.Unmarshal(msg.Payload, &signal); err != nil {
+
+				continue
+			}
+			fmt.Printf("Trading Signal: %s at $%.2f\nReason: %s\nTime: %s\n\n",
+				signal.Signal, signal.Price, signal.Reason, signal.Time.Format(time.RFC3339))
+			msg.Ack()
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-shutdown:
+			return nil
+		}
+	}
 }
 
 func calculateEMA(priceHistory []WeeklyKline, period int) float64 {
@@ -485,7 +550,8 @@ func generateTradingSignal(priceHistory []WeeklyKline) *TradingSignal {
 		signal = "SELL"
 		reason = "Price below EMA20, EMA20 below EMA50 (Death Cross)"
 	} else {
-		return nil // Don't generate HOLD signals
+		signal = "HOLD"
+		reason = "No clear signal"
 	}
 
 	return &TradingSignal{
@@ -493,36 +559,6 @@ func generateTradingSignal(priceHistory []WeeklyKline) *TradingSignal {
 		Price:  currentPrice,
 		Time:   priceHistory[len(priceHistory)-1].OpenTime,
 		Reason: reason,
-	}
-}
-
-func bitcoinSignalConsumer(ctx context.Context, shutdown <-chan struct{}) error {
-	subscribe, err := watermillextension.UseSubscribe(ctx, "pubsub")
-	if err != nil {
-		return err
-	}
-
-	messages, err := subscribe(ctx, topicTradingSignals)
-	if err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case msg := <-messages:
-			var signal TradingSignal
-			if err := json.Unmarshal(msg.Payload, &signal); err != nil {
-				fmt.Printf("Error unmarshaling signal message: %v\n", err)
-				continue
-			}
-			fmt.Printf("Trading Signal: %s at $%.2f\nReason: %s\nTime: %s\n\n",
-				signal.Signal, signal.Price, signal.Reason, signal.Time.Format(time.RFC3339))
-			msg.Ack()
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-shutdown:
-			return nil
-		}
 	}
 }
 
@@ -558,8 +594,11 @@ func main() {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Set up the price producer worker
-	<-g.Add("price-producer", gronos.Worker(1*time.Minute, gronos.ManagedTimeline, bitcoinPriceProducer))
+	// Set up the planner worker
+	<-g.Add("planner-worker", gronos.Worker(1*time.Second, gronos.ManagedTimeline, plannerWorker))
+
+	// Set up the fetcher worker
+	<-g.Add("fetcher-worker", fetcherWorker)
 
 	// Set up the price handler
 	<-g.Add("price-handler", func(ctx context.Context, shutdown <-chan struct{}) error {
@@ -576,7 +615,19 @@ func main() {
 				"pubsub",
 				topicTradingSignals,
 				"pubsub",
-				bitcoinPriceHandler,
+				bitcoinPriceHandler(ctx),
+			)
+		})
+
+		<-wait(func() (<-chan struct{}, gronos.Message) {
+			return watermillextension.MsgAddNoPublisherHandler(
+				"router",
+				"processed_week_handler",
+				topicProcessedWeek,
+				"pubsub",
+				func(msg *message.Message) error {
+					return nil
+				},
 			)
 		})
 
@@ -590,63 +641,6 @@ func main() {
 
 	// Set up the signal consumer
 	<-g.Add("signal-consumer", bitcoinSignalConsumer)
-
-	// Set up periodic signal computation with random historical date
-	<-g.Add("periodic-signal-computer", gronos.Worker(2*time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
-		wait, err := gronos.UseBusWait(ctx)
-		if err != nil {
-			return err
-		}
-
-		// Get the current price history
-		histChan, histMsg := MsgGetPriceHistory()
-		<-wait(func() (<-chan struct{}, gronos.Message) {
-			return nil, histMsg
-		})
-		priceHistory := <-histChan
-
-		if len(priceHistory) < 2 {
-			fmt.Println("Not enough historical data for random computation")
-			return nil
-		}
-
-		// Get the first and last dates from the price history
-		firstDate := priceHistory[0].OpenTime
-		lastDate := priceHistory[len(priceHistory)-1].OpenTime
-
-		// Generate a random date between the first and last dates
-		randomDate := getRandomTimeBetween(firstDate, lastDate)
-
-		fmt.Println("Computing signal for random historical date:", randomDate.Format(time.RFC3339))
-
-		signalChan, computeMsg := MsgComputeSignal(randomDate)
-		<-wait(func() (<-chan struct{}, gronos.Message) {
-			return nil, computeMsg
-		})
-		signal := <-signalChan
-		if signal != nil {
-			fmt.Printf("Random Historical Signal Computation (%s): %s at $%.2f\nReason: %s\n\n",
-				randomDate.Format(time.RFC3339), signal.Signal, signal.Price, signal.Reason)
-		} else {
-			fmt.Printf("No signal generated for random date %s\n\n", randomDate.Format(time.RFC3339))
-		}
-
-		// Also compute for the current time
-		// now := time.Now()
-		// signalChan, computeMsg = MsgComputeSignal(now)
-		// <-wait(func() (<-chan struct{}, gronos.Message) {
-		// 	return nil, computeMsg
-		// })
-		// signal = <-signalChan
-		// if signal != nil {
-		// 	fmt.Printf("Current Signal Computation (%s): %s at $%.2f\nReason: %s\n\n",
-		// 		now.Format(time.RFC3339), signal.Signal, signal.Price, signal.Reason)
-		// } else {
-		// 	fmt.Printf("No signal generated for current time %s\n\n", now.Format(time.RFC3339))
-		// }
-
-		return nil
-	}))
 
 	// Set up graceful shutdown
 	go func() {
