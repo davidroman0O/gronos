@@ -463,7 +463,6 @@ func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) er
 	case *AddRouterMiddlewares[K]:
 		defer addMiddlewaresPool.Put(msg)
 		return w.handleAddRouterMiddlewares(ctx, msg)
-
 	case *HasPublisherMessage[K]:
 		defer hasPublisherPool.Put(msg)
 		return w.handleHasPublisher(ctx, msg)
