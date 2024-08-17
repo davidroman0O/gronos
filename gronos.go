@@ -308,7 +308,14 @@ func (g *gronos[K]) poolMessagePayload(metadata map[string]interface{}, m Messag
 	payload := messagePayloadPool.Get()
 	msgPayload := payload.(*MessagePayload)
 	msgPayload.Metadata = metadata
-	msgPayload.Metadata["name"] = reflect.TypeOf(m).Elem().Name()
+	// it's always pointers normally
+	typeOf := reflect.TypeOf(m)
+	if typeOf.Kind() == reflect.Ptr {
+		msgPayload.Metadata["$name"] = fmt.Sprintf("%s.%s", typeOf.Elem().PkgPath(), typeOf.Elem().Name())
+	} else {
+		msgPayload.Metadata["$name"] = fmt.Sprintf("%s.%s", typeOf.PkgPath(), typeOf.Name())
+		msgPayload.Metadata["$error"] = "it should be a pointer"
+	}
 	msgPayload.Message = m
 	return msgPayload
 }
@@ -319,8 +326,8 @@ func (g *gronos[K]) poolMetadata() map[string]interface{} {
 
 func (g *gronos[K]) getSystemMetadata() map[string]interface{} {
 	metadata := g.poolMetadata()
-	metadata["id"] = 0
-	metadata["key"] = "system"
+	metadata["$id"] = 0
+	metadata["$key"] = "system"
 	return metadata
 }
 
@@ -559,24 +566,24 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	ctx = context.WithValue(ctx, comKey, func(m Message) bool {
 		metadataAny := metadataPool.New()
 		metadata := metadataAny.(map[string]interface{})
-		metadata["id"] = ctx.Value(keyID).(int)
-		metadata["key"] = ctx.Value(keyKey)
+		metadata["$id"] = ctx.Value(keyID).(int)
+		metadata["$key"] = ctx.Value(keyKey)
 		return g.sendMessage(metadata, m)
 	})
 
 	ctx = context.WithValue(ctx, comKeyWait, func(fn FnWait) <-chan struct{} {
 		metadataAny := metadataPool.New()
 		metadata := metadataAny.(map[string]interface{})
-		metadata["id"] = ctx.Value(keyID).(int)
-		metadata["key"] = ctx.Value(keyKey)
+		metadata["$id"] = ctx.Value(keyID).(int)
+		metadata["$key"] = ctx.Value(keyKey)
 		return g.sendMessageWait(metadata, fn)
 	})
 
 	ctx = context.WithValue(ctx, comKeyConfirm, func(fn FnConfirm) <-chan bool {
 		metadataAny := metadataPool.New()
 		metadata := metadataAny.(map[string]interface{})
-		metadata["id"] = ctx.Value(keyID).(int)
-		metadata["key"] = ctx.Value(keyKey)
+		metadata["$id"] = ctx.Value(keyID).(int)
+		metadata["$key"] = ctx.Value(keyKey)
 		return g.sendMessageConfirm(metadata, fn)
 	})
 	ctx, cancel := context.WithCancel(ctx)
