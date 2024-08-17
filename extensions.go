@@ -10,5 +10,5 @@ type Extension[K comparable] interface {
 	OnStop(ctx context.Context, errChan chan<- error) error
 	OnNewRuntime(ctx context.Context) context.Context
 	OnStopRuntime(ctx context.Context) context.Context
-	OnMsg(ctx context.Context, m Message) error
+	OnMsg(ctx context.Context, m *MessagePayload) error
 }
