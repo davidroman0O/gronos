@@ -91,11 +91,12 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 	// Now that we triggered the shutdown for all the apps, we need to monitor the situation
 	go func() {
 
+		metadata := g.getSystemMetadata()
 		select {
 		case <-whenAll:
 			log.Debug("[GronosMessage] all app really shutdown")
 		case <-time.AfterFunc(g.config.gracePeriod, func() {
-			g.sendMessage(nil, MsgGracePeriodExceeded[K]())
+			g.sendMessage(metadata, MsgGracePeriodExceeded[K]())
 		}).C:
 			log.Debug("[GronosMessage] grace period exceeded")
 		}
@@ -103,7 +104,7 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 		log.Debug("[GronosMessage] check all application are last state")
 
 		log.Debug("[GronosMessage] all applications are shutdown")
-		g.sendMessage(nil, &ShutdownComplete[K]{})
+		g.sendMessage(metadata, &ShutdownComplete[K]{})
 		log.Debug("[GronosMessage] sent shutdown complete")
 	}()
 
@@ -128,16 +129,17 @@ func (g *gronos[K]) triggerShutdownForApps(state *gronosState[K], localKeys []K,
 }
 
 func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
+	metadata := g.getSystemMetadata()
 	if kind == ShutdownKindTerminate {
 		log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
 		_, msg := MsgForceTerminateShutdown(key)
-		if !g.sendMessage(nil, msg) {
+		if !g.sendMessage(metadata, msg) {
 			log.Error("[GronosMessage] failed to send forced shutdown process terminate", key)
 		}
 	} else {
 		log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
 		_, msg := MsgForceCancelShutdown(key, nil)
-		if !g.sendMessage(nil, msg) {
+		if !g.sendMessage(metadata, msg) {
 			log.Error("[GronosMessage] failed to send forced shutdown process cancel", key)
 		}
 	}

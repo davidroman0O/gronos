@@ -78,8 +78,9 @@ func (g *gronos[K]) handleGracePeriodExceeded(state *gronosState[K]) error {
 
 func (g *gronos[K]) handleShutdownProgress(state *gronosState[K], remainingApps int) error {
 	log.Debug("[GronosMessage] Shutdown progress", "remaining", remainingApps)
+	metadata := g.getSystemMetadata()
 	if remainingApps == 0 {
-		g.sendMessage(nil, &ShutdownComplete[K]{})
+		g.sendMessage(metadata, &ShutdownComplete[K]{})
 	} else {
 		// Check again after a short delay
 		time.AfterFunc(time.Second, func() {
@@ -97,12 +98,14 @@ func (g *gronos[K]) checkRemainingApps(state *gronosState[K]) {
 		}
 		return true
 	})
-	g.sendMessage(nil, &ShutdownProgress[K]{RemainingApps: remainingApps})
+	metadata := g.getSystemMetadata()
+	g.sendMessage(metadata, &ShutdownProgress[K]{RemainingApps: remainingApps})
 }
 
 func (g *gronos[K]) handleShutdownComplete(state *gronosState[K]) error {
 	log.Debug("[GronosMessage] Shutdown complete")
-	g.sendMessage(nil, &Destroy[K]{})
+	metadata := g.getSystemMetadata()
+	g.sendMessage(metadata, &Destroy[K]{})
 	return nil
 }
 
@@ -127,7 +130,8 @@ func (g *gronos[K]) handleCheckAutomaticShutdown(state *gronosState[K], response
 	if allDead {
 		log.Debug("[GronosMessage] All applications are dead, initiating shutdown")
 		state.automaticShutdown.Store(true)
-		g.sendMessage(nil, MsgInitiateShutdown[K]()) // asynchronously trigger it
+		metadata := g.getSystemMetadata()
+		g.sendMessage(metadata, MsgInitiateShutdown[K]()) // asynchronously trigger it
 	}
 
 	close(response)

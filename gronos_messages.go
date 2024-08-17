@@ -32,8 +32,13 @@ type RequestMessage[K comparable, Y any] struct {
 // handleMessage processes incoming messages and updates the gronos state accordingly.
 func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload) error {
 
-	log.Debug("[GronosMessage] handle message", reflect.TypeOf(m).Name(), m)
-	defer messagePayloadPool.Put(m)
+	log.Debug("[GronosMessage] handle message", "name", m.Metadata["name"], "metadata", m.Metadata, "message", m.Message)
+
+	// clean up pool data
+	defer func() {
+		metadataPool.Put(m.Metadata)
+		messagePayloadPool.Put(m)
+	}()
 
 	// Try to handle the message with the gronos core
 	coreErr := g.handleGronosMessage(state, m)
