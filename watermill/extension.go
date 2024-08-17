@@ -16,18 +16,18 @@ type ctxWatermill string
 
 var ctxWatermillKey ctxWatermill
 
-type WatermillMiddleware[K comparable] struct {
+type WatermillExtension[K comparable] struct {
 	pubs    sync.Map
 	subs    sync.Map
 	routers sync.Map
 	logger  watermill.LoggerAdapter
 }
 
-func New[K comparable](logger watermill.LoggerAdapter) *WatermillMiddleware[K] {
+func New[K comparable](logger watermill.LoggerAdapter) *WatermillExtension[K] {
 	if logger == nil {
 		logger = watermill.NewStdLogger(false, false)
 	}
-	return &WatermillMiddleware[K]{
+	return &WatermillExtension[K]{
 		logger: logger,
 	}
 }
@@ -352,7 +352,7 @@ func MsgAddPlugins[K comparable](key K, plugins ...message.RouterPlugin) (<-chan
 	return msg.Response, msg
 }
 
-func MsgAddMiddlewares[K comparable](key K, middlewares ...message.HandlerMiddleware) (<-chan struct{}, *AddRouterMiddlewares[K]) {
+func MsgAddRouterMiddlewares[K comparable](key K, middlewares ...message.HandlerMiddleware) (<-chan struct{}, *AddRouterMiddlewares[K]) {
 	if !addMiddlewaresPoolInited {
 		addMiddlewaresPoolInited = true
 		addMiddlewaresPool = sync.Pool{
@@ -369,25 +369,25 @@ func MsgAddMiddlewares[K comparable](key K, middlewares ...message.HandlerMiddle
 }
 
 // Extension methods
-func (w *WatermillMiddleware[K]) OnStart(ctx context.Context, errChan chan<- error) error {
+func (w *WatermillExtension[K]) OnStart(ctx context.Context, errChan chan<- error) error {
 	w.logger.Debug("Starting Watermill middleware", nil)
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) OnNewRuntime(ctx context.Context) context.Context {
+func (w *WatermillExtension[K]) OnNewRuntime(ctx context.Context) context.Context {
 	return context.WithValue(ctx, ctxWatermillKey, w)
 }
 
-func (w *WatermillMiddleware[K]) OnStopRuntime(ctx context.Context) context.Context {
+func (w *WatermillExtension[K]) OnStopRuntime(ctx context.Context) context.Context {
 	return ctx
 }
 
-func (w *WatermillMiddleware[K]) OnStop(ctx context.Context, errChan chan<- error) error {
+func (w *WatermillExtension[K]) OnStop(ctx context.Context, errChan chan<- error) error {
 	w.logger.Debug("Stopping Watermill middleware", nil)
 	return w.closeAllComponents(errChan)
 }
 
-func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) error {
+func (w *WatermillExtension[K]) closeAllComponents(errChan chan<- error) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3) // For publishers, subscribers, and routers
 
@@ -434,8 +434,8 @@ func (w *WatermillMiddleware[K]) closeAllComponents(errChan chan<- error) error 
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) error {
-	switch msg := m.(type) {
+func (w *WatermillExtension[K]) OnMsg(ctx context.Context, m *gronos.MessagePayload) error {
+	switch msg := m.Message.(type) {
 	case *AddPublisherMessage[K]:
 		defer addPublisherPool.Put(msg)
 		return w.handleAddPublisher(ctx, msg)
@@ -480,21 +480,21 @@ func (w *WatermillMiddleware[K]) OnMsg(ctx context.Context, m gronos.Message) er
 	}
 }
 
-func (w *WatermillMiddleware[K]) handleHasPublisher(ctx context.Context, msg *HasPublisherMessage[K]) error {
+func (w *WatermillExtension[K]) handleHasPublisher(ctx context.Context, msg *HasPublisherMessage[K]) error {
 	defer close(msg.Response)
 	_, ok := w.pubs.Load(msg.Key)
 	msg.Response <- ok
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleHasSubscriber(ctx context.Context, msg *HasSubscriberMessage[K]) error {
+func (w *WatermillExtension[K]) handleHasSubscriber(ctx context.Context, msg *HasSubscriberMessage[K]) error {
 	defer close(msg.Response)
 	_, ok := w.subs.Load(msg.Key)
 	msg.Response <- ok
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleHasHandler(ctx context.Context, msg *HasHandlerMessage[K]) error {
+func (w *WatermillExtension[K]) handleHasHandler(ctx context.Context, msg *HasHandlerMessage[K]) error {
 	defer close(msg.Response)
 	var value any
 	var ok bool
@@ -508,28 +508,28 @@ func (w *WatermillMiddleware[K]) handleHasHandler(ctx context.Context, msg *HasH
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleHasRouter(ctx context.Context, msg *HasRouterMessage[K]) error {
+func (w *WatermillExtension[K]) handleHasRouter(ctx context.Context, msg *HasRouterMessage[K]) error {
 	defer close(msg.Response)
 	_, ok := w.routers.Load(msg.Key)
 	msg.Response <- ok
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddPublisher(ctx context.Context, msg *AddPublisherMessage[K]) error {
+func (w *WatermillExtension[K]) handleAddPublisher(ctx context.Context, msg *AddPublisherMessage[K]) error {
 	defer close(msg.Response)
 	w.pubs.Store(msg.Key, msg.Publisher)
 	w.logger.Debug("Added publisher", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddSubscriber(ctx context.Context, msg *AddSubscriberMessage[K]) error {
+func (w *WatermillExtension[K]) handleAddSubscriber(ctx context.Context, msg *AddSubscriberMessage[K]) error {
 	defer close(msg.Response)
 	w.subs.Store(msg.Key, msg.Subscriber)
 	w.logger.Debug("Added subscriber", watermill.LogFields{"key": msg.Key})
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg *ClosePublisherMessage[K]) error {
+func (w *WatermillExtension[K]) handleClosePublisher(ctx context.Context, msg *ClosePublisherMessage[K]) error {
 	defer close(msg.Response)
 	pub, ok := w.pubs.LoadAndDelete(msg.Key)
 	if !ok {
@@ -543,7 +543,7 @@ func (w *WatermillMiddleware[K]) handleClosePublisher(ctx context.Context, msg *
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleCloseSubscriber(ctx context.Context, msg *CloseSubscriberMessage[K]) error {
+func (w *WatermillExtension[K]) handleCloseSubscriber(ctx context.Context, msg *CloseSubscriberMessage[K]) error {
 	defer close(msg.Response)
 	sub, ok := w.subs.LoadAndDelete(msg.Key)
 	if !ok {
@@ -562,7 +562,7 @@ type RouterStatus struct {
 	Running bool
 }
 
-func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg *AddRouterMessage[K]) error {
+func (w *WatermillExtension[K]) handleAddRouter(ctx context.Context, msg *AddRouterMessage[K]) error {
 	defer close(msg.Response)
 	w.routers.Store(msg.Key, &RouterStatus{Router: msg.Router, Running: false})
 	w.logger.Debug("Added router", watermill.LogFields{"key": msg.Key})
@@ -581,7 +581,7 @@ func (w *WatermillMiddleware[K]) handleAddRouter(ctx context.Context, msg *AddRo
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddNoPublisherHandler(ctx context.Context, msg *AddNoPublisherHandlerMessage[K]) error {
+func (w *WatermillExtension[K]) handleAddNoPublisherHandler(ctx context.Context, msg *AddNoPublisherHandlerMessage[K]) error {
 	defer close(msg.Response)
 	routerStatus, ok := w.routers.Load(msg.Key)
 	if !ok {
@@ -625,7 +625,7 @@ func (w *WatermillMiddleware[K]) handleAddNoPublisherHandler(ctx context.Context
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddRouterPlugins(ctx context.Context, msg *AddRouterPlugins[K]) error {
+func (w *WatermillExtension[K]) handleAddRouterPlugins(ctx context.Context, msg *AddRouterPlugins[K]) error {
 	defer close(msg.Response)
 	routerStatus, ok := w.routers.Load(msg.Key)
 	if !ok {
@@ -646,7 +646,7 @@ func (w *WatermillMiddleware[K]) handleAddRouterPlugins(ctx context.Context, msg
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddRouterMiddlewares(ctx context.Context, msg *AddRouterMiddlewares[K]) error {
+func (w *WatermillExtension[K]) handleAddRouterMiddlewares(ctx context.Context, msg *AddRouterMiddlewares[K]) error {
 	defer close(msg.Response)
 	routerStatus, ok := w.routers.Load(msg.Key)
 	if !ok {
@@ -667,7 +667,7 @@ func (w *WatermillMiddleware[K]) handleAddRouterMiddlewares(ctx context.Context,
 	return nil
 }
 
-func (w *WatermillMiddleware[K]) handleAddHandler(ctx context.Context, msg *AddHandlerMessage[K]) error {
+func (w *WatermillExtension[K]) handleAddHandler(ctx context.Context, msg *AddHandlerMessage[K]) error {
 	defer close(msg.Response)
 	routerStatus, ok := w.routers.Load(msg.Key)
 	if !ok {
@@ -780,8 +780,8 @@ func UseSubscriber[K comparable](ctx context.Context, name K) (message.Subscribe
 	return sub, nil
 }
 
-func getMiddleware[K comparable](ctx context.Context) (*WatermillMiddleware[K], error) {
-	middleware, ok := ctx.Value(ctxWatermillKey).(*WatermillMiddleware[K])
+func getMiddleware[K comparable](ctx context.Context) (*WatermillExtension[K], error) {
+	middleware, ok := ctx.Value(ctxWatermillKey).(*WatermillExtension[K])
 	if !ok {
 		return nil, fmt.Errorf("watermill middleware not found in context")
 	}

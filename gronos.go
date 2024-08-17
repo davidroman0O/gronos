@@ -137,6 +137,8 @@ type gronos[K comparable] struct {
 	extensions []Extension[K]
 	errChan    chan error
 
+	typeMapping sync.Map
+
 	// when we are shutting down to prevent triggering multiple shutdowns
 	isShutting atomic.Bool
 
@@ -310,11 +312,16 @@ func (g *gronos[K]) poolMessagePayload(metadata map[string]interface{}, m Messag
 	msgPayload.Metadata = metadata
 	// it's always pointers normally
 	typeOf := reflect.TypeOf(m)
+	msgPayload.Metadata["$type"] = typeOf
 	if typeOf.Kind() == reflect.Ptr {
 		msgPayload.Metadata["$name"] = fmt.Sprintf("%s.%s", typeOf.Elem().PkgPath(), typeOf.Elem().Name())
 	} else {
 		msgPayload.Metadata["$name"] = fmt.Sprintf("%s.%s", typeOf.PkgPath(), typeOf.Name())
 		msgPayload.Metadata["$error"] = "it should be a pointer"
+	}
+	// every messages that users are sending will be pre-analyzed
+	if _, loaded := g.typeMapping.LoadOrStore(msgPayload.Metadata["$name"], typeOf); !loaded {
+		// TODO: send an event for metrics for "new message type" detected
 	}
 	msgPayload.Message = m
 	return msgPayload

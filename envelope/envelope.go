@@ -35,14 +35,20 @@ const (
 )
 
 // https://www.enterpriseintegrationpatterns.com/patterns/messaging/EnvelopeWrapper.html
-type Evelope struct {
+// An envelope will simply wrap a message with metadata of the Message's payload allowing other topics to identify it as an envelope and therefore being able to deserialize it with more type-safety.
+// You will have contorl on switching on which type you pre-defined for a topic BUT you will discard the unknown types.
+type Envelope struct {
 	metadata map[string]string // watermill inspired
-	payload  interface{}       // contrary to watermill, we do not need []byte but just the instance
+	payload  interface{}       // runtime payload rendered by it's `message`
 	message  []byte            // watermill inspired, used for (future) network transport
 }
 
 // Return fundamental data types for any third parties (e.g. Kafka, RabbitMQ, etc.)
-func (e *Evelope) AsMessage() (map[string]string, []byte, error) {
+func (e *Envelope) AsMessage() (map[string]string, []byte, error) {
 	asbytes, err := json.Marshal(e.payload)
 	return e.metadata, asbytes, err
+}
+
+func (e *Envelope) Payload() interface{} {
+	return e.payload
 }
