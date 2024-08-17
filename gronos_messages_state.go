@@ -127,8 +127,8 @@ func MsgRequestStatusAsync[K comparable](key K, when StatusState) (<-chan struct
 	return response, msg
 }
 
-func (g *gronos[K]) handleStateMessage(state *gronosState[K], m Message) (error, bool) {
-	switch msg := m.(type) {
+func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+	switch msg := m.Message.(type) {
 	case *RequestStatus[K]:
 		log.Debug("[GronosMessage] [RequestStatus]", msg.Key)
 		defer requestStatusPool.Put(msg)

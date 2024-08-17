@@ -18,8 +18,8 @@ func MsgInitiateContextCancellation[K comparable]() *InitiateContextCancellation
 	return &InitiateContextCancellation[K]{}
 }
 
-func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m Message) (error, bool) {
-	switch m.(type) {
+func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+	switch m.Message.(type) {
 	case *InitiateShutdown[K]:
 		log.Debug("[GronosMessage] [InitiateShutdown]")
 		return g.handleInitiateShutdown(state), true
@@ -95,7 +95,7 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 		case <-whenAll:
 			log.Debug("[GronosMessage] all app really shutdown")
 		case <-time.AfterFunc(g.config.gracePeriod, func() {
-			g.sendMessage(MsgGracePeriodExceeded[K]())
+			g.sendMessage(nil, MsgGracePeriodExceeded[K]())
 		}).C:
 			log.Debug("[GronosMessage] grace period exceeded")
 		}
@@ -103,7 +103,7 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 		log.Debug("[GronosMessage] check all application are last state")
 
 		log.Debug("[GronosMessage] all applications are shutdown")
-		g.com <- &ShutdownComplete[K]{}
+		g.sendMessage(nil, &ShutdownComplete[K]{})
 		log.Debug("[GronosMessage] sent shutdown complete")
 	}()
 
@@ -131,13 +131,13 @@ func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
 	if kind == ShutdownKindTerminate {
 		log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
 		_, msg := MsgForceTerminateShutdown(key)
-		if !g.sendMessage(msg) {
+		if !g.sendMessage(nil, msg) {
 			log.Error("[GronosMessage] failed to send forced shutdown process terminate", key)
 		}
 	} else {
 		log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
 		_, msg := MsgForceCancelShutdown(key, nil)
-		if !g.sendMessage(msg) {
+		if !g.sendMessage(nil, msg) {
 			log.Error("[GronosMessage] failed to send forced shutdown process cancel", key)
 		}
 	}
