@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,9 @@ import (
 type ctxKey string
 
 var comKey ctxKey = "com"
+var comKeyWait ctxKey = "comwait"
+var comKeyConfirm ctxKey = "comconfirm"
+var keyID ctxKey = "id"
 var keyKey ctxKey = "key"
 
 type ShutdownBehavior int
@@ -103,10 +107,24 @@ type gronosConfig struct {
 	minRuntime       time.Duration
 }
 
+type MessagePayload struct {
+	Metadata map[string]interface{}
+	Message
+}
+
+var messagePayloadPool sync.Pool = sync.Pool{
+	New: func() interface{} {
+		return &MessagePayload{
+			Metadata: make(map[string]interface{}),
+			Message:  nil,
+		}
+	},
+}
+
 // gronos is the main struct that manages concurrent applications.
 // It is parameterized by a comparable key type K.
 type gronos[K comparable] struct {
-	com chan Message
+	com chan *MessagePayload
 
 	// main waiting group for all applications
 	// wait sync.WaitGroup
@@ -116,8 +134,10 @@ type gronos[K comparable] struct {
 	config     gronosConfig
 	startTime  time.Time
 	started    atomic.Bool // define if gronos started or not
-	extensions []ExtensionHooks[K]
+	extensions []Extension[K]
 	errChan    chan error
+
+	typeMapping sync.Map
 
 	// when we are shutting down to prevent triggering multiple shutdowns
 	isShutting atomic.Bool
@@ -152,20 +172,30 @@ type gronosState[K comparable] struct {
 
 type Option[K comparable] func(*gronos[K])
 
-func WithExtension[K comparable](ext ExtensionHooks[K]) Option[K] {
+func WithExtension[K comparable](ext Extension[K]) Option[K] {
 	return func(ctx *gronos[K]) {
 		ctx.extensions = append(ctx.extensions, ext)
 	}
 }
 
+func Merge[K comparable](apps ...map[K]RuntimeApplication) map[K]RuntimeApplication {
+	m := make(map[K]RuntimeApplication)
+	for _, app := range apps {
+		for k, v := range app {
+			m[k] = v
+		}
+	}
+	return m
+}
+
 // New creates a new gronos instance with the given context and initial applications.
 func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts ...Option[K]) (*gronos[K], chan error) {
 
-	// log.Default().SetLevel(log.DebugLevel) // debug
+	log.Default().SetLevel(log.DebugLevel) // debug
 
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
-		com:    make(chan Message, 500),
+		com:    make(chan *MessagePayload, 500),
 		cancel: cancel,
 		// Context will be monitored to detect cancellation and trigger ForceCancelShutdown
 		ctx: ctx,
@@ -175,7 +205,7 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts 
 		doneChan: make(chan struct{}),
 
 		errChan:    make(chan error, 100),
-		extensions: []ExtensionHooks[K]{},
+		extensions: []Extension[K]{},
 		config: gronosConfig{
 			// TODO: make it configurable
 			// TODO: make a sub shutdown struct
@@ -194,7 +224,7 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts 
 func (g *gronos[K]) reinitialize() {
 	g.shutdownChan = make(chan struct{})
 	g.doneChan = make(chan struct{})
-	g.com = make(chan Message, 200)
+	g.com = make(chan *MessagePayload, 200)
 	g.errChan = make(chan error, 100)
 	g.isShutting.Store(false)
 	g.started.Store(false)
@@ -233,7 +263,7 @@ func (g *gronos[K]) Start() chan error {
 	// TODO: might send them all at once and wait for all of them to be added
 	for k, v := range g.init {
 		wait, msg := MsgAdd[K](k, v)
-		g.sendMessage(msg)
+		g.sendMessage(map[string]interface{}{}, msg)
 		<-wait
 	}
 
@@ -274,10 +304,44 @@ func (g *gronos[K]) OnDone() <-chan struct{} {
 	return g.doneChan
 }
 
-func (g *gronos[K]) sendMessage(m Message) bool {
+// We don't want to infringe on the memory space of the user
+// It will be Put back when the message is processed
+func (g *gronos[K]) poolMessagePayload(metadata map[string]interface{}, m Message) *MessagePayload {
+	payload := messagePayloadPool.Get()
+	msgPayload := payload.(*MessagePayload)
+	msgPayload.Metadata = metadata
+	// it's always pointers normally
+	typeOf := reflect.TypeOf(m)
+	msgPayload.Metadata["$type"] = typeOf
+	if typeOf.Kind() == reflect.Ptr {
+		msgPayload.Metadata["$name"] = fmt.Sprintf("%s.%s", typeOf.Elem().PkgPath(), typeOf.Elem().Name())
+	} else {
+		msgPayload.Metadata["$name"] = fmt.Sprintf("%s.%s", typeOf.PkgPath(), typeOf.Name())
+		msgPayload.Metadata["$error"] = "it should be a pointer"
+	}
+	// every messages that users are sending will be pre-analyzed
+	if _, loaded := g.typeMapping.LoadOrStore(msgPayload.Metadata["$name"], typeOf); !loaded {
+		// TODO: send an event for metrics for "new message type" detected
+	}
+	msgPayload.Message = m
+	return msgPayload
+}
+
+func (g *gronos[K]) poolMetadata() map[string]interface{} {
+	return metadataPool.Get().(map[string]interface{})
+}
+
+func (g *gronos[K]) getSystemMetadata() map[string]interface{} {
+	metadata := g.poolMetadata()
+	metadata["$id"] = 0
+	metadata["$key"] = "system"
+	return metadata
+}
+
+func (g *gronos[K]) sendMessage(metadata map[string]interface{}, m Message) bool {
 	if !g.comClosed.Load() {
 		select {
-		case g.com <- m:
+		case g.com <- g.poolMessagePayload(metadata, m):
 			return true
 		default:
 			log.Debug("[Gronos] Unable to send message, channel might be full")
@@ -285,6 +349,44 @@ func (g *gronos[K]) sendMessage(m Message) bool {
 		}
 	}
 	return false
+}
+
+type FnWait func() (<-chan struct{}, Message)
+
+func (g *gronos[K]) sendMessageWait(metadata map[string]interface{}, fn FnWait) <-chan struct{} {
+	// fn is supposed to be a function that returns a `<-chan struct` and `message`
+	// execute the function and return the channel and message
+	done, msg := fn()
+
+	if !g.comClosed.Load() {
+		select {
+		case g.com <- g.poolMessagePayload(metadata, msg):
+			return done
+		default:
+			log.Debug("[Gronos] Unable to send message, channel might be full")
+			return done
+		}
+	}
+	return done
+}
+
+type FnConfirm func() (<-chan bool, Message)
+
+func (g *gronos[K]) sendMessageConfirm(metadata map[string]interface{}, fn FnConfirm) <-chan bool {
+	// fn is supposed to be a function that returns a `<-chan struct` and `message`
+	// execute the function and return the channel and message
+	done, msg := fn()
+
+	if !g.comClosed.Load() {
+		select {
+		case g.com <- g.poolMessagePayload(metadata, msg):
+			return done
+		default:
+			log.Debug("[Gronos] Unable to send message, channel might be full")
+			return done
+		}
+	}
+	return done
 }
 
 // if configured on automatic shutdown, it will check the status of the applications
@@ -303,7 +405,7 @@ func (g *gronos[K]) automaticShutdown() {
 				return
 			}
 			done, msg := MsgCheckAutomaticShutdown[K]()
-			g.sendMessage(msg)
+			g.sendMessage(g.getSystemMetadata(), msg)
 			<-done
 		}
 		runtime.Gosched() // give CPU time to other goroutines
@@ -323,7 +425,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 				errChan <- fmt.Errorf("extension error on stop: %w", err)
 			}
 		}
-		g.sendMessage(MsgDestroy[K]())
+		g.sendMessage(g.getSystemMetadata(), MsgDestroy[K]())
 	}()
 
 	state := &gronosState[K]{}
@@ -333,10 +435,10 @@ func (g *gronos[K]) run(errChan chan<- error) {
 		select {
 		case <-g.ctx.Done():
 			log.Debug("[Gronos] Context cancelled, initiating shutdown")
-			g.sendMessage(MsgInitiateContextCancellation[K]())
+			g.sendMessage(g.getSystemMetadata(), MsgInitiateContextCancellation[K]())
 		case <-g.shutdownChan:
 			log.Debug("[Gronos] Shutdown initiated, initiating shutdown")
-			g.sendMessage(MsgInitiateShutdown[K]())
+			g.sendMessage(g.getSystemMetadata(), MsgInitiateShutdown[K]())
 		}
 	}()
 
@@ -365,7 +467,7 @@ func (g *gronos[K]) IsComplete(k K) bool {
 // GetStatus retrieves the current status of a component
 func (g *gronos[K]) GetStatus(k K) StatusState {
 	done, msg := MsgRequestStatus(k)
-	g.sendMessage(msg)
+	g.sendMessage(g.getSystemMetadata(), msg)
 	return <-done
 }
 
@@ -381,6 +483,22 @@ func WhenState(state StatusState) addOption {
 	}
 }
 
+func (g *gronos[K]) Push(apps map[K]RuntimeApplication, opts ...addOption) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		acc := []<-chan struct{}{}
+		for k, v := range apps {
+			acc = append(acc, g.Add(k, v, opts...))
+		}
+		for _, d := range acc {
+			<-d
+		}
+		acc = nil
+	}()
+	return done
+}
+
 // Add adds a new application to the gronos instance with the given key and RuntimeApplication.
 func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan struct{} {
 	cfg := addOptions{
@@ -392,8 +510,10 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 
 	done, msgAdd := MsgAdd(k, v)
 
+	metadata := g.getSystemMetadata()
+
 	// Add new runtime application
-	if !g.sendMessage(msgAdd) {
+	if !g.sendMessage(metadata, msgAdd) {
 		log.Debug("[Gronos] Unable to add runtime application")
 		return nil
 	}
@@ -403,7 +523,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 		// Application added successfully
 	case <-time.After(5 * time.Second):
 		log.Debug("[Gronos] Timeout waiting for application to be added")
-		g.sendMessage(MsgRuntimeError(k, fmt.Errorf("timeout waiting for application to be added")))
+		g.sendMessage(metadata, MsgRuntimeError(k, fmt.Errorf("timeout waiting for application to be added")))
 		return nil
 	}
 
@@ -411,7 +531,7 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 	doneStatus, msgStatus := MsgRequestStatusAsync(k, cfg.whenState)
 
 	// send the message
-	if !g.sendMessage(msgStatus) {
+	if !g.sendMessage(metadata, msgStatus) {
 		log.Debug("[Gronos] Unable to request status")
 		return nil
 	}
@@ -431,9 +551,48 @@ func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan str
 	return proxy
 }
 
+var runtimeApplicationIncrement = 0
+
+func newIncrement() int {
+	runtimeApplicationIncrement++
+	return runtimeApplicationIncrement
+}
+
+var metadataPool sync.Pool = sync.Pool{
+	New: func() interface{} {
+		return make(map[string]interface{})
+	},
+}
+
 // createContext creates a new context with the gronos communication channel embedded.
-func (g *gronos[K]) createContext() (context.Context, context.CancelFunc) {
-	ctx := context.WithValue(context.Background(), comKey, g.sendMessage)
+func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
+	ctx := context.WithValue(context.Background(), keyID, newIncrement())
+
+	ctx = context.WithValue(ctx, keyKey, key)
+
+	ctx = context.WithValue(ctx, comKey, func(m Message) bool {
+		metadataAny := metadataPool.New()
+		metadata := metadataAny.(map[string]interface{})
+		metadata["$id"] = ctx.Value(keyID).(int)
+		metadata["$key"] = ctx.Value(keyKey)
+		return g.sendMessage(metadata, m)
+	})
+
+	ctx = context.WithValue(ctx, comKeyWait, func(fn FnWait) <-chan struct{} {
+		metadataAny := metadataPool.New()
+		metadata := metadataAny.(map[string]interface{})
+		metadata["$id"] = ctx.Value(keyID).(int)
+		metadata["$key"] = ctx.Value(keyKey)
+		return g.sendMessageWait(metadata, fn)
+	})
+
+	ctx = context.WithValue(ctx, comKeyConfirm, func(fn FnConfirm) <-chan bool {
+		metadataAny := metadataPool.New()
+		metadata := metadataAny.(map[string]interface{})
+		metadata["$id"] = ctx.Value(keyID).(int)
+		metadata["$key"] = ctx.Value(keyKey)
+		return g.sendMessageConfirm(metadata, fn)
+	})
 	ctx, cancel := context.WithCancel(ctx)
 	return ctx, cancel
 }
@@ -445,6 +604,22 @@ func UseBus(ctx context.Context) (func(m Message) bool, error) {
 		return nil, fmt.Errorf("com not found in context")
 	}
 	return value.(func(m Message) bool), nil
+}
+
+func UseBusWait(ctx context.Context) (func(fn FnWait) <-chan struct{}, error) {
+	value := ctx.Value(comKeyWait)
+	if value == nil {
+		return nil, fmt.Errorf("com not found in context")
+	}
+	return value.(func(fn FnWait) <-chan struct{}), nil
+}
+
+func UseBusConfirm(ctx context.Context) (func(fn FnWait) <-chan bool, error) {
+	value := ctx.Value(comKeyConfirm)
+	if value == nil {
+		return nil, fmt.Errorf("com not found in context")
+	}
+	return value.(func(fn FnWait) <-chan bool), nil
 }
 
 func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {

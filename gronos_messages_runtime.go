@@ -29,11 +29,13 @@ func MsgRuntimeError[K comparable](key K, err error) *RuntimeError[K] {
 type ForceCancelShutdown[K comparable] struct {
 	KeyMessage[K]
 	Error error
+	RequestMessage[K, struct{}]
 }
 
 // global system force terminate
 type ForceTerminateShutdown[K comparable] struct {
 	KeyMessage[K]
+	RequestMessage[K, struct{}]
 }
 
 type CancelledShutdown[K comparable] struct {
@@ -50,11 +52,13 @@ type TerminatedShutdown[K comparable] struct {
 type PanickedShutdown[K comparable] struct {
 	KeyMessage[K]
 	Error error
+	RequestMessage[K, struct{}]
 }
 
 type ErroredShutdown[K comparable] struct {
 	KeyMessage[K]
 	Error error
+	RequestMessage[K, struct{}]
 }
 
 var addRuntimeApplicationPoolInited bool = false
@@ -95,7 +99,7 @@ func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddM
 	return msg.done, msg
 }
 
-func MsgForceCancelShutdown[K comparable](key K, err error) *ForceCancelShutdown[K] {
+func MsgForceCancelShutdown[K comparable](key K, err error) (<-chan struct{}, *ForceCancelShutdown[K]) {
 	if !forceCancelShutdownPoolInited {
 		forceCancelShutdownPoolInited = true
 		forceCancelShutdownPool = sync.Pool{
@@ -107,10 +111,11 @@ func MsgForceCancelShutdown[K comparable](key K, err error) *ForceCancelShutdown
 	msg := forceCancelShutdownPool.Get().(*ForceCancelShutdown[K])
 	msg.Key = key
 	msg.Error = err
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
-func MsgForceTerminateShutdown[K comparable](key K) *ForceTerminateShutdown[K] {
+func MsgForceTerminateShutdown[K comparable](key K) (<-chan struct{}, *ForceTerminateShutdown[K]) {
 	if !forceTerminateShutdownPoolInited {
 		forceTerminateShutdownPoolInited = true
 		forceTerminateShutdownPool = sync.Pool{
@@ -121,7 +126,8 @@ func MsgForceTerminateShutdown[K comparable](key K) *ForceTerminateShutdown[K] {
 	}
 	msg := forceTerminateShutdownPool.Get().(*ForceTerminateShutdown[K])
 	msg.Key = key
-	return msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
 }
 
 func msgCancelledShutdown[K comparable](key K, err error) (<-chan struct{}, *CancelledShutdown[K]) {
@@ -157,7 +163,7 @@ func msgTerminatedShutdown[K comparable](key K) (<-chan struct{}, *TerminatedShu
 	return response, msg
 }
 
-func msgPanickedShutdown[K comparable](key K, err error) *PanickedShutdown[K] {
+func msgPanickedShutdown[K comparable](key K, err error) (<-chan struct{}, *PanickedShutdown[K]) {
 	if !panicShutdownPoolInited {
 		panicShutdownPoolInited = true
 		panickedShutdownPool = sync.Pool{
@@ -169,10 +175,12 @@ func msgPanickedShutdown[K comparable](key K, err error) *PanickedShutdown[K] {
 	msg := panickedShutdownPool.Get().(*PanickedShutdown[K])
 	msg.Key = key
 	msg.Error = err
-	return msg
+	response := make(chan struct{}, 1)
+	msg.Response = response
+	return response, msg
 }
 
-func msgErroredShutdown[K comparable](key K, err error) *ErroredShutdown[K] {
+func msgErroredShutdown[K comparable](key K, err error) (<-chan struct{}, *ErroredShutdown[K]) {
 	if !erroredShutdownPoolInited {
 		erroredShutdownPoolInited = true
 		erroredShutdownPool = sync.Pool{
@@ -184,11 +192,13 @@ func msgErroredShutdown[K comparable](key K, err error) *ErroredShutdown[K] {
 	msg := erroredShutdownPool.Get().(*ErroredShutdown[K])
 	msg.Key = key
 	msg.Error = err
-	return msg
+	response := make(chan struct{}, 1)
+	msg.Response = response
+	return response, msg
 }
 
-func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m Message) (error, bool) {
-	switch msg := m.(type) {
+func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+	switch msg := m.Message.(type) {
 	case *AddMessage[K]:
 		log.Debug("[GronosMessage] [AddMessage]", msg.Key)
 		defer addRuntimeApplicationPool.Put(msg)
@@ -240,7 +250,7 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 		return fmt.Errorf("gronos is shutting down")
 	}
 
-	ctx, cancel := g.createContext()
+	ctx, cancel := g.createContext(key)
 	shutdown := make(chan struct{})
 
 	log.Debug("[GronosMessage] [AddMessage] add application with extensions", key, app)
@@ -273,7 +283,7 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 		cancel()
 	}))
 
-	go g.handleRuntimeApplication(state, key, g.com)
+	go g.handleRuntimeApplication(state, key, g.sendMessage)
 
 	log.Debug("[GronosMessage] [AddMessage] application added", key)
 
@@ -349,11 +359,14 @@ func (g *gronos[K]) handleCancelledShutdown(state *gronosState[K], key K, err er
 	log.Debug("[GronosMessage] [CancelledShutdown] terminate cancelled shutdown waiting real done", key)
 
 	go func() {
+
+		metadata := g.getSystemMetadata()
+
 		<-value.(chan struct{})
 		log.Debug("[GronosMessage] [CancelledShutdown] terminate cancelled shutdown done", key, ok)
 
 		if value, ok = state.mali.Load(key); !ok {
-			g.sendMessage(MsgRuntimeError(key, fmt.Errorf("app not found (alive property) %v", key)))
+			g.sendMessage(metadata, MsgRuntimeError(key, fmt.Errorf("app not found (alive property) %v", key)))
 			return
 		}
 
@@ -361,7 +374,7 @@ func (g *gronos[K]) handleCancelledShutdown(state *gronosState[K], key K, err er
 			state.mali.Store(key, false)
 		}
 
-		g.com <- MsgRuntimeError(key, err)
+		g.sendMessage(metadata, MsgRuntimeError(key, err))
 		close(response)
 
 		state.mstatus.Store(key, StatusShutdownCancelled)
@@ -390,11 +403,13 @@ func (g *gronos[K]) handleTerminateShutdown(state *gronosState[K], key K, respon
 	log.Debug("[GronosMessage] [TerminateShutdown] terminate shutdown waiting real done", key)
 
 	go func() {
+
+		metadata := g.getSystemMetadata()
 		<-value.(chan struct{})
 		log.Debug("[GronosMessage] [TerminateShutdown] terminate shutdown done", key, ok)
 
 		if value, ok = state.mali.Load(key); !ok {
-			g.sendMessage(MsgRuntimeError(key, fmt.Errorf("app not found (alive property) %v", key)))
+			g.sendMessage(metadata, MsgRuntimeError(key, fmt.Errorf("app not found (alive property) %v", key)))
 			return
 		}
 
@@ -428,7 +443,9 @@ func (g *gronos[K]) handlePanicShutdown(state *gronosState[K], key K, err error)
 	if value.(bool) {
 		state.mali.Store(key, false)
 	}
-	g.com <- MsgRuntimeError(key, err)
+
+	metadata := g.getSystemMetadata()
+	g.sendMessage(metadata, MsgRuntimeError(key, err))
 
 	return nil
 }
@@ -450,12 +467,13 @@ func (g *gronos[K]) handleErrorShutdown(state *gronosState[K], key K, err error)
 		state.mali.Store(key, false)
 	}
 
-	g.com <- MsgRuntimeError(key, err)
+	metadata := g.getSystemMetadata()
+	g.sendMessage(metadata, MsgRuntimeError(key, err))
 
 	return nil
 }
 
-func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, com chan Message) {
+func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send func(metadata map[string]interface{}, m Message) bool) {
 	var retries uint
 	var shutdown chan struct{}
 	var app RuntimeApplication
@@ -560,22 +578,26 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, com c
 
 	log.Debug("[RuntimeApplication] com", key, err)
 
+	metadata := g.getSystemMetadata()
+
 	//	Notify to the global state
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			log.Debug("[RuntimeApplication] com canceled", key, err)
 			_, msg := msgCancelledShutdown(key, err)
-			com <- msg // sending and working on the response
+			send(metadata, msg) // sending and working on the response
 		} else if errors.Is(err, ErrPanic) {
 			log.Debug("[RuntimeApplication] com panic", key, err)
-			com <- msgPanickedShutdown(key, err) // final state, it is definitly finished
+			_, msg := msgPanickedShutdown(key, err)
+			send(metadata, msg) // final state, it is definitly finished
 		} else {
 			log.Debug("[RuntimeApplication] com error", key, err)
-			com <- msgErroredShutdown(key, err) // final state, it is definitly finished
+			_, msg := msgErroredShutdown(key, err) // final state, it is definitly finished
+			send(metadata, msg)
 		}
 	} else {
 		log.Debug("[RuntimeApplication] com terminate", key)
 		_, msg := msgTerminatedShutdown(key)
-		com <- msg // sending and working on the response
+		send(metadata, msg) // sending and working on the response
 	}
 }

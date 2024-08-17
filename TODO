@@ -1,9 +1,31 @@
 
-Improvements todo:
-    - [ ] MsgForceCancelShutdown to MsgForceCancel
-    - [ ] MsgForceTerminateShutdown to MsgForceTerminate
+Feature evelope:
+    - [] registry the record message types
+
+# I need find a way to better organize workflow of messages between multiple routers of multiple domains
+# I need a way to "force" my way of programming middlewares
 
 Features todo:
+    - [ ] Change slightly the API for resource management style OR make a middleware alternative, i think we should both have middlewares and resource management somehow, i just provide tools and you build your stuff
     - [ ] Implement a supervisor: a runtime application can panic or return an error, it should be restarted
-    - [ ] `events` package containing helpers to deploy minimalist EDA systems 
+    - [ ] `envelope` package containing helpers to deploy minimalist EDA systems 
+    - [ ] lot of examples about evelope
+    - [ ] if we can force cancel and shutdown, we could have an hiden force panic to quick shutdown
+    - [ ] saga implemented as dynamic dag + runtime applications that holds the transactions and release it depending of the state of the request
+
+# the question is: from an api endpoint, how to use the EDA to orchestrate all the things that are needed to be done?
+
+Research:
+    - [ ] How can I do SAGAs?
+    - [ ] How can I do batches of messages?
+
+Feature middleware:
+    - [ ] reducer analysis middleware
+    - [ ] TUI companion to observe the gronos
+    - [x] web companion to observe the gronos
+
+
+Article https://itnext.io/orchestration-368c642f34de
+
+
 

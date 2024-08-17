@@ -30,9 +30,15 @@ type RequestMessage[K comparable, Y any] struct {
 }
 
 // handleMessage processes incoming messages and updates the gronos state accordingly.
-func (g *gronos[K]) handleMessage(state *gronosState[K], m Message) error {
+func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload) error {
 
-	log.Debug("[GronosMessage] handle message", reflect.TypeOf(m).Name(), m)
+	log.Debug("[GronosMessage] handle message", "name", m.Metadata["$name"], "metadata", m.Metadata, "message", m.Message)
+
+	// clean up pool data
+	defer func() {
+		metadataPool.Put(m.Metadata)
+		messagePayloadPool.Put(m)
+	}()
 
 	// Try to handle the message with the gronos core
 	coreErr := g.handleGronosMessage(state, m)
@@ -63,11 +69,11 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m Message) error {
 	return coreErr
 }
 
-func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m Message) error {
+func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload) error {
 	log.Debug("[GronosMessage] handle gronos message", reflect.TypeOf(m).Name(), m)
 
 	// Error should always be the highest priority
-	switch msg := m.(type) {
+	switch msg := m.Message.(type) {
 	case *RuntimeError[K]:
 		log.Debug("[GronosMessage] [RuntimeError]")
 		g.errChan <- msg.Error
