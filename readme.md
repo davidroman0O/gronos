@@ -231,7 +231,7 @@ Gronos provides integration with the Watermill library, allowing you to easily i
 ```go
 import (
     "github.com/davidroman0O/gronos"
-    watermillext "github.com/davidroman0O/gronos/watermill"
+    watermillext "github.com/davidroman0O/gronos/extensions/watermill"
 )
 
 func main() {

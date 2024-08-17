@@ -27,7 +27,7 @@ To use Watermill with Gronos, you need to set up the Watermill middleware:
 import (
     "github.com/ThreeDotsLabs/watermill"
     "github.com/davidroman0O/gronos"
-    watermillext "github.com/davidroman0O/gronos/watermill"
+    watermillext "github.com/davidroman0O/gronos/extensions/watermill"
 )
 
 watermillMiddleware := watermillext.NewWatermillMiddleware[string](watermill.NewStdLogger(true, true))

@@ -9,7 +9,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/ThreeDotsLabs/watermill/pubsub/gochannel"
 	"github.com/davidroman0O/gronos"
-	watermillext "github.com/davidroman0O/gronos/watermill"
+	watermillext "github.com/davidroman0O/gronos/extensions/watermill"
 )
 
 func main() {
