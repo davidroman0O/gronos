@@ -191,7 +191,7 @@ func Merge[K comparable](apps ...map[K]RuntimeApplication) map[K]RuntimeApplicat
 // New creates a new gronos instance with the given context and initial applications.
 func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts ...Option[K]) (*gronos[K], chan error) {
 
-	log.Default().SetLevel(log.DebugLevel) // debug
+	// log.Default().SetLevel(log.DebugLevel) // debug
 
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
