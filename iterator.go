@@ -15,6 +15,7 @@ type LoopableIterator struct {
 	tasks       []CancellableTask
 	index       int
 	mu          sync.Mutex
+	onInit      func(ctx context.Context) (context.Context, error)
 	onError     func(error) error
 	shouldStop  func(error) bool
 	beforeLoop  func(ctx context.Context) error
@@ -59,6 +60,12 @@ func WithAfterLoop(afterLoop func(ctx context.Context) error) LoopableIteratorOp
 	}
 }
 
+func WithOnInit(onInit func(ctx context.Context) (context.Context, error)) LoopableIteratorOption {
+	return func(li *LoopableIterator) {
+		li.onInit = onInit
+	}
+}
+
 func NewLoopableIterator(tasks []CancellableTask, opts ...LoopableIteratorOption) *LoopableIterator {
 	li := &LoopableIterator{
 		tasks:       tasks,
@@ -92,6 +99,15 @@ func (li *LoopableIterator) Run(ctx context.Context) chan error {
 	li.stopCh = make(chan struct{})
 
 	errChan := make(chan error, 1) // Buffered channel to avoid goroutine leak
+
+	if li.onInit != nil {
+		ctx, err := li.onInit(context.Background())
+		if err != nil {
+			errChan <- errors.Join(ErrLoopCritical, err)
+			return errChan
+		}
+		li.ctx = ctx
+	}
 
 	li.wg.Add(1)
 	go func() {
