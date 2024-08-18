@@ -14,12 +14,6 @@ type testState struct {
 
 func TestIteratorStateHOF(t *testing.T) {
 	t.Run("Basic functionality", func(t *testing.T) {
-		appCtx, appCancel := context.WithCancel(context.Background())
-		defer appCancel()
-
-		iterCtx, iterCancel := context.WithCancel(context.Background())
-		defer iterCancel()
-
 		state := &testState{}
 		tasks := []CancellableStateTask[testState]{
 			func(ctx context.Context, s *testState) error {
@@ -29,13 +23,16 @@ func TestIteratorStateHOF(t *testing.T) {
 			},
 		}
 
-		iterApp := IteratorState(iterCtx, tasks, WithInitialState(state))
+		iterApp := IteratorState(tasks, WithInitialState(state))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
 		shutdown := make(chan struct{})
 		errChan := make(chan error, 1)
 
 		go func() {
-			errChan <- iterApp(appCtx, shutdown)
+			errChan <- iterApp(ctx, shutdown)
 		}()
 
 		time.Sleep(100 * time.Millisecond)
@@ -51,10 +48,7 @@ func TestIteratorStateHOF(t *testing.T) {
 		}
 	})
 
-	t.Run("Iterator context cancellation", func(t *testing.T) {
-		appCtx := context.Background()
-		iterCtx, iterCancel := context.WithCancel(context.Background())
-
+	t.Run("Context cancellation", func(t *testing.T) {
 		state := &testState{}
 		tasks := []CancellableStateTask[testState]{
 			func(ctx context.Context, s *testState) error {
@@ -64,52 +58,18 @@ func TestIteratorStateHOF(t *testing.T) {
 			},
 		}
 
-		iterApp := IteratorState(iterCtx, tasks, WithInitialState(state))
+		iterApp := IteratorState(tasks, WithInitialState(state))
 
+		ctx, cancel := context.WithCancel(context.Background())
 		shutdown := make(chan struct{})
 		errChan := make(chan error, 1)
 
 		go func() {
-			errChan <- iterApp(appCtx, shutdown)
+			errChan <- iterApp(ctx, shutdown)
 		}()
 
 		time.Sleep(50 * time.Millisecond)
-		iterCancel()
-
-		err := <-errChan
-		if err != context.Canceled {
-			t.Errorf("Expected context.Canceled, got: %v", err)
-		}
-
-		if atomic.LoadInt32(&state.Counter) == 0 {
-			t.Error("Expected at least one iteration before cancellation")
-		}
-	})
-
-	t.Run("Application context cancellation", func(t *testing.T) {
-		appCtx, appCancel := context.WithCancel(context.Background())
-		iterCtx := context.Background()
-
-		state := &testState{}
-		tasks := []CancellableStateTask[testState]{
-			func(ctx context.Context, s *testState) error {
-				atomic.AddInt32(&s.Counter, 1)
-				time.Sleep(10 * time.Millisecond)
-				return nil
-			},
-		}
-
-		iterApp := IteratorState(iterCtx, tasks, WithInitialState(state))
-
-		shutdown := make(chan struct{})
-		errChan := make(chan error, 1)
-
-		go func() {
-			errChan <- iterApp(appCtx, shutdown)
-		}()
-
-		time.Sleep(50 * time.Millisecond)
-		appCancel()
+		cancel()
 
 		err := <-errChan
 		if err != context.Canceled {
@@ -122,9 +82,6 @@ func TestIteratorStateHOF(t *testing.T) {
 	})
 
 	t.Run("Error handling", func(t *testing.T) {
-		appCtx := context.Background()
-		iterCtx := context.Background()
-
 		expectedError := errors.New("expected error")
 		state := &testState{}
 
@@ -135,7 +92,7 @@ func TestIteratorStateHOF(t *testing.T) {
 			},
 		}
 
-		iterApp := IteratorState(iterCtx, tasks, WithInitialState(state),
+		iterApp := IteratorState(tasks, WithInitialState(state),
 			WithLoopableIteratorStateOptions(
 				WithOnErrorState[testState](func(err error) error {
 					return errors.Join(err, ErrLoopCritical)
@@ -143,11 +100,12 @@ func TestIteratorStateHOF(t *testing.T) {
 			),
 		)
 
+		ctx := context.Background()
 		shutdown := make(chan struct{})
 		errChan := make(chan error, 1)
 
 		go func() {
-			errChan <- iterApp(appCtx, shutdown)
+			errChan <- iterApp(ctx, shutdown)
 		}()
 
 		select {
@@ -168,9 +126,6 @@ func TestIteratorStateHOF(t *testing.T) {
 	})
 
 	t.Run("Shutdown signal", func(t *testing.T) {
-		appCtx := context.Background()
-		iterCtx := context.Background()
-
 		state := &testState{}
 		tasks := []CancellableStateTask[testState]{
 			func(ctx context.Context, s *testState) error {
@@ -180,13 +135,14 @@ func TestIteratorStateHOF(t *testing.T) {
 			},
 		}
 
-		iterApp := IteratorState(iterCtx, tasks, WithInitialState(state))
+		iterApp := IteratorState(tasks, WithInitialState(state))
 
+		ctx := context.Background()
 		shutdown := make(chan struct{})
 		errChan := make(chan error, 1)
 
 		go func() {
-			errChan <- iterApp(appCtx, shutdown)
+			errChan <- iterApp(ctx, shutdown)
 		}()
 
 		time.Sleep(50 * time.Millisecond)
@@ -203,9 +159,6 @@ func TestIteratorStateHOF(t *testing.T) {
 	})
 
 	t.Run("Critical error handling", func(t *testing.T) {
-		appCtx := context.Background()
-		iterCtx := context.Background()
-
 		criticalErr := errors.New("critical error")
 		state := &testState{}
 		tasks := []CancellableStateTask[testState]{
@@ -215,13 +168,14 @@ func TestIteratorStateHOF(t *testing.T) {
 			},
 		}
 
-		iterApp := IteratorState(iterCtx, tasks, WithInitialState(state))
+		iterApp := IteratorState(tasks, WithInitialState(state))
 
+		ctx := context.Background()
 		shutdown := make(chan struct{})
 		errChan := make(chan error, 1)
 
 		go func() {
-			errChan <- iterApp(appCtx, shutdown)
+			errChan <- iterApp(ctx, shutdown)
 		}()
 
 		err := <-errChan
@@ -235,9 +189,6 @@ func TestIteratorStateHOF(t *testing.T) {
 	})
 
 	t.Run("Error handling and graceful shutdown", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
 		expectedError := errors.New("expected error")
 		state := &testState{}
 		var cleanupExecuted int32
@@ -249,11 +200,11 @@ func TestIteratorStateHOF(t *testing.T) {
 		tasks := []CancellableStateTask[testState]{
 			func(ctx context.Context, s *testState) error {
 				atomic.AddInt32(&s.Counter, 1)
-				return expectedError // will be wrapped...
+				return expectedError
 			},
 		}
 
-		iterApp := IteratorState(ctx, tasks, WithInitialState(state),
+		iterApp := IteratorState(tasks, WithInitialState(state),
 			WithLoopableIteratorStateOptions(
 				WithOnErrorState[testState](func(err error) error {
 					return errors.Join(ErrLoopCritical, err)
@@ -262,6 +213,7 @@ func TestIteratorStateHOF(t *testing.T) {
 			),
 		)
 
+		ctx, cancel := context.WithCancel(context.Background())
 		g, errChan := New[string](ctx, map[string]RuntimeApplication{
 			"iterator": iterApp,
 		})
@@ -280,7 +232,6 @@ func TestIteratorStateHOF(t *testing.T) {
 			if !errors.Is(err, ErrLoopCritical) || !errors.Is(err, expectedError) {
 				t.Errorf("Expected ErrLoopCritical and %v, got: %v", expectedError, err)
 			}
-
 		case <-time.After(1 * time.Second):
 			t.Error("Timeout waiting for error")
 		}
@@ -293,12 +244,7 @@ func TestIteratorStateHOF(t *testing.T) {
 			t.Error("Expected cleanup (extraCancel) to be executed")
 		}
 	})
-
 	t.Run("BeforeLoop and AfterLoop hooks", func(t *testing.T) {
-		appCtx := context.Background()
-		iterCtx, iterCancel := context.WithCancel(context.Background())
-		defer iterCancel()
-
 		state := &testState{}
 		var beforeLoopCount, afterLoopCount int32
 
@@ -310,7 +256,7 @@ func TestIteratorStateHOF(t *testing.T) {
 			},
 		}
 
-		iterApp := IteratorState(iterCtx, tasks, WithInitialState(state),
+		iterApp := IteratorState(tasks, WithInitialState(state),
 			WithLoopableIteratorStateOptions(
 				WithBeforeLoopState[testState](func(ctx context.Context, s *testState) error {
 					atomic.AddInt32(&beforeLoopCount, 1)
@@ -323,11 +269,14 @@ func TestIteratorStateHOF(t *testing.T) {
 			),
 		)
 
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
 		shutdown := make(chan struct{})
 		errChan := make(chan error, 1)
 
 		go func() {
-			errChan <- iterApp(appCtx, shutdown)
+			errChan <- iterApp(ctx, shutdown)
 		}()
 
 		time.Sleep(100 * time.Millisecond)

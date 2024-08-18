@@ -74,7 +74,6 @@ func main() {
 	extraCtx = context.WithValue(extraCtx, "key", &valueOfTime)
 
 	g.Add("iteratorApp", gronos.Iterator(
-		extraCtx,
 		steps,
 		gronos.WithLoopableIteratorOptions(
 			gronos.WithExtraCancel(cancelExtra),

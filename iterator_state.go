@@ -33,13 +33,13 @@ func WithInitialState[T any](state *T) IteratorStateOption[T] {
 }
 
 // IteratorState creates a RuntimeApplication that uses a LoopableIteratorState to execute tasks with a shared state
-func IteratorState[T any](iterCtx context.Context, tasks []CancellableStateTask[T], opts ...IteratorStateOption[T]) RuntimeApplication {
+func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorStateOption[T]) RuntimeApplication {
 	config := &iteratorStateConfig[T]{}
 	for _, opt := range opts {
 		opt(config)
 	}
 
-	return func(appCtx context.Context, shutdown <-chan struct{}) error {
+	return func(ctx context.Context, shutdown <-chan struct{}) error {
 		var state *T
 		if config.state != nil {
 			state = config.state
@@ -48,28 +48,24 @@ func IteratorState[T any](iterCtx context.Context, tasks []CancellableStateTask[
 		}
 
 		li := NewLoopableIteratorState(tasks, state, config.loopOpts...)
-		errChan := li.Run(iterCtx)
+		errChan := li.Run(ctx)
 
 		var finalErr error
 		select {
-		case <-iterCtx.Done():
+		case <-ctx.Done():
 			li.Cancel()
-			finalErr = iterCtx.Err()
-		case <-appCtx.Done():
-			li.Cancel()
-			finalErr = appCtx.Err()
+			finalErr = ctx.Err()
 		case <-shutdown:
 			li.Cancel()
 		case err, ok := <-errChan:
 			if !ok {
-				// Error channel closed, iterator has finished
 				return nil
 			}
 			li.Cancel()
 			finalErr = err
 		}
 
-		li.Wait() // Wait for the iterator to finish
+		li.Wait()
 
 		return finalErr
 	}

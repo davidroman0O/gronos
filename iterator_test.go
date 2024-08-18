@@ -10,9 +10,6 @@ import (
 
 func TestLoopableIterator(t *testing.T) {
 	t.Run("Basic functionality", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
 		var counter int32
 		tasks := []CancellableTask{
 			func(ctx context.Context) error {
@@ -26,10 +23,11 @@ func TestLoopableIterator(t *testing.T) {
 		}
 
 		li := NewLoopableIterator(tasks)
+		ctx, cancel := context.WithCancel(context.Background())
 		errChan := li.Run(ctx)
 
 		time.Sleep(100 * time.Millisecond)
-		li.Cancel()
+		cancel()
 
 		for err := range errChan {
 			if err != context.Canceled {
@@ -43,9 +41,6 @@ func TestLoopableIterator(t *testing.T) {
 	})
 
 	t.Run("Error handling", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
 		errExpected := errors.New("expected error")
 		var errCount int32
 
@@ -57,13 +52,14 @@ func TestLoopableIterator(t *testing.T) {
 		}
 
 		li := NewLoopableIterator(tasks)
+		ctx, cancel := context.WithCancel(context.Background())
 		errChan := li.Run(ctx)
 
 		// Wait for a short time to allow multiple errors to occur
 		time.Sleep(100 * time.Millisecond)
 
 		// Cancel the iterator
-		li.Cancel()
+		cancel()
 
 		// Collect all errors from the channel
 		var receivedErrors []error
@@ -116,9 +112,6 @@ func TestLoopableIterator(t *testing.T) {
 	})
 
 	t.Run("Before and after hooks", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
 		var beforeCount, afterCount, taskCount int32
 
 		li := NewLoopableIterator(
@@ -138,10 +131,11 @@ func TestLoopableIterator(t *testing.T) {
 			}),
 		)
 
+		ctx, cancel := context.WithCancel(context.Background())
 		errChan := li.Run(ctx)
 
 		time.Sleep(100 * time.Millisecond)
-		li.Cancel()
+		cancel()
 
 		for range errChan {
 			// Drain the channel
