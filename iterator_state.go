@@ -59,6 +59,7 @@ func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorState
 		select {
 		case <-ctx.Done():
 			log.Info("[Iterator State] Context done")
+			li.Stop()
 			li.Cancel()
 			finalErr = ctx.Err()
 		case <-shutdown:

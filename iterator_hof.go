@@ -38,6 +38,7 @@ func Iterator(tasks []CancellableTask, opts ...IteratorOption) RuntimeApplicatio
 		select {
 		case <-ctx.Done():
 			log.Debug("[Iterator] Context done")
+			li.Stop()
 			li.Cancel()
 			finalErr = ctx.Err()
 		case <-shutdown:
