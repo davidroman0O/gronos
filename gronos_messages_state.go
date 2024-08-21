@@ -154,13 +154,15 @@ func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload)
 }
 
 func (g *gronos[K]) handleRequestStatus(state *gronosState[K], key K, response chan<- StatusState) error {
+	defer close(response)
 	var value any
 	var ok bool
 	if value, ok = state.mstatus.Load(key); !ok {
-		return fmt.Errorf("app not found (status property) %v", key)
+		response <- StatusNotFound
+		// return fmt.Errorf("app not found (status property) %v", key)
+		return nil
 	}
 	response <- value.(StatusState)
-	close(response)
 	return nil
 }
 

@@ -13,7 +13,12 @@ import (
 type AddMessage[K comparable] struct {
 	KeyMessage[K]
 	RuntimeApplication
-	done chan struct{}
+	RequestMessage[K, struct{}]
+}
+
+type RemoveMessage[K comparable] struct {
+	KeyMessage[K]
+	RequestMessage[K, bool]
 }
 
 type RuntimeError[K comparable] struct {
@@ -46,7 +51,6 @@ type CancelledShutdown[K comparable] struct {
 
 type TerminatedShutdown[K comparable] struct {
 	RequestMessage[K, struct{}]
-	ResponseChan chan chan struct{}
 }
 
 type PanickedShutdown[K comparable] struct {
@@ -61,9 +65,15 @@ type ErroredShutdown[K comparable] struct {
 	RequestMessage[K, struct{}]
 }
 
-var addRuntimeApplicationPoolInited bool = false
+type GetListRuntimeApplication[K comparable] struct {
+	RequestMessage[K, []K]
+}
 
+var addRuntimeApplicationPoolInited bool = false
 var addRuntimeApplicationPool sync.Pool
+
+var removeRuntimeApplicationPoolInited bool = false
+var removeRuntimeApplicationPool sync.Pool
 
 var cancelShutdownPoolInited bool = false
 var cancelShutdownPool sync.Pool
@@ -83,6 +93,23 @@ var panickedShutdownPool sync.Pool
 var erroredShutdownPoolInited bool = false
 var erroredShutdownPool sync.Pool
 
+var getListRuntimeApplicationPoolInited bool = false
+var getListRuntimeApplicationPool sync.Pool
+
+func MsgGetListRuntimeApplication[K comparable]() (<-chan []K, *GetListRuntimeApplication[K]) {
+	if !getListRuntimeApplicationPoolInited {
+		getListRuntimeApplicationPoolInited = true
+		getListRuntimeApplicationPool = sync.Pool{
+			New: func() any {
+				return &GetListRuntimeApplication[K]{}
+			},
+		}
+	}
+	msg := getListRuntimeApplicationPool.Get().(*GetListRuntimeApplication[K])
+	msg.Response = make(chan []K, 1)
+	return msg.Response, msg
+}
+
 func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddMessage[K]) {
 	if !addRuntimeApplicationPoolInited {
 		addRuntimeApplicationPoolInited = true
@@ -95,8 +122,23 @@ func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddM
 	msg := addRuntimeApplicationPool.Get().(*AddMessage[K])
 	msg.Key = key
 	msg.RuntimeApplication = app
-	msg.done = make(chan struct{}, 1)
-	return msg.done, msg
+	msg.Response = make(chan struct{}, 1)
+	return msg.Response, msg
+}
+
+func MsgRemove[K comparable](key K) (<-chan bool, *RemoveMessage[K]) {
+	if !removeRuntimeApplicationPoolInited {
+		removeRuntimeApplicationPoolInited = true
+		removeRuntimeApplicationPool = sync.Pool{
+			New: func() any {
+				return &RemoveMessage[K]{}
+			},
+		}
+	}
+	msg := removeRuntimeApplicationPool.Get().(*RemoveMessage[K])
+	msg.Key = key
+	msg.Response = make(chan bool, 1)
+	return msg.Response, msg
 }
 
 func MsgForceCancelShutdown[K comparable](key K, err error) (<-chan struct{}, *ForceCancelShutdown[K]) {
@@ -202,7 +244,11 @@ func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *Me
 	case *AddMessage[K]:
 		log.Debug("[GronosMessage] [AddMessage]", msg.Key)
 		defer addRuntimeApplicationPool.Put(msg)
-		return g.handleAddRuntimeApplication(state, msg.Key, msg.done, msg.RuntimeApplication), true
+		return g.handleAddRuntimeApplication(state, msg.Key, msg.Response, msg.RuntimeApplication), true
+	case *RemoveMessage[K]:
+		log.Debug("[GronosMessage] [RemoveMessage]", msg.Key)
+		defer removeRuntimeApplicationPool.Put(msg)
+		return g.handleRemoveRuntimeApplication(state, msg.Key, m.Metadata, msg.Response), true
 	case *CancelledShutdown[K]:
 		log.Debug("[GronosMessage] [CancelShutdown]", msg.Key)
 		defer cancelShutdownPool.Put(msg)
@@ -226,9 +272,84 @@ func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *Me
 	case *ForceTerminateShutdown[K]:
 		defer forceTerminateShutdownPool.Put(msg)
 		log.Debug("[GronosMessage] [ForceTerminateShutdown]")
-		return g.handleForceTerminateShutdown(state, msg.Key), true
+		return g.handleForceTerminateShutdown(state, msg.Key, msg.Response), true
+	case *GetListRuntimeApplication[K]:
+		log.Debug("[GronosMessage] [GetListRuntimeApplication]")
+		defer getListRuntimeApplicationPool.Put(msg)
+		return g.handleRequestListRuntimeApplication(state, msg.Response), true
+	default:
+		return nil, false
 	}
-	return nil, false
+}
+
+func (g *gronos[K]) handleRequestListRuntimeApplication(state *gronosState[K], response chan []K) error {
+	defer close(response)
+	var list []K
+	state.mkeys.Range(func(k, v any) bool {
+		list = append(list, k.(K))
+		return true
+	})
+	response <- list
+	return nil
+}
+
+// need to check if the have it or not, terminate it and remove it
+// it's an async process
+func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K, metadata map[string]interface{}, done chan bool) error {
+
+	if state.shutting.Load() {
+		return fmt.Errorf("gronos is shutting down")
+	}
+
+	remove := func() {
+		state.mkeys.Delete(key)
+		state.mapp.Delete(key)
+		state.mctx.Delete(key)
+		state.mcom.Delete(key)
+		state.mshu.Delete(key)
+		state.mali.Delete(key)
+		state.mrea.Delete(key)
+		state.mstatus.Delete(key)
+		state.mret.Delete(key)
+		state.mdone.Delete(key)
+		state.mcloser.Delete(key)
+		state.mcancel.Delete(key)
+		log.Debug("[GronosMessage] [RemoveMessage] application removed", key)
+		if value, ok := state.mkeys.Load(key); ok {
+			log.Warn("[GronosMessage] [RemoveMessage] application still exists", key, value)
+		} else {
+			log.Warn("[GronosMessage] [RemoveMessage] application not found", key)
+		}
+		done <- true
+		close(done)
+	}
+
+	log.Debug("[GronosMessage] [RemoveMessage] remove application", key)
+
+	var value any
+	var ok bool
+	if value, ok = state.mali.Load(key); !ok {
+		log.Debug("[GronosMessage] [RemoveMessage] application not found", key) // but that's fine
+		remove()
+		return nil
+	}
+	if !value.(bool) {
+		log.Debug("[GronosMessage] [RemoveMessage] application already dead", key) // but that's fine
+		remove()
+		return nil
+	} else {
+		// then it will be async
+		go func(whenTerminated <-chan struct{}) {
+			log.Debug("[GronosMessage] [RemoveMessage] terminate application", key)
+			<-whenTerminated
+			remove()
+		}(
+			g.sendMessageWait(metadata, func() (<-chan struct{}, Message) {
+				return MsgForceTerminateShutdown(key)
+			}),
+		)
+		return nil
+	}
 }
 
 func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, done chan struct{}, app RuntimeApplication) error {
@@ -318,7 +439,8 @@ func (g *gronos[K]) handleForceCancelShutdown(state *gronosState[K], key K, err 
 	return nil
 }
 
-func (g *gronos[K]) handleForceTerminateShutdown(state *gronosState[K], key K) error {
+func (g *gronos[K]) handleForceTerminateShutdown(state *gronosState[K], key K, response chan struct{}) error {
+	defer close(response)
 	var value any
 	var ok bool
 	if value, ok = state.mali.Load(key); !ok {

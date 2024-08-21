@@ -75,6 +75,7 @@ const (
 	StatusShutdownPanicked   StatusState = "shutdown_panicked"
 	StatusShutdownTerminated StatusState = "shutdown_terminated"
 	StatusShutdownError      StatusState = "shutdown_error"
+	StatusNotFound           StatusState = "shutdown_not_found"
 )
 
 func stateNumber(state StatusState) int {
@@ -104,7 +105,9 @@ type RuntimeApplication func(ctx context.Context, shutdown <-chan struct{}) erro
 type gronosConfig struct {
 	shutdownBehavior ShutdownBehavior
 	gracePeriod      time.Duration
+	immediatePeriod  time.Duration
 	minRuntime       time.Duration
+	wait             bool
 }
 
 type MessagePayload struct {
@@ -166,6 +169,7 @@ type gronosState[K comparable] struct {
 	mstatus sync.Map // status - key is mkey
 	mdone   sync.Map // done - key is mkey
 
+	wait              sync.WaitGroup
 	automaticShutdown atomic.Bool
 	shutting          atomic.Bool
 }
@@ -207,11 +211,17 @@ func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts 
 		errChan:    make(chan error, 100),
 		extensions: []Extension[K]{},
 		config: gronosConfig{
-			// TODO: make it configurable
-			// TODO: make a sub shutdown struct
 			shutdownBehavior: ShutdownManual,
-			gracePeriod:      2 * time.Second,
-			minRuntime:       2 * time.Second,
+			// We do not guarantee the delay we will wait for your RuntimeApplication to shutdown
+			// We have a grace period for which we will wait before unleaching the immediate period timer
+			gracePeriod: 10 * time.Millisecond,
+			// If you don't shutdown in the grace period, we will wait for the immediate period, then immediately panic them all
+			immediatePeriod: 10 * time.Millisecond,
+			// In automatic shutdown, we will wait AT LEAST this duration before allowing the shutdown
+			minRuntime: 0,
+			// By default, we won't wait for your RuntimeApplication to shutdown, but you can allow to still force gronos to wait
+			// But after the immediatePeriod + gracePeriod, it will still panic (except if you set it to zero)!
+			wait: false,
 		},
 		init: init,
 	}
@@ -276,13 +286,18 @@ func (g *gronos[K]) Start() chan error {
 }
 
 // Shutdown initiates the shutdown process for all applications managed by the gronos instance.
-func (g *gronos[K]) Shutdown() {
+func (g *gronos[K]) Shutdown() bool {
+	if time.Since(g.startTime) < g.config.minRuntime {
+		log.Debug("[Gronos] Runtime is less than minRuntime, delaying shutdown")
+		return false
+	}
 	if !g.isShutting.CompareAndSwap(false, true) {
 		log.Debug("[Gronos] Shutdown already in progress")
-		return
+		return false
 	}
 	log.Debug("[Gronos] Initiating shutdown")
 	close(g.shutdownChan)
+	return true
 }
 
 // Wait blocks until all applications managed by the gronos instance have terminated.
@@ -297,6 +312,7 @@ func (g *gronos[K]) Wait() {
 
 	_, ok := <-g.doneChan
 	log.Debug("[Gronos] wait done", ok)
+	<-time.After(time.Second / 5)
 }
 
 // OnDone returns the done channel, which will be closed when all runtimes have terminated.
@@ -336,6 +352,18 @@ func (g *gronos[K]) getSystemMetadata() map[string]interface{} {
 	metadata["$id"] = 0
 	metadata["$key"] = "system"
 	return metadata
+}
+
+func (g *gronos[K]) Send(m Message) bool {
+	return g.sendMessage(g.getSystemMetadata(), m)
+}
+
+func (g *gronos[K]) WaitFor(fn FnWait) <-chan struct{} {
+	return g.sendMessageWait(g.getSystemMetadata(), fn)
+}
+
+func (g *gronos[K]) Confirm(fn FnConfirm) <-chan bool {
+	return g.sendMessageConfirm(g.getSystemMetadata(), fn)
 }
 
 func (g *gronos[K]) sendMessage(metadata map[string]interface{}, m Message) bool {
@@ -429,6 +457,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 	}()
 
 	state := &gronosState[K]{}
+	g.startTime = time.Now()
 
 	// global shutdown or cancellation detection
 	go func() {
@@ -447,6 +476,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			errChan <- err
 		}
 	}
+	log.Warn("[Gronos] Communication channel closed")
 }
 
 // IsStarted checks if a component has started
@@ -464,11 +494,67 @@ func (g *gronos[K]) IsComplete(k K) bool {
 		state == StatusShutdownPanicked)
 }
 
+func (g *gronos[K]) IsMissing(k K) bool {
+	state := g.GetStatus(k)
+	return (state == StatusNotFound)
+}
+
 // GetStatus retrieves the current status of a component
 func (g *gronos[K]) GetStatus(k K) StatusState {
 	done, msg := MsgRequestStatus(k)
 	g.sendMessage(g.getSystemMetadata(), msg)
 	return <-done
+}
+
+func (g *gronos[K]) GetList() ([]K, error) {
+	done, msg := MsgGetListRuntimeApplication[K]()
+	g.sendMessage(g.getSystemMetadata(), msg)
+	return <-done, nil
+}
+
+// ShutdownAndWait initiates shutdown for specified applications and waits for their completion.
+// It returns a map of application keys to their final status.
+func (g *gronos[K]) ShutdownAndWait(keys ...K) map[K]StatusState {
+	results := make(map[K]StatusState)
+	var wg sync.WaitGroup
+
+	for _, key := range keys {
+		wg.Add(1)
+		go func(k K) {
+			defer wg.Done()
+
+			// Request current status
+			status := g.GetStatus(k)
+
+			// If the application is not already in a final state, initiate shutdown
+			if status != StatusShutdownCancelled &&
+				status != StatusShutdownError &&
+				status != StatusShutdownTerminated &&
+				status != StatusShutdownPanicked {
+
+				// Initiate terminate shutdown
+				_, msg := MsgForceTerminateShutdown(k)
+				g.sendMessage(g.getSystemMetadata(), msg)
+
+				// Wait for the application to reach a final state
+				for {
+					status = g.GetStatus(k)
+					if status == StatusShutdownCancelled ||
+						status == StatusShutdownError ||
+						status == StatusShutdownTerminated ||
+						status == StatusShutdownPanicked {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+
+			results[k] = status
+		}(key)
+	}
+
+	wg.Wait()
+	return results
 }
 
 type addOptions struct {
@@ -614,12 +700,12 @@ func UseBusWait(ctx context.Context) (func(fn FnWait) <-chan struct{}, error) {
 	return value.(func(fn FnWait) <-chan struct{}), nil
 }
 
-func UseBusConfirm(ctx context.Context) (func(fn FnWait) <-chan bool, error) {
+func UseBusConfirm(ctx context.Context) (func(fn FnConfirm) <-chan bool, error) {
 	value := ctx.Value(comKeyConfirm)
 	if value == nil {
 		return nil, fmt.Errorf("com not found in context")
 	}
-	return value.(func(fn FnWait) <-chan bool), nil
+	return value.(func(fn FnConfirm) <-chan bool), nil
 }
 
 func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {
@@ -634,8 +720,37 @@ func WithGracePeriod[K comparable](period time.Duration) Option[K] {
 	}
 }
 
+func WithImmediatePeriod[K comparable](period time.Duration) Option[K] {
+	return func(g *gronos[K]) {
+		g.config.immediatePeriod = period
+	}
+}
+func WithWait[K comparable]() Option[K] {
+	return func(g *gronos[K]) {
+		g.config.wait = true
+	}
+}
+
 func WithMinRuntime[K comparable](duration time.Duration) Option[K] {
 	return func(g *gronos[K]) {
 		g.config.minRuntime = duration
+	}
+}
+
+func WithoutImmediatePeriod[K comparable]() Option[K] {
+	return func(g *gronos[K]) {
+		g.config.immediatePeriod = 0
+	}
+}
+
+func WithoutGracePeriod[K comparable]() Option[K] {
+	return func(g *gronos[K]) {
+		g.config.gracePeriod = 0
+	}
+}
+
+func WithoutMinRuntime[K comparable]() Option[K] {
+	return func(g *gronos[K]) {
+		g.config.minRuntime = 0
 	}
 }
