@@ -33,6 +33,7 @@ func Iterator(tasks []CancellableTask, opts ...IteratorOption) RuntimeApplicatio
 		errChan := li.Run(ctx)
 		log.Debug("[Iterator] Starting iterator")
 
+		defer li.Cancel()
 		var finalErr error
 		select {
 		case <-ctx.Done():
@@ -41,6 +42,7 @@ func Iterator(tasks []CancellableTask, opts ...IteratorOption) RuntimeApplicatio
 			finalErr = ctx.Err()
 		case <-shutdown:
 			log.Debug("[Iterator] Shutdown")
+			li.Stop()
 			li.Cancel()
 		case err, ok := <-errChan:
 			if !ok {

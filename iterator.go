@@ -3,6 +3,7 @@ package gronos
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -129,6 +130,7 @@ func (li *LoopableIterator) Run(ctx context.Context) chan error {
 						}
 					}
 				}
+				runtime.Gosched()
 			}
 		}
 	}()

@@ -256,7 +256,9 @@ func TestIteratorStateHOF(t *testing.T) {
 			},
 		}
 
-		iterApp := IteratorState(tasks, WithInitialState(state),
+		iterApp := IteratorState(
+			tasks,
+			WithInitialState(state),
 			WithLoopableIteratorStateOptions(
 				WithBeforeLoopState[testState](func(ctx context.Context, s *testState) error {
 					atomic.AddInt32(&beforeLoopCount, 1)

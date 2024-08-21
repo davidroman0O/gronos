@@ -3,8 +3,11 @@ package gronos
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
+
+	"github.com/charmbracelet/log"
 )
 
 // CancellableStateTask represents a task that can be cancelled and operates on a state
@@ -39,6 +42,7 @@ func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorState
 		opt(config)
 	}
 
+	log.Info("[Iterator State] Creating iterator")
 	return func(ctx context.Context, shutdown <-chan struct{}) error {
 		var state *T
 		if config.state != nil {
@@ -50,12 +54,16 @@ func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorState
 		li := NewLoopableIteratorState(tasks, state, config.loopOpts...)
 		errChan := li.Run(ctx)
 
+		log.Info("[Iterator State] Starting iterator")
 		var finalErr error
 		select {
 		case <-ctx.Done():
+			log.Info("[Iterator State] Context done")
 			li.Cancel()
 			finalErr = ctx.Err()
 		case <-shutdown:
+			log.Info("[Iterator State] Shutdown")
+			li.Stop()
 			li.Cancel()
 		case err, ok := <-errChan:
 			if !ok {
@@ -63,6 +71,7 @@ func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorState
 			}
 			li.Cancel()
 			finalErr = err
+			log.Info("[Iterator State] Error", finalErr)
 		}
 
 		li.Wait()
@@ -174,7 +183,10 @@ func (li *LoopableIteratorState[T]) Run(ctx context.Context) chan error {
 
 	li.wg.Add(1)
 	go func() {
-		defer li.cleanup(errChan)
+		defer func() {
+			li.cleanup(errChan)
+			log.Info("LoopableIteratorState cleanup")
+		}()
 
 		for {
 			select {
@@ -192,6 +204,7 @@ func (li *LoopableIteratorState[T]) Run(ctx context.Context) chan error {
 						}
 					}
 				}
+				runtime.Gosched()
 			}
 		}
 	}()
