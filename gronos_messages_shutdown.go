@@ -92,18 +92,19 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 	go func() {
 
 		metadata := g.getSystemMetadata()
-		select {
-		case <-whenAll:
-			log.Debug("[GronosMessage] all app really shutdown")
-		case <-time.AfterFunc(g.config.gracePeriod, func() {
-			g.sendMessage(metadata, MsgGracePeriodExceeded[K]())
-		}).C:
-			log.Debug("[GronosMessage] grace period exceeded")
+
+		if g.config.immediatePeriod > 0 {
+			select {
+			case <-whenAll:
+				log.Debug("[GronosMessage] all app really shutdown")
+			case <-time.AfterFunc(g.config.gracePeriod+g.config.immediatePeriod, func() { // you're really dead fr fr no cap
+				g.sendMessage(metadata, MsgGracePeriodExceeded[K]())
+			}).C:
+				log.Debug("[GronosMessage] grace period exceeded")
+			}
+			log.Debug("[GronosMessage] check all application are last state")
 		}
 
-		log.Debug("[GronosMessage] check all application are last state")
-
-		log.Debug("[GronosMessage] all applications are shutdown")
 		g.sendMessage(metadata, &ShutdownComplete[K]{})
 		log.Debug("[GronosMessage] sent shutdown complete")
 	}()

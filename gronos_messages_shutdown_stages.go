@@ -68,6 +68,7 @@ func (g *gronos[K]) handleShutdownStagesMessage(state *gronosState[K], m *Messag
 	return nil, false
 }
 
+// You choose violence
 func (g *gronos[K]) handleGracePeriodExceeded(state *gronosState[K]) error {
 	if !state.allApplicationsTerminated() {
 		log.Error("[Gronos] Shutdown grace period exceeded, some applications failed to terminate in a timely manner")
@@ -103,9 +104,21 @@ func (g *gronos[K]) checkRemainingApps(state *gronosState[K]) {
 }
 
 func (g *gronos[K]) handleShutdownComplete(state *gronosState[K]) error {
-	log.Debug("[GronosMessage] Shutdown complete")
-	metadata := g.getSystemMetadata()
-	g.sendMessage(metadata, &Destroy[K]{})
+	log.Debug("[GronosMessage] Shutdown waiting")
+	go func() {
+		if g.config.gracePeriod > 0 {
+			<-time.After(g.config.gracePeriod)
+		}
+		if g.config.wait {
+			state.wait.Wait()
+		}
+		metadata := g.getSystemMetadata()
+		if !g.sendMessage(metadata, &Destroy[K]{}) {
+			log.Error("[GronosMessage] Failed to send destroy message")
+		}
+		log.Debug("[GronosMessage] Shutdown complete")
+	}()
+	state.wait.Wait()
 	return nil
 }
 

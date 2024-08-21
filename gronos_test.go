@@ -32,7 +32,7 @@ func TestGronos(t *testing.T) {
 					}
 				},
 			},
-			WithMinRuntime[string](time.Second/2), WithGracePeriod[string](time.Second/2),
+			WithGracePeriod[string](time.Second/2),
 		)
 
 		<-appStarted
@@ -127,7 +127,8 @@ func TestGronos(t *testing.T) {
 			"error-app": func(ctx context.Context, shutdown <-chan struct{}) error {
 				return expectedError
 			},
-		})
+		},
+			WithoutMinRuntime[string]())
 
 		select {
 		case err := <-cerrors:
@@ -306,5 +307,131 @@ func TestWorker(t *testing.T) {
 				}
 			})
 		}
+	})
+
+	t.Run("Workers shutdown different times with shtudown", func(t *testing.T) {
+		var testCases []struct {
+			instances          int
+			timeShutdowns      []time.Duration
+			timeAfterShutdowns []time.Duration
+			behaviour          ShutdownBehavior
+			gracePeriod        time.Duration
+			shutdown           bool
+		}
+
+		behaviours := []ShutdownBehavior{ShutdownAutomatic, ShutdownManual}
+
+		// let's test all combinations
+		for _, behaviour := range behaviours {
+			testCases = append(testCases, struct {
+				instances          int
+				timeShutdowns      []time.Duration
+				timeAfterShutdowns []time.Duration
+				behaviour          ShutdownBehavior
+				gracePeriod        time.Duration
+				shutdown           bool
+			}{
+				instances:          3,
+				timeShutdowns:      []time.Duration{1, 2, 2},
+				timeAfterShutdowns: []time.Duration{1, 2, 2},
+				gracePeriod:        3 * time.Second,
+				behaviour:          behaviour,
+				shutdown:           true,
+			})
+		}
+
+		testCases = append(testCases, struct {
+			instances          int
+			timeShutdowns      []time.Duration
+			timeAfterShutdowns []time.Duration
+			behaviour          ShutdownBehavior
+			gracePeriod        time.Duration
+			shutdown           bool
+		}{
+			instances:          3,
+			timeShutdowns:      []time.Duration{1, 2, 2},
+			timeAfterShutdowns: []time.Duration{1, 2, 2},
+			gracePeriod:        3 * time.Second,
+			behaviour:          ShutdownAutomatic,
+			shutdown:           false,
+		})
+
+		// We have 3 tests
+		// Automatic means it will continously try to see if there are still running applications
+		// - Automatic + Waiting + Shutdown: 			perfect
+		// - Automatic + Waiting + No Shutdown: 		should works
+		// Manual means it doesn't know when to stop, you have to call Shutdown
+		// - Manual + Waiting + Shutdown:				perfect
+		// Any other cases are failures or the user that didn't read nor understood the documentation OR do it on purpose
+		for _, tc := range testCases {
+			t.Run(fmt.Sprintf("Instances %d - behaviour %v with shutdown %v", tc.instances, tc.behaviour, tc.shutdown), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				endedAfter := make([]time.Duration, tc.instances)
+				endedPostShutdown := make([]time.Duration, tc.instances)
+
+				runtimeApplications := make(map[string]RuntimeApplication)
+				for i := 0; i < tc.instances; i++ {
+					index := i
+					runtimeApplications[fmt.Sprintf("app-%d", i)] = func(ctx context.Context, shutdown <-chan struct{}) error {
+						now := time.Now()
+						defer func() {
+							endedPostShutdown[index] = time.Since(now)
+						}()
+						select {
+						case <-time.After(tc.timeShutdowns[index] * time.Second):
+							endedAfter[index] = time.Since(now)
+							now = time.Now()
+							<-time.After(tc.timeAfterShutdowns[index] * time.Second)
+							return nil
+						case <-shutdown:
+							return nil
+						}
+					}
+				}
+
+				g, cerrors := New[string](
+					ctx,
+					runtimeApplications,
+					WithMinRuntime[string](time.Second/2),
+					WithGracePeriod[string](time.Second/2),
+					WithShutdownBehavior[string](tc.behaviour),
+				)
+
+				go func() {
+					for err := range cerrors {
+						if err != nil {
+							t.Errorf("Unexpected error: %v", err)
+						}
+					}
+				}()
+
+				<-time.After(2 * time.Second)
+
+				if tc.shutdown {
+					fmt.Println("g.Shutdown()")
+					g.Shutdown()
+				}
+
+				fmt.Println("g.Wait()")
+				g.Wait()
+
+				for i, duration := range endedAfter {
+					if duration < tc.timeShutdowns[i]*time.Second {
+						t.Errorf("App %d ended too soon: %v", i, duration)
+					}
+					fmt.Println("App", i, "ended after", duration)
+				}
+
+				for i, duration := range endedPostShutdown {
+					if duration < tc.timeAfterShutdowns[i]*time.Second {
+						t.Errorf("App %d ended too soon after shutdown: %v", i, duration)
+					}
+					fmt.Println("App", i, "ended after shutdown", duration)
+				}
+			})
+		}
+
 	})
 }

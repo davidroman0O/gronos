@@ -500,12 +500,15 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 	log.Debug("[RuntimeApplication] goroutine executed", key)
 
 	errChan := make(chan error, 1)
-	done := make(chan struct{})
+	defer close(errChan)
 
+	done := make(chan struct{})
+	state.wait.Add(1)
 	go func() {
 		defer close(done)
 		log.Debug("[RuntimeApplication] goroutine start", key)
 		defer func() {
+			state.wait.Done()
 			if r := recover(); r != nil {
 				var err error
 				switch v := r.(type) {
@@ -538,6 +541,9 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 	log.Debug("[RuntimeApplication] waiting goroutine", key)
 
 	var err error
+	// if the context is cancelled => the application is cancelled
+	// if the shutdown channel is closed => the application is terminated
+	// if the done channel is closed => the application is stopped but maybe abrubtly
 	select {
 	case <-ctx.Done():
 		err = ctx.Err()
@@ -545,13 +551,10 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 	case <-done:
 	}
 
-	// Check for any error from the goroutine
-	select {
-	case goroutineErr := <-errChan:
-		if goroutineErr != nil {
-			err = goroutineErr
-		}
-	default:
+	// eitherway, you check for the error
+	goroutineErr := <-errChan
+	if goroutineErr != nil {
+		err = goroutineErr
 	}
 
 	log.Debug("[RuntimeApplication] wait done", "app", key, "err", err)
