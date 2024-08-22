@@ -39,8 +39,7 @@ func MsgInitiateShutdown[K comparable]() *InitiateShutdown[K] {
 	return &InitiateShutdown[K]{}
 }
 
-type Destroy[K comparable] struct {
-}
+type Destroy[K comparable] struct{}
 
 func MsgDestroy[K comparable]() *Destroy[K] {
 	return &Destroy[K]{}
