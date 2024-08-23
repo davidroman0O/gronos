@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
 	"time"
@@ -280,7 +281,6 @@ func CreateRunner(db *comfylite3.ComfyDB, config Config) gronos.RuntimeApplicati
 		}
 
 		var wg sync.WaitGroup
-
 		wait, err := gronos.UseBusWait(ctx)
 		if err != nil {
 			return fmt.Errorf("error using bus wait: %w", err)
@@ -333,6 +333,19 @@ func CreateRunner(db *comfylite3.ComfyDB, config Config) gronos.RuntimeApplicati
 		}
 		log.Println("All data validated successfully.")
 
+		<-wait(func() (<-chan struct{}, gronos.Message) {
+			return gronos.MsgAdd("api", CreateAPI())
+		})
+
+		return nil
+	}
+}
+
+func CreateAPI() gronos.RuntimeApplication {
+	return func(ctx context.Context, shutdown <-chan struct{}) error {
+		log.Println("Starting API server")
+		<-shutdown
+		log.Println("API server stopped")
 		return nil
 	}
 }
@@ -499,7 +512,7 @@ func main() {
 	defer db.Close()
 
 	config := Config{
-		WeeksToFetch: 12,
+		WeeksToFetch: 54,
 		RateLimit:    time.Millisecond * 100,
 	}
 	log.Printf("Configuration: WeeksToFetch=%d, RateLimit=%v", config.WeeksToFetch, config.RateLimit)
@@ -512,9 +525,32 @@ func main() {
 	})
 
 	go func() {
+		<-g.WaitFor(func() (<-chan struct{}, gronos.Message) {
+			return gronos.MsgRequestStatusAsync("btc_data_fetcher", gronos.StatusShutdownTerminated)
+		})
+		fmt.Println("BTC data fetcher has stopped")
+		list, err := g.GetList()
+		if err != nil {
+			log.Printf("Error getting list: %v", err)
+			return
+		}
+		for _, name := range list {
+			log.Printf("running application %s", name)
+		}
+		// might start other things here
+	}()
+
+	go func() {
 		for err := range errChan {
 			log.Printf("Error from gronos: %v", err)
 		}
+	}()
+
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		<-c
+		g.Shutdown()
 	}()
 
 	log.Println("BTC data fetcher is running. Press Ctrl+C to stop.")
