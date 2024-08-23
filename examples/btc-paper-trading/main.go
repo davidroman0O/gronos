@@ -529,15 +529,22 @@ func main() {
 			return gronos.MsgRequestStatusAsync("btc_data_fetcher", gronos.StatusShutdownTerminated)
 		})
 
+		// so it's fine to remove it now
+		<-g.Confirm(func() (<-chan bool, gronos.Message) {
+			return gronos.MsgRemove("btc_data_fetcher")
+		})
+
 		fmt.Println("BTC data fetcher has stopped")
 
 		// TODO: can CLEARLY do it in a concurrent way
 		// Let's terminate all the workers
 		for _, interval := range intervals {
 			// remove the application
-			<-g.Confirm(func() (<-chan bool, gronos.Message) {
+			if !<-g.Confirm(func() (<-chan bool, gronos.Message) {
 				return gronos.MsgRemove(fmt.Sprintf("worker-%s", interval))
-			})
+			}) {
+				log.Printf("Failed to remove worker for interval %s", interval)
+			}
 		}
 
 		list, err := g.GetList()
