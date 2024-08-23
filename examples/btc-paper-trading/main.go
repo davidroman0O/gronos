@@ -337,15 +337,6 @@ func CreateRunner(db *comfylite3.ComfyDB, config Config) gronos.RuntimeApplicati
 	}
 }
 
-func CreateAPI() gronos.RuntimeApplication {
-	return func(ctx context.Context, shutdown <-chan struct{}) error {
-		log.Println("Starting API server")
-		<-shutdown
-		log.Println("API server stopped")
-		return nil
-	}
-}
-
 func getBinanceData(symbol, interval string, startTime, endTime int64) ([]BinanceKline, error) {
 	url := fmt.Sprintf("%s?symbol=%s&interval=%s&startTime=%d&endTime=%d&limit=1000", baseURL, symbol, interval, startTime, endTime)
 	log.Printf("Fetching data from Binance: %s", url)
@@ -558,7 +549,7 @@ func main() {
 		}
 		// might start other things here
 		<-g.WaitFor(func() (<-chan struct{}, gronos.Message) {
-			return gronos.MsgAdd("api", CreateAPI())
+			return gronos.MsgAdd("api", CreateAPI(db))
 		})
 	}()
 
@@ -577,4 +568,147 @@ func main() {
 
 	log.Println("BTC data fetcher is running. Press Ctrl+C to stop.")
 	g.Wait()
+}
+
+func CreateAPI(db *comfylite3.ComfyDB) gronos.RuntimeApplication {
+	return func(ctx context.Context, shutdown <-chan struct{}) error {
+		router := http.NewServeMux()
+
+		router.HandleFunc("/api/klines", handleKlines(db))
+
+		server := &http.Server{
+			Addr:    ":8080",
+			Handler: router,
+		}
+
+		go func() {
+			log.Println("Starting API server on :8080")
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("API server error: %v", err)
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+			log.Println("Context cancelled, stopping API server")
+		case <-shutdown:
+			log.Println("Shutdown signal received, stopping API server")
+		}
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("API server shutdown error: %v", err)
+			return err
+		}
+
+		log.Println("API server stopped")
+		return nil
+	}
+}
+
+func handleKlines(db *comfylite3.ComfyDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		interval := r.URL.Query().Get("interval")
+		if interval == "" {
+			http.Error(w, "Interval parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		startTimeStr := r.URL.Query().Get("start_time")
+		endTimeStr := r.URL.Query().Get("end_time")
+		limit := r.URL.Query().Get("limit")
+
+		startTime, endTime, err := parseTimeRange(startTimeStr, endTimeStr)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		limitInt, err := parseLimit(limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		klines, err := fetchKlinesFromDB(db, interval, startTime, endTime, limitInt)
+		if err != nil {
+			http.Error(w, "Error fetching klines: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(klines)
+	}
+}
+
+func parseTimeRange(startTimeStr, endTimeStr string) (time.Time, time.Time, error) {
+	var startTime, endTime time.Time
+	var err error
+
+	if startTimeStr != "" {
+		startTime, err = time.Parse(time.RFC3339, startTimeStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid start_time format")
+		}
+	} else {
+		startTime = time.Now().AddDate(0, 0, -7) // Default to 1 week ago
+	}
+
+	if endTimeStr != "" {
+		endTime, err = time.Parse(time.RFC3339, endTimeStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid end_time format")
+		}
+	} else {
+		endTime = time.Now() // Default to current time
+	}
+
+	return startTime, endTime, nil
+}
+
+func parseLimit(limitStr string) (int, error) {
+	if limitStr == "" {
+		return 1000, nil // Default limit
+	}
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid limit parameter")
+	}
+
+	if limit <= 0 || limit > 1000 {
+		return 0, fmt.Errorf("limit must be between 1 and 1000")
+	}
+
+	return limit, nil
+}
+
+func fetchKlinesFromDB(db *comfylite3.ComfyDB, interval string, startTime, endTime time.Time, limit int) ([]BinanceKline, error) {
+	query := `
+		SELECT timestamp, open, high, low, close, volume
+		FROM btc_price_data
+		WHERE interval = ? AND timestamp >= ? AND timestamp <= ?
+		ORDER BY timestamp ASC
+		LIMIT ?
+	`
+
+	rows, err := db.Query(query, interval, startTime.UnixMilli(), endTime.UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var klines []BinanceKline
+	for rows.Next() {
+		var k BinanceKline
+		err := rows.Scan(&k.OpenTime, &k.Open, &k.High, &k.Low, &k.Close, &k.Volume)
+		if err != nil {
+			return nil, err
+		}
+		klines = append(klines, k)
+	}
+
+	return klines, nil
 }
