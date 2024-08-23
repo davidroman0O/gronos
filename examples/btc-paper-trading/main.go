@@ -159,7 +159,7 @@ func prepopulateKlines(db *comfylite3.ComfyDB, interval string, startTime, endTi
 		timestamp := alignedTime.UnixMilli() // Convert to milliseconds
 
 		// Log the exact values being used in the update
-		log.Printf("Attempting to pre-populate: timestamp=%d, interval=%s", timestamp, interval)
+		// log.Printf("Attempting to pre-populate: timestamp=%d, interval=%s", timestamp, interval)
 
 		_, err := stmt.Exec(timestamp, interval)
 		if err != nil {
@@ -332,10 +332,6 @@ func CreateRunner(db *comfylite3.ComfyDB, config Config) gronos.RuntimeApplicati
 			return err
 		}
 		log.Println("All data validated successfully.")
-
-		<-wait(func() (<-chan struct{}, gronos.Message) {
-			return gronos.MsgAdd("api", CreateAPI())
-		})
 
 		return nil
 	}
@@ -520,24 +516,43 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g, errChan := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
-		"btc_data_fetcher": CreateRunner(db, config),
-	})
+	g, errChan := gronos.
+		New[string](
+		ctx,
+		map[string]gronos.RuntimeApplication{
+			"btc_data_fetcher": CreateRunner(db, config),
+		})
 
 	go func() {
+		//	listener when it will terminate
 		<-g.WaitFor(func() (<-chan struct{}, gronos.Message) {
 			return gronos.MsgRequestStatusAsync("btc_data_fetcher", gronos.StatusShutdownTerminated)
 		})
+
 		fmt.Println("BTC data fetcher has stopped")
+
+		// TODO: can CLEARLY do it in a concurrent way
+		// Let's terminate all the workers
+		for _, interval := range intervals {
+			// remove the application
+			<-g.Confirm(func() (<-chan bool, gronos.Message) {
+				return gronos.MsgRemove(fmt.Sprintf("worker-%s", interval))
+			})
+		}
+
 		list, err := g.GetList()
 		if err != nil {
 			log.Printf("Error getting list: %v", err)
 			return
 		}
+
 		for _, name := range list {
 			log.Printf("running application %s", name)
 		}
 		// might start other things here
+		<-g.WaitFor(func() (<-chan struct{}, gronos.Message) {
+			return gronos.MsgAdd("api", CreateAPI())
+		})
 	}()
 
 	go func() {
@@ -555,6 +570,4 @@ func main() {
 
 	log.Println("BTC data fetcher is running. Press Ctrl+C to stop.")
 	g.Wait()
-
-	log.Println("BTC data fetching completed.")
 }

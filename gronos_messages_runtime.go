@@ -315,11 +315,6 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 		state.mcloser.Delete(key)
 		state.mcancel.Delete(key)
 		log.Debug("[GronosMessage] [RemoveMessage] application removed", key)
-		if value, ok := state.mkeys.Load(key); ok {
-			log.Warn("[GronosMessage] [RemoveMessage] application still exists", key, value)
-		} else {
-			log.Warn("[GronosMessage] [RemoveMessage] application not found", key)
-		}
 		done <- true
 		close(done)
 	}
@@ -329,7 +324,7 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 	var value any
 	var ok bool
 	if value, ok = state.mali.Load(key); !ok {
-		log.Debug("[GronosMessage] [RemoveMessage] application not found", key) // but that's fine
+		log.Debug("[GronosMessage] [RemoveMessage] malive application not found", key) // but that's fine
 		remove()
 		return nil
 	}
