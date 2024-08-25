@@ -14,6 +14,18 @@ Warning:
 
 > I believe we shouldn't have to choose between building a traditional application and later transitioning to DDD and EDA. We should be able to implement EDA from the beginning and take advantage of its scalability. If all domains and workers can operate across multiple binaries, why not within a single one? The application should be flexible enough to function either as a standalone or distributed system, allowing us to split and scale as needed.
 
+I'm going to change a direction a bit with that library...
+
+Roadmap notes:
+- add hierarchy of lifecycle function
+- a sub-lifecycle function could dies but the supervisor will revive it
+- a sub-lifecycle function could be be restricted for terminating another lifecyle function that is not in the same hierarchy
+- restrict messaging rights based on hierarchy
+- toolbox to create a Shepherd node (gronos instance guiding and managing) and Flock node (processes being guided)
+
+Stuff like that, i have some vision of what i want and NEED, especially what i want to see in our industry.
+
+
 
 <img src="gronos.webp" alt="Gronos" height="400">
 
