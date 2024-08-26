@@ -72,6 +72,13 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload) erro
 func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload) error {
 	log.Debug("[GronosMessage] handle gronos message", reflect.TypeOf(m).Name(), m)
 
+	// While read the rest of the functions: if you're asking "wouldn't be simpler with a map?"
+	// the answer is simple, i don't want to impede on the performance of the user of gronos
+	// since the compiler will optmize for me the switch statement under those functions
+	// If i use a map, sure it might add some flexibility FOR ME but who cares? I will manage it
+	// i don't want YOU to have a map that will add extract code execution time to your code
+	// If you have to use a library, it has to use a less cpu cycle as possible
+
 	// Error should always be the highest priority
 	switch msg := m.Message.(type) {
 	case *RuntimeError[K]:
