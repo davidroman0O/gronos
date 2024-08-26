@@ -319,7 +319,6 @@ func (g *gronos[K]) Wait() {
 
 	_, ok := <-g.doneChan
 	log.Debug("[Gronos] wait done", ok)
-	<-time.After(time.Second / 5)
 }
 
 // OnDone returns the done channel, which will be closed when all runtimes have terminated.
@@ -426,7 +425,7 @@ func (g *gronos[K]) sendMessageConfirm(metadata map[string]interface{}, fn FnCon
 
 // if configured on automatic shutdown, it will check the status of the applications
 func (g *gronos[K]) automaticShutdown() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(time.Second / 6)
 	defer ticker.Stop()
 
 	for {

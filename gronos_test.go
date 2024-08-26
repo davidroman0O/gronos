@@ -60,6 +60,59 @@ func TestGronos(t *testing.T) {
 		}
 	})
 
+	t.Run("Basic removal", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		appStarted := make(chan struct{})
+		appFinished := make(chan struct{})
+
+		g, _ := New[string](
+			ctx,
+			map[string]LifecyleFunc{
+				"test-app": func(ctx context.Context, shutdown <-chan struct{}) error {
+					close(appStarted)
+					select {
+					case <-ctx.Done():
+						close(appFinished)
+						return ctx.Err()
+					case <-shutdown:
+						close(appFinished)
+						return nil
+					}
+				},
+			},
+			WithShutdownBehavior[string](ShutdownAutomatic),
+		)
+
+		<-appStarted
+
+		_, msg := msgTerminatedShutdown("test-app")
+		g.sendMessage(g.getSystemMetadata(), msg)
+
+		removed, msgr := MsgRemove("test-app")
+		g.sendMessage(g.getSystemMetadata(), msgr)
+		<-removed
+
+		data, msgg := MsgRequestGraph[string]()
+		g.Send(msgg)
+		state := <-data
+
+		if state.Size() != 0 {
+			t.Fatalf("Expected 0 applications, got %d", state.Size())
+		}
+
+		select {
+		case <-appFinished:
+			// App finished successfully
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timeout waiting for app to finish")
+		}
+
+		g.Wait()
+
+	})
+
 	t.Run("Multiple applications", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

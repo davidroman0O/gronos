@@ -156,6 +156,6 @@ func (g *gronos[K]) handleDestroy(state *gronosState[K]) error {
 	log.Debug("[GronosMessage] run closing")
 	close(g.com)
 	close(g.doneChan)
-	log.Debug("[GronosMessage] run closed")
+	log.Debug("[GronosMessage] run closed - no more channels")
 	return nil
 }

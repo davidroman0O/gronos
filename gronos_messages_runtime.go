@@ -8,6 +8,7 @@ import (
 
 	"github.com/avast/retry-go/v3"
 	"github.com/charmbracelet/log"
+	"github.com/hmdsefi/gograph"
 )
 
 type AddMessage[K comparable] struct {
@@ -314,6 +315,7 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 		state.mdone.Delete(key)
 		state.mcloser.Delete(key)
 		state.mcancel.Delete(key)
+		state.graph.RemoveVertices(gograph.NewVertex(key))
 		log.Debug("[GronosMessage] [RemoveMessage] application removed", key)
 		done <- true
 		close(done)
@@ -618,6 +620,10 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 
 	errChan := make(chan error, 1)
 	defer close(errChan)
+
+	// TODO: add priority for shutdown as a weight
+	vertex := gograph.NewVertex(key, gograph.WithVertexWeight(1))
+	state.graph.AddVertex(vertex)
 
 	done := make(chan struct{})
 	state.wait.Add(1)
