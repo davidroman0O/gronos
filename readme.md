@@ -6,7 +6,7 @@
 
 Gronos is a concurrent application management library for Go, designed to simplify the process of managing multiple concurrent applications within a single program. It provides a structured approach to application lifecycle management, error handling, and inter-application communication.
 
-> I saw myself writting the same boilerplate code over and over again for Domain Driven Application specifically so I made a library to stop wasting time and repeating myself. Now we can all enjoy a tool to sandbox lifecycled functions aka "runtime applications" broadly known as lifecycle functions.
+> I saw myself writting the same boilerplate code over and over again for Domain Driven Applications specifically so I made a library to stop wasting time and repeating myself. Now we can all enjoy a tool to sandbox lifecycled functions aka "runtime applications" broadly known as lifecycle functions.
 
 Warning:
 
