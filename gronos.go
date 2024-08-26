@@ -501,7 +501,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			errChan <- err
 		}
 	}
-	log.Warn("[Gronos] Communication channel closed")
+	log.Debug("[Gronos] Communication channel closed")
 }
 
 // IsStarted checks if a component has started
