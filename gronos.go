@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+	"github.com/hmdsefi/gograph"
 )
 
 type ctxKey string
@@ -98,9 +99,9 @@ func stateNumber(state StatusState) int {
 	return -1
 }
 
-// RuntimeApplication is a function type representing an application that can be run concurrently.
+// LifecyleFunc is a function type representing an application that can be run concurrently.
 // It takes a context and a shutdown channel as parameters and returns an error.
-type RuntimeApplication func(ctx context.Context, shutdown <-chan struct{}) error
+type LifecyleFunc func(ctx context.Context, shutdown <-chan struct{}) error
 
 type gronosConfig struct {
 	shutdownBehavior ShutdownBehavior
@@ -146,28 +147,34 @@ type gronos[K comparable] struct {
 	isShutting atomic.Bool
 
 	// init map is only used for the initial applications and restarts
-	init map[K]RuntimeApplication
+	init map[K]LifecyleFunc
 
 	shutdownChan chan struct{}
 	doneChan     chan struct{}
 	comClosed    atomic.Bool
 }
 
-// gronos instance doesn't know about the state, you have to request it
+// gronos instance doesn't know about the state, you have to request it for goroutine safety
 type gronosState[K comparable] struct {
-	// TODO: i think i shouldn't have `applications` but split it for each attributes and use messages to mutate it
-	mkeys   sync.Map
-	mapp    sync.Map // application func - key is mkey
-	mctx    sync.Map // ctx - key is mkey
-	mcom    sync.Map // com chan - key is mkey
-	mret    sync.Map // retries - key is mkey
-	mshu    sync.Map // shutdown chan - key is mkey
-	mali    sync.Map // alive - key is mkey
-	mrea    sync.Map // reason - key is mkey
-	mcloser sync.Map // closer - key is mkey
-	mcancel sync.Map // cancel - key is mkey
-	mstatus sync.Map // status - key is mkey
-	mdone   sync.Map // done - key is mkey
+
+	// We need to know dynamically the structure of the application
+	graph gograph.Graph[K]
+
+	// it add a slight overhead in memory but faster access
+	// we mostly do reads so it's fine to have sync.Map
+
+	mkeys   *GMap[K, K]
+	mapp    *GMap[K, LifecyleFunc]         // application func - key is mkey
+	mctx    *GMap[K, context.Context]      // ctx - key is mkey
+	mcom    *GMap[K, chan *MessagePayload] // com chan - key is mkey
+	mret    *GMap[K, uint]                 // retries - key is mkey
+	mshu    *GMap[K, chan struct{}]        // shutdown chan - key is mkey
+	mali    *GMap[K, bool]                 // alive - key is mkey
+	mrea    *GMap[K, error]                // reason - key is mkey
+	mcloser *GMap[K, func()]               // closer - key is mkey
+	mcancel *GMap[K, func()]               // cancel - key is mkey
+	mstatus *GMap[K, StatusState]          // status - key is mkey
+	mdone   *GMap[K, chan struct{}]        // done - key is mkey
 
 	wait              sync.WaitGroup
 	automaticShutdown atomic.Bool
@@ -182,8 +189,8 @@ func WithExtension[K comparable](ext Extension[K]) Option[K] {
 	}
 }
 
-func Merge[K comparable](apps ...map[K]RuntimeApplication) map[K]RuntimeApplication {
-	m := make(map[K]RuntimeApplication)
+func Merge[K comparable](apps ...map[K]LifecyleFunc) map[K]LifecyleFunc {
+	m := make(map[K]LifecyleFunc)
 	for _, app := range apps {
 		for k, v := range app {
 			m[k] = v
@@ -193,7 +200,7 @@ func Merge[K comparable](apps ...map[K]RuntimeApplication) map[K]RuntimeApplicat
 }
 
 // New creates a new gronos instance with the given context and initial applications.
-func New[K comparable](ctx context.Context, init map[K]RuntimeApplication, opts ...Option[K]) (*gronos[K], chan error) {
+func New[K comparable](ctx context.Context, init map[K]LifecyleFunc, opts ...Option[K]) (*gronos[K], chan error) {
 
 	// log.Default().SetLevel(log.DebugLevel) // debug
 
@@ -312,7 +319,6 @@ func (g *gronos[K]) Wait() {
 
 	_, ok := <-g.doneChan
 	log.Debug("[Gronos] wait done", ok)
-	<-time.After(time.Second / 5)
 }
 
 // OnDone returns the done channel, which will be closed when all runtimes have terminated.
@@ -419,7 +425,7 @@ func (g *gronos[K]) sendMessageConfirm(metadata map[string]interface{}, fn FnCon
 
 // if configured on automatic shutdown, it will check the status of the applications
 func (g *gronos[K]) automaticShutdown() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(time.Second / 6)
 	defer ticker.Stop()
 
 	for {
@@ -456,7 +462,26 @@ func (g *gronos[K]) run(errChan chan<- error) {
 		g.sendMessage(g.getSystemMetadata(), MsgDestroy[K]())
 	}()
 
-	state := &gronosState[K]{}
+	state := &gronosState[K]{
+		// dag with weights
+		graph: gograph.New[K](
+			gograph.Directed(),
+			gograph.Acyclic(),
+			gograph.Weighted(),
+		),
+		mkeys:   &GMap[K, K]{},
+		mapp:    &GMap[K, LifecyleFunc]{},
+		mctx:    &GMap[K, context.Context]{},
+		mcom:    &GMap[K, chan *MessagePayload]{},
+		mret:    &GMap[K, uint]{},
+		mshu:    &GMap[K, chan struct{}]{},
+		mali:    &GMap[K, bool]{},
+		mrea:    &GMap[K, error]{},
+		mcloser: &GMap[K, func()]{},
+		mcancel: &GMap[K, func()]{},
+		mstatus: &GMap[K, StatusState]{},
+		mdone:   &GMap[K, chan struct{}]{},
+	}
 	g.startTime = time.Now()
 
 	// global shutdown or cancellation detection
@@ -476,7 +501,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			errChan <- err
 		}
 	}
-	log.Warn("[Gronos] Communication channel closed")
+	log.Debug("[Gronos] Communication channel closed")
 }
 
 // IsStarted checks if a component has started
@@ -569,7 +594,7 @@ func WhenState(state StatusState) addOption {
 	}
 }
 
-func (g *gronos[K]) Push(apps map[K]RuntimeApplication, opts ...addOption) <-chan struct{} {
+func (g *gronos[K]) Push(apps map[K]LifecyleFunc, opts ...addOption) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -586,7 +611,7 @@ func (g *gronos[K]) Push(apps map[K]RuntimeApplication, opts ...addOption) <-cha
 }
 
 // Add adds a new application to the gronos instance with the given key and RuntimeApplication.
-func (g *gronos[K]) Add(k K, v RuntimeApplication, opts ...addOption) <-chan struct{} {
+func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan struct{} {
 	cfg := addOptions{
 		whenState: StatusAdded,
 	}

@@ -17,7 +17,7 @@ func main() {
 
 	g, cerr := gronos.New[string](
 		ctx,
-		map[string]gronos.RuntimeApplication{
+		map[string]gronos.LifecyleFunc{
 			// "stopper": func(ctx context.Context, shutdown <-chan struct{}) error {
 			// 	<-time.After(time.Second * 3)
 			// 	log.Println("Shooting others")

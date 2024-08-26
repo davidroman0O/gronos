@@ -64,8 +64,8 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 	go func() {
 		for !endStates.Load() {
 			allEqual := true
-			state.mstatus.Range(func(_, value interface{}) bool {
-				if stateNumber(value.(StatusState)) != 3 {
+			state.mstatus.Range(func(_ K, value StatusState) bool {
+				if stateNumber(value) != 3 {
 					allEqual = false
 					return false // stops here
 				}
@@ -114,8 +114,8 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 
 func (g *gronos[K]) getLocalKeys(state *gronosState[K]) []K {
 	localKeys := make([]K, 0)
-	state.mkeys.Range(func(key, value interface{}) bool {
-		localKeys = append(localKeys, key.(K))
+	state.mkeys.Range(func(key, value K) bool {
+		localKeys = append(localKeys, key)
 		return true
 	})
 	return localKeys
@@ -123,7 +123,7 @@ func (g *gronos[K]) getLocalKeys(state *gronosState[K]) []K {
 
 func (g *gronos[K]) triggerShutdownForApps(state *gronosState[K], localKeys []K, kind ShutdownKind) {
 	for _, key := range localKeys {
-		if alive, ok := state.mali.Load(key); ok && alive.(bool) {
+		if alive, ok := state.mali.Load(key); ok && alive {
 			g.sendShutdownMessage(key, kind)
 		}
 	}

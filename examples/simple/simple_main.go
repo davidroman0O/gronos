@@ -16,7 +16,7 @@ func main() {
 
 	nono, cerr := gronos.New[string](
 		ctx,
-		map[string]gronos.RuntimeApplication{
+		map[string]gronos.LifecyleFunc{
 			"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
 				log.Println("app1 started")
 

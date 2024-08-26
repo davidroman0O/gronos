@@ -29,7 +29,7 @@ func TestIteratorStateWithGronos(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator": iterApp,
 		})
 
@@ -63,7 +63,7 @@ func TestIteratorStateWithGronos(t *testing.T) {
 		iterApp := IteratorState(tasks, WithInitialState(state))
 
 		ctx, cancel := context.WithCancel(context.Background())
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator": iterApp,
 		})
 
@@ -106,7 +106,7 @@ func TestIteratorStateWithGronos(t *testing.T) {
 		)
 
 		ctx := context.Background()
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator": iterApp,
 		})
 
@@ -144,7 +144,7 @@ func TestIteratorStateWithGronos(t *testing.T) {
 		iterApp := IteratorState(tasks, WithInitialState(state))
 
 		ctx := context.Background()
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator": iterApp,
 		})
 
@@ -190,7 +190,7 @@ func TestIteratorStateWithGronos(t *testing.T) {
 		iterApp2 := IteratorState(tasks2, WithInitialState(state2))
 
 		ctx := context.Background()
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator1": iterApp1,
 			"iterator2": iterApp2,
 		})
@@ -244,7 +244,7 @@ func TestIteratorStateWithGronos(t *testing.T) {
 		)
 
 		ctx := context.Background()
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator": iterApp,
 		})
 
@@ -300,7 +300,7 @@ func TestIteratorStateWithGronos(t *testing.T) {
 		)
 
 		ctx := context.Background()
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator": iterApp,
 		})
 
