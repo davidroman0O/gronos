@@ -6,13 +6,25 @@
 
 Gronos is a concurrent application management library for Go, designed to simplify the process of managing multiple concurrent applications within a single program. It provides a structured approach to application lifecycle management, error handling, and inter-application communication.
 
-> I saw myself writting the same boilerplate code over and over again for Domain Driven Application specifically so I made a library to stop wasting time and repeating myself. Now we can all enjoy a tool to sandbox lifecycled functions aka "runtime applications" broadly known as lifecycle functions.
+> I saw myself writting the same boilerplate code over and over again for Domain Driven Applications specifically so I made a library to stop wasting time and repeating myself. Now we can all enjoy a tool to sandbox lifecycled functions aka "runtime applications" broadly known as lifecycle functions.
 
 Warning:
 
 > This is an experimental project aimed at simplifying the development of Domain-Driven Design (DDD) applications with Event-Driven Architecture (EDA) from the start. The goal is to provide a comprehensive toolbox that, once fully developed, will be refined to improve usability.
 
 > I believe we shouldn't have to choose between building a traditional application and later transitioning to DDD and EDA. We should be able to implement EDA from the beginning and take advantage of its scalability. If all domains and workers can operate across multiple binaries, why not within a single one? The application should be flexible enough to function either as a standalone or distributed system, allowing us to split and scale as needed.
+
+I'm going to change a direction a bit with that library...
+
+Roadmap notes:
+- add hierarchy of lifecycle function
+- a sub-lifecycle function could dies but the supervisor will revive it
+- a sub-lifecycle function could be be restricted for terminating another lifecyle function that is not in the same hierarchy
+- restrict messaging rights based on hierarchy
+- toolbox to create a Shepherd node (gronos instance guiding and managing) and Flock node (processes being guided)
+
+Stuff like that, i have some vision of what i want and NEED, especially what i want to see in our industry.
+
 
 
 <img src="gronos.webp" alt="Gronos" height="400">
