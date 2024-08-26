@@ -190,8 +190,8 @@ func (g *gronos[K]) handleRequestReason(state *gronosState[K], key K, response c
 
 func (g *gronos[K]) handleRequestAllAlive(state *gronosState[K], response chan<- bool) error {
 	var alive bool
-	state.mali.Range(func(key, value any) bool {
-		if value.(bool) {
+	state.mali.Range(func(key K, value bool) bool {
+		if value {
 			alive = true
 			return false
 		}
@@ -208,7 +208,7 @@ func (g *gronos[K]) handleRequestStatusAsync(state *gronosState[K], key K, when 
 		var currentState int
 		for currentState < stateNumber(when) {
 			if value, ok := state.mstatus.Load(key); ok {
-				currentState = stateNumber(value.(StatusState))
+				currentState = stateNumber(value)
 			}
 			<-time.After(time.Second / 16)
 			runtime.Gosched()

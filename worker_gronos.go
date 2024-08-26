@@ -43,7 +43,7 @@ func WithFinalTick() tickerOption {
 //		return nil
 //	})
 //	g.Add("periodicTask", worker)
-func Worker(interval time.Duration, mode ExecutionMode, app TickingRuntime, opts ...tickerOption) RuntimeApplication {
+func Worker(interval time.Duration, mode ExecutionMode, app TickingRuntime, opts ...tickerOption) LifecyleFunc {
 	log.Debug("[Worker] Creating worker")
 	return func(ctx context.Context, shutdown <-chan struct{}) error {
 		log.Debug("[Worker] Starting worker")

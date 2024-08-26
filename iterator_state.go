@@ -36,7 +36,7 @@ func WithInitialState[T any](state *T) IteratorStateOption[T] {
 }
 
 // IteratorState creates a RuntimeApplication that uses a LoopableIteratorState to execute tasks with a shared state
-func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorStateOption[T]) RuntimeApplication {
+func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorStateOption[T]) LifecyleFunc {
 	config := &iteratorStateConfig[T]{}
 	for _, opt := range opts {
 		opt(config)

@@ -16,7 +16,7 @@ func TestGronosContextCancellation(t *testing.T) {
 		defer cancel()
 
 		appCount := 3
-		apps := make(map[string]RuntimeApplication)
+		apps := make(map[string]LifecyleFunc)
 		appStatuses := make(map[string]*atomic.Int32)
 
 		for i := 0; i < appCount; i++ {
@@ -93,7 +93,7 @@ func TestGronosContextCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		g, errChan := New(ctx, map[string]RuntimeApplication{"long-running": app})
+		g, errChan := New(ctx, map[string]LifecyleFunc{"long-running": app})
 
 		<-appStarted
 		cancel()
@@ -159,7 +159,7 @@ func TestGronosContextCancellation(t *testing.T) {
 			return nil
 		})
 
-		g, errChan := New(ctx, map[string]RuntimeApplication{"worker": workerApp})
+		g, errChan := New(ctx, map[string]LifecyleFunc{"worker": workerApp})
 
 		// Allow some ticks to occur
 		time.Sleep(250 * time.Millisecond)

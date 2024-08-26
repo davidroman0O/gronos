@@ -22,7 +22,7 @@ func WithLoopableIteratorOptions(opts ...LoopableIteratorOption) IteratorOption 
 }
 
 // Iterator creates a RuntimeApplication that uses a LoopableIterator to execute tasks.
-func Iterator(tasks []CancellableTask, opts ...IteratorOption) RuntimeApplication {
+func Iterator(tasks []CancellableTask, opts ...IteratorOption) LifecyleFunc {
 	config := &iteratorConfig{}
 	for _, opt := range opts {
 		opt(config)

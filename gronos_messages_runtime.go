@@ -12,7 +12,7 @@ import (
 
 type AddMessage[K comparable] struct {
 	KeyMessage[K]
-	RuntimeApplication
+	LifecyleFunc
 	RequestMessage[K, struct{}]
 }
 
@@ -110,7 +110,7 @@ func MsgGetListRuntimeApplication[K comparable]() (<-chan []K, *GetListRuntimeAp
 	return msg.Response, msg
 }
 
-func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddMessage[K]) {
+func MsgAdd[K comparable](key K, app LifecyleFunc) (<-chan struct{}, *AddMessage[K]) {
 	if !addRuntimeApplicationPoolInited {
 		addRuntimeApplicationPoolInited = true
 		addRuntimeApplicationPool = sync.Pool{
@@ -121,7 +121,7 @@ func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddM
 	}
 	msg := addRuntimeApplicationPool.Get().(*AddMessage[K])
 	msg.Key = key
-	msg.RuntimeApplication = app
+	msg.LifecyleFunc = app
 	msg.Response = make(chan struct{}, 1)
 	return msg.Response, msg
 }
@@ -244,7 +244,7 @@ func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *Me
 	case *AddMessage[K]:
 		log.Debug("[GronosMessage] [AddMessage]", msg.Key)
 		defer addRuntimeApplicationPool.Put(msg)
-		return g.handleAddRuntimeApplication(state, msg.Key, msg.Response, msg.RuntimeApplication), true
+		return g.handleAddRuntimeApplication(state, msg.Key, msg.Response, msg.LifecyleFunc), true
 	case *RemoveMessage[K]:
 		log.Debug("[GronosMessage] [RemoveMessage]", msg.Key)
 		defer removeRuntimeApplicationPool.Put(msg)
@@ -285,8 +285,8 @@ func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *Me
 func (g *gronos[K]) handleRequestListRuntimeApplication(state *gronosState[K], response chan []K) error {
 	defer close(response)
 	var list []K
-	state.mkeys.Range(func(k, v any) bool {
-		list = append(list, k.(K))
+	state.mkeys.Range(func(k, v K) bool {
+		list = append(list, k)
 		return true
 	})
 	response <- list
@@ -347,7 +347,7 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 	}
 }
 
-func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, done chan struct{}, app RuntimeApplication) error {
+func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, done chan struct{}, app LifecyleFunc) error {
 	defer close(done)
 
 	if state.shutting.Load() {
@@ -593,21 +593,21 @@ func (g *gronos[K]) handleErrorShutdown(state *gronosState[K], key K, err error)
 func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send func(metadata map[string]interface{}, m Message) bool) {
 	var retries uint
 	var shutdown chan struct{}
-	var app RuntimeApplication
+	var app LifecyleFunc
 	var ctx context.Context
 
 	// Load necessary data
 	if value, ok := state.mret.Load(key); ok {
-		retries = value.(uint)
+		retries = value
 	}
 	if value, ok := state.mapp.Load(key); ok {
-		app = value.(RuntimeApplication)
+		app = value
 	}
 	if value, ok := state.mctx.Load(key); ok {
 		ctx = value.(context.Context)
 	}
 	if value, ok := state.mshu.Load(key); ok {
-		shutdown = value.(chan struct{})
+		shutdown = value
 	}
 
 	ctx = context.WithValue(ctx, keyKey, key)
@@ -678,8 +678,8 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 
 	defer func() {
 		log.Debug("[RuntimeApplication] defer", key, err)
-		if value, ok := state.mdone.Load(key); ok {
-			close(value.(chan struct{}))
+		if chndone, ok := state.mdone.Load(key); ok {
+			close(chndone)
 		} else {
 			log.Debug("[RuntimeApplication] defer not found", key)
 		}
@@ -692,7 +692,7 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 	}
 
 	// Check if the application is still alive
-	if value, ok := state.mali.Load(key); !ok || !value.(bool) {
+	if value, ok := state.mali.Load(key); !ok || !value {
 		return
 	}
 

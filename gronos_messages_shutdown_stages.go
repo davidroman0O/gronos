@@ -92,8 +92,8 @@ func (g *gronos[K]) handleShutdownProgress(state *gronosState[K], remainingApps 
 
 func (g *gronos[K]) checkRemainingApps(state *gronosState[K]) {
 	var remainingApps int
-	state.mkeys.Range(func(key, value interface{}) bool {
-		if alive, ok := state.mali.Load(key); ok && alive.(bool) {
+	state.mkeys.Range(func(key, value K) bool {
+		if alive, ok := state.mali.Load(key); ok && alive {
 			remainingApps++
 		}
 		return true
@@ -131,8 +131,8 @@ func (g *gronos[K]) handleCheckAutomaticShutdown(state *gronosState[K], response
 	}
 
 	allDead := true
-	state.mali.Range(func(_, value interface{}) bool {
-		if value.(bool) {
+	state.mali.Range(func(_ K, value bool) bool {
+		if value {
 			allDead = false
 			return false // stop iteration
 		}

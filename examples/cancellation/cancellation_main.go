@@ -13,7 +13,7 @@ func main() {
 
 	g, cer := gronos.New[string](
 		ctx,
-		map[string]gronos.RuntimeApplication{
+		map[string]gronos.LifecyleFunc{
 			"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
 				select {
 				case <-ctx.Done():

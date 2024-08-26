@@ -10,7 +10,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	g, cerr := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
+	g, cerr := gronos.New[string](ctx, map[string]gronos.LifecyleFunc{
 		"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
 			log.Debug("App1 started")
 			defer log.Debug("[App1] defer done")

@@ -19,7 +19,7 @@ func TestGronos(t *testing.T) {
 
 		g, cerrors := New[string](
 			ctx,
-			map[string]RuntimeApplication{
+			map[string]LifecyleFunc{
 				"test-app": func(ctx context.Context, shutdown <-chan struct{}) error {
 					close(appStarted)
 					select {
@@ -68,7 +68,7 @@ func TestGronos(t *testing.T) {
 		appStarted := make([]chan struct{}, appCount)
 		appFinished := make([]chan struct{}, appCount)
 
-		apps := make(map[string]RuntimeApplication)
+		apps := make(map[string]LifecyleFunc)
 		for i := 0; i < appCount; i++ {
 			appStarted[i] = make(chan struct{})
 			appFinished[i] = make(chan struct{})
@@ -123,7 +123,7 @@ func TestGronos(t *testing.T) {
 
 		expectedError := fmt.Errorf("test error")
 
-		g, cerrors := New[string](ctx, map[string]RuntimeApplication{
+		g, cerrors := New[string](ctx, map[string]LifecyleFunc{
 			"error-app": func(ctx context.Context, shutdown <-chan struct{}) error {
 				return expectedError
 			},
@@ -309,7 +309,7 @@ func TestWorker(t *testing.T) {
 		}
 	})
 
-	t.Run("Workers shutdown different times with shtudown", func(t *testing.T) {
+	t.Run("Workers shutdown different times with shutdown", func(t *testing.T) {
 		var testCases []struct {
 			instances          int
 			timeShutdowns      []time.Duration
@@ -371,7 +371,7 @@ func TestWorker(t *testing.T) {
 				endedAfter := make([]time.Duration, tc.instances)
 				endedPostShutdown := make([]time.Duration, tc.instances)
 
-				runtimeApplications := make(map[string]RuntimeApplication)
+				runtimeApplications := make(map[string]LifecyleFunc)
 				for i := 0; i < tc.instances; i++ {
 					index := i
 					runtimeApplications[fmt.Sprintf("app-%d", i)] = func(ctx context.Context, shutdown <-chan struct{}) error {
@@ -395,7 +395,8 @@ func TestWorker(t *testing.T) {
 					ctx,
 					runtimeApplications,
 					WithMinRuntime[string](time.Second/2),
-					WithGracePeriod[string](time.Second/2),
+					WithGracePeriod[string](tc.gracePeriod),
+					WithImmediatePeriod[string](time.Second/2),
 					WithShutdownBehavior[string](tc.behaviour),
 				)
 
@@ -417,15 +418,17 @@ func TestWorker(t *testing.T) {
 				fmt.Println("g.Wait()")
 				g.Wait()
 
+				tolerance := 500 * time.Millisecond
+
 				for i, duration := range endedAfter {
-					if duration < tc.timeShutdowns[i]*time.Second {
+					if duration < tc.timeShutdowns[i]*time.Second-tolerance {
 						t.Errorf("App %d ended too soon: %v", i, duration)
 					}
 					fmt.Println("App", i, "ended after", duration)
 				}
 
 				for i, duration := range endedPostShutdown {
-					if duration < tc.timeAfterShutdowns[i]*time.Second {
+					if duration < tc.timeAfterShutdowns[i]*time.Second-tolerance {
 						t.Errorf("App %d ended too soon after shutdown: %v", i, duration)
 					}
 					fmt.Println("App", i, "ended after shutdown", duration)

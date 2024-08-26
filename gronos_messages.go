@@ -128,8 +128,8 @@ func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload
 
 func (state *gronosState[K]) allApplicationsTerminated() bool {
 	allTerminated := true
-	state.mali.Range(func(_, value interface{}) bool {
-		if value.(bool) {
+	state.mali.Range(func(_ K, value bool) bool {
+		if value {
 			allTerminated = false
 			return false // stop iteration
 		}
