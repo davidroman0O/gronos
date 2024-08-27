@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/log"
 )
 
+// TODO: sync.Pool for all messages
 type GracePeriodExceededMessage[K comparable] struct {
 	KeyMessage[K]
 }
@@ -45,7 +46,7 @@ func MsgDestroy[K comparable]() *Destroy[K] {
 	return &Destroy[K]{}
 }
 
-func (g *gronos[K]) handleShutdownStagesMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+func (g *gronos[K]) handleShutdownStagesMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
 	case *ShutdownProgress[K]:
 		log.Debug("[GronosMessage] [ShutdownProgress]")

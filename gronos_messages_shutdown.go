@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/log"
 )
 
+// TODO: you're missing from sync.Pool here
 type InitiateShutdown[K comparable] struct{}
 type InitiateContextCancellation[K comparable] struct{}
 type ShutdownProgress[K comparable] struct {
@@ -18,7 +19,7 @@ func MsgInitiateContextCancellation[K comparable]() *InitiateContextCancellation
 	return &InitiateContextCancellation[K]{}
 }
 
-func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch m.Message.(type) {
 	case *InitiateShutdown[K]:
 		log.Debug("[GronosMessage] [InitiateShutdown]")

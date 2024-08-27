@@ -30,9 +30,9 @@ type RequestMessage[K comparable, Y any] struct {
 }
 
 // handleMessage processes incoming messages and updates the gronos state accordingly.
-func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload) error {
+func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload[K]) error {
 
-	log.Debug("[GronosMessage] handle message", "name", m.Metadata["$name"], "metadata", m.Metadata, "message", m.Message)
+	log.Debug("[GronosMessage] handle message", "name", m.Metadata.GetName(), "metadata", m.Metadata, "message", m.Message)
 
 	// clean up pool data
 	defer func() {
@@ -69,7 +69,7 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload) erro
 	return coreErr
 }
 
-func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload) error {
+func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload[K]) error {
 	log.Debug("[GronosMessage] handle gronos message", reflect.TypeOf(m).Name(), m)
 
 	// While read the rest of the functions: if you're asking "wouldn't be simpler with a map?"

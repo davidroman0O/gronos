@@ -149,7 +149,7 @@ func MsgRequestGraph[K comparable]() (<-chan gograph.Graph[K], *RequestGraph[K])
 	return msg.Response, msg
 }
 
-func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
 	case *RequestStatus[K]:
 		log.Debug("[GronosMessage] [RequestStatus]", msg.Key)

@@ -434,7 +434,7 @@ func (w *WatermillExtension[K]) closeAllComponents(errChan chan<- error) error {
 	return nil
 }
 
-func (w *WatermillExtension[K]) OnMsg(ctx context.Context, m *gronos.MessagePayload) error {
+func (w *WatermillExtension[K]) OnMsg(ctx context.Context, m *gronos.MessagePayload[K]) error {
 	switch msg := m.Message.(type) {
 	case *AddPublisherMessage[K]:
 		defer addPublisherPool.Put(msg)
