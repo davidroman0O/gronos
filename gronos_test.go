@@ -87,19 +87,26 @@ func TestGronos(t *testing.T) {
 
 		<-appStarted
 
-		_, msg := msgTerminatedShutdown("test-app")
+		fmt.Println("\t\t\t\t\t START TERMINATION")
+		terminate, msg := MsgForceTerminateShutdown("test-app")
 		g.sendMessage(g.getSystemMetadata(), msg)
+		<-terminate
 
+		fmt.Println("\t\t\t\t\t TERMINATED")
+
+		fmt.Println("\t\t\t\t\t START REMOVE")
 		removed, msgr := MsgRemove("test-app")
 		g.sendMessage(g.getSystemMetadata(), msgr)
 		<-removed
+
+		fmt.Println("\t\t\t\t\t REMOVED")
 
 		data, msgg := MsgRequestGraph[string]()
 		g.Send(msgg)
 		state := <-data
 
-		if state.Size() != 0 {
-			t.Fatalf("Expected 0 applications, got %d", state.Size())
+		if state.GetSize() != 0 {
+			t.Fatalf("Expected 0 applications, got %d", state.GetSize())
 		}
 
 		select {

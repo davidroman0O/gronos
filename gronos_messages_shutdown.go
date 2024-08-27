@@ -89,10 +89,10 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 		close(whenAll)
 	}()
 
+	metadata := g.getSystemMetadata()
+
 	// Now that we triggered the shutdown for all the apps, we need to monitor the situation
 	go func() {
-
-		metadata := g.getSystemMetadata()
 
 		if g.config.immediatePeriod > 0 {
 			select {

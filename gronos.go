@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
-	"github.com/hmdsefi/gograph"
+	"github.com/heimdalr/dag"
 )
 
 type ctxKey string
@@ -155,15 +155,52 @@ type gronos[K comparable] struct {
 	comClosed    atomic.Bool
 
 	computedRootKey K
+	hasRootKey      atomic.Bool
+}
+
+type LifecycleVertexData[K comparable] struct {
+	Key       interface{}
+	cachedKey string
+}
+
+func NewLifecycleVertexData[K comparable](key K) *LifecycleVertexData[K] {
+	return &LifecycleVertexData[K]{Key: key}
+}
+
+// ID returns the unique identifier of the node
+func (n *LifecycleVertexData[K]) ID() string {
+	if n.cachedKey != "" {
+		return n.cachedKey
+	}
+	switch v := n.Key.(type) {
+	case string:
+		n.cachedKey = v
+	default:
+		n.cachedKey = fmt.Sprintf("%v", n.Key)
+	}
+	if len(n.cachedKey) == 0 {
+		n.cachedKey = fmt.Sprintf("node-%p", n.Key)
+	}
+	return n.cachedKey
+}
+
+// Metadata returns the metadata of the node
+func (n *LifecycleVertexData[K]) Metadata() map[string]string {
+	return nil
+}
+
+// SetMetadata sets the metadata of the node
+func (n *LifecycleVertexData[K]) SetMetadata(metadata map[string]string) {
+
 }
 
 // gronos instance doesn't know about the state, you have to request it for goroutine safety
 type gronosState[K comparable] struct {
 	rootKey    K
-	rootVertex *gograph.Vertex[K]
+	rootVertex string
 
 	// We need to know dynamically the structure of the application
-	graph gograph.Graph[K]
+	graph *dag.DAG
 
 	// it add a slight overhead in memory but faster access
 	// we mostly do reads so it's fine to have sync.Map
@@ -204,6 +241,13 @@ func Merge[K comparable](apps ...map[K]LifecyleFunc) map[K]LifecyleFunc {
 	return m
 }
 
+func WithRootKey[K comparable](key K) Option[K] {
+	return func(ctx *gronos[K]) {
+		ctx.computedRootKey = key
+		ctx.hasRootKey.Store(true)
+	}
+}
+
 // New creates a new gronos instance with the given context and initial applications.
 func New[K comparable](ctx context.Context, init map[K]LifecyleFunc, opts ...Option[K]) (*gronos[K], chan error) {
 
@@ -211,6 +255,8 @@ func New[K comparable](ctx context.Context, init map[K]LifecyleFunc, opts ...Opt
 
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
+		init: init,
+
 		com:    make(chan *MessagePayload[K], 500),
 		cancel: cancel,
 		// Context will be monitored to detect cancellation and trigger ForceCancelShutdown
@@ -220,8 +266,10 @@ func New[K comparable](ctx context.Context, init map[K]LifecyleFunc, opts ...Opt
 		// Once shutdown process is complete, done channel will be closed
 		doneChan: make(chan struct{}),
 
-		errChan:    make(chan error, 100),
+		errChan: make(chan error, 100),
+
 		extensions: []Extension[K]{},
+
 		config: gronosConfig{
 			shutdownBehavior: ShutdownManual,
 			// We do not guarantee the delay we will wait for your RuntimeApplication to shutdown
@@ -235,12 +283,15 @@ func New[K comparable](ctx context.Context, init map[K]LifecyleFunc, opts ...Opt
 			// But after the immediatePeriod + gracePeriod, it will still panic (except if you set it to zero)!
 			wait: false,
 		},
-		init: init,
 	}
 	for _, opt := range opts {
 		opt(g)
 	}
-	g.computedRootKey = g.getRootKey()
+
+	if !g.hasRootKey.Load() {
+		g.computedRootKey = g.getRootKey()
+		g.hasRootKey.Store(true)
+	}
 
 	// dynamically
 	metadataPool = sync.Pool{
@@ -342,6 +393,7 @@ func (g *gronos[K]) Wait() {
 
 	_, ok := <-g.doneChan
 	log.Debug("[Gronos] wait done", ok)
+
 }
 
 // OnDone returns the done channel, which will be closed when all runtimes have terminated.
@@ -376,105 +428,6 @@ func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) *Messag
 	return msgPayload
 }
 
-type Metadata[K comparable] map[string]interface{}
-
-func (m *Metadata[K]) Get(key string) interface{} {
-	return (*m)[key]
-}
-
-func (m *Metadata[K]) Set(key string, value interface{}) {
-	(*m)[key] = value
-}
-
-func (m *Metadata[K]) Delete(key string) {
-	delete(*m, key)
-}
-
-func (m *Metadata[K]) Clear() {
-	for k := range *m {
-		delete(*m, k)
-	}
-}
-
-func (m *Metadata[K]) Copy() Metadata[K] {
-	newMetadata := make(map[string]interface{})
-	for k, v := range *m {
-		newMetadata[k] = v
-	}
-	return newMetadata
-}
-
-func (m *Metadata[K]) Merge(metadata Metadata[K]) {
-	for k, v := range metadata {
-		(*m)[k] = v
-	}
-}
-
-func (m *Metadata[K]) GetKey() K {
-	return (*m)["$key"].(K)
-}
-
-func (m *Metadata[K]) GetID() int {
-	return (*m)["$id"].(int)
-}
-
-func (m *Metadata[K]) SetKey(key K) {
-	(*m)["$key"] = key
-}
-
-func (m *Metadata[K]) SetID(id int) {
-	(*m)["$id"] = id
-}
-
-func (m *Metadata[K]) HasKey() bool {
-	_, ok := (*m)["$key"]
-	return ok
-}
-
-func (m *Metadata[K]) HasID() bool {
-	_, ok := (*m)["$id"]
-	return ok
-}
-
-func (m *Metadata[K]) GetType() reflect.Type {
-	return (*m)["$type"].(reflect.Type)
-}
-
-func (m *Metadata[K]) SetType(t reflect.Type) {
-	(*m)["$type"] = t
-}
-
-func (m *Metadata[K]) GetName() string {
-	return (*m)["$name"].(string)
-}
-
-func (m *Metadata[K]) SetName(n string) {
-	(*m)["$name"] = n
-}
-
-func (m *Metadata[K]) GetError() error {
-	return (*m)["$error"].(error)
-}
-
-func (m *Metadata[K]) SetError(e error) {
-	(*m)["$error"] = e
-}
-
-func (m *Metadata[K]) HasType() bool {
-	_, ok := (*m)["$type"]
-	return ok
-}
-
-func (m *Metadata[K]) HasName() bool {
-	_, ok := (*m)["$name"]
-	return ok
-}
-
-func (m *Metadata[K]) HasError() bool {
-	_, ok := (*m)["$error"]
-	return ok
-}
-
 func (g *gronos[K]) poolMetadata() *Metadata[K] {
 	return metadataPool.Get().(*Metadata[K])
 }
@@ -482,7 +435,7 @@ func (g *gronos[K]) poolMetadata() *Metadata[K] {
 func (g *gronos[K]) getSystemMetadata() *Metadata[K] {
 	metadata := g.poolMetadata()
 	metadata.SetID(0)
-	metadata.Set("$key", g.computedRootKey)
+	metadata.SetKey(g.computedRootKey)
 	return metadata
 }
 
@@ -551,7 +504,7 @@ func (g *gronos[K]) sendMessageConfirm(metadata *Metadata[K], fn FnConfirm) <-ch
 
 // if configured on automatic shutdown, it will check the status of the applications
 func (g *gronos[K]) automaticShutdown() {
-	ticker := time.NewTicker(time.Second / 6)
+	ticker := time.NewTicker(time.Second / 2)
 	defer ticker.Stop()
 
 	for {
@@ -574,7 +527,47 @@ func (g *gronos[K]) automaticShutdown() {
 
 func (g *gronos[K]) getRootKey() K {
 	typeOf := reflect.TypeFor[K]()
-	rootKey := reflect.Zero(typeOf).Interface().(K)
+	var rootKey K
+	if fmt.Sprintf("%v", rootKey) == "" {
+		switch typeOf.Kind() {
+		case reflect.String:
+			rootKey = reflect.ValueOf("root").Interface().(K)
+		case reflect.Int:
+			rootKey = reflect.ValueOf(1).Interface().(K)
+		case reflect.Int64:
+			rootKey = reflect.ValueOf(int64(1)).Interface().(K)
+		case reflect.Int32:
+			rootKey = reflect.ValueOf(int32(1)).Interface().(K)
+		case reflect.Int16:
+			rootKey = reflect.ValueOf(int16(1)).Interface().(K)
+		case reflect.Int8:
+			rootKey = reflect.ValueOf(int8(1)).Interface().(K)
+		case reflect.Uint:
+			rootKey = reflect.ValueOf(uint(1)).Interface().(K)
+		case reflect.Uint64:
+			rootKey = reflect.ValueOf(uint64(1)).Interface().(K)
+		case reflect.Uint32:
+			rootKey = reflect.ValueOf(uint32(1)).Interface().(K)
+		case reflect.Uint16:
+			rootKey = reflect.ValueOf(uint16(1)).Interface().(K)
+		case reflect.Uint8:
+			rootKey = reflect.ValueOf(uint8(1)).Interface().(K)
+		case reflect.Float64:
+			rootKey = reflect.ValueOf(float64(1)).Interface().(K)
+		case reflect.Float32:
+			rootKey = reflect.ValueOf(float32(1)).Interface().(K)
+		case reflect.Bool:
+			rootKey = reflect.ValueOf(false).Interface().(K)
+		default:
+			var inter interface{} = rootKey
+			switch inter.(type) {
+			case fmt.Stringer:
+				rootKey = reflect.ValueOf("root").Interface().(K)
+			default: // really default default
+				rootKey = reflect.Zero(typeOf).Interface().(K)
+			}
+		}
+	}
 	return rootKey
 }
 
@@ -594,13 +587,11 @@ func (g *gronos[K]) run(errChan chan<- error) {
 		g.sendMessage(g.getSystemMetadata(), MsgDestroy[K]())
 	}()
 
+	dag := dag.NewDAG()
+
 	state := &gronosState[K]{
 		// dag with weights
-		graph: gograph.New[K](
-			gograph.Directed(),
-			gograph.Acyclic(),
-			gograph.Weighted(),
-		),
+		graph:   dag,
 		mkeys:   &GMap[K, K]{},
 		mapp:    &GMap[K, LifecyleFunc]{},
 		mctx:    &GMap[K, context.Context]{},
@@ -617,10 +608,12 @@ func (g *gronos[K]) run(errChan chan<- error) {
 
 	// Prepare the graph
 	state.rootKey = g.getRootKey()
-	state.rootVertex = gograph.NewVertex(state.rootKey)
 
-	// default value for root key
-	state.graph.AddVertex(state.rootVertex)
+	var err error
+	if state.rootVertex, err = state.graph.AddVertex(NewLifecycleVertexData(state.rootKey)); err != nil {
+		errChan <- fmt.Errorf("error adding root vertex: %w", err)
+		return
+	}
 
 	g.startTime = time.Now()
 
@@ -833,31 +826,6 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	})
 	ctx, cancel := context.WithCancel(ctx)
 	return ctx, cancel
-}
-
-// UseBus retrieves the communication channel from a context created by gronos.
-func UseBus(ctx context.Context) (func(m Message) bool, error) {
-	value := ctx.Value(comKey)
-	if value == nil {
-		return nil, fmt.Errorf("com not found in context")
-	}
-	return value.(func(m Message) bool), nil
-}
-
-func UseBusWait(ctx context.Context) (func(fn FnWait) <-chan struct{}, error) {
-	value := ctx.Value(comKeyWait)
-	if value == nil {
-		return nil, fmt.Errorf("com not found in context")
-	}
-	return value.(func(fn FnWait) <-chan struct{}), nil
-}
-
-func UseBusConfirm(ctx context.Context) (func(fn FnConfirm) <-chan bool, error) {
-	value := ctx.Value(comKeyConfirm)
-	if value == nil {
-		return nil, fmt.Errorf("com not found in context")
-	}
-	return value.(func(fn FnConfirm) <-chan bool), nil
 }
 
 func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {

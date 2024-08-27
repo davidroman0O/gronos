@@ -62,6 +62,9 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload[K]) e
 
 	// If the message wasn't handled by core or any extension, return an error
 	if errors.Is(coreErr, ErrUnhandledMessage) {
+		fmt.Println(reflect.TypeOf(m.Message).Name())
+		fmt.Println(m.Message)
+		fmt.Println(m.Metadata)
 		return fmt.Errorf("unhandled message type: %T", m)
 	}
 
@@ -78,6 +81,10 @@ func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload
 	// If i use a map, sure it might add some flexibility FOR ME but who cares? I will manage it
 	// i don't want YOU to have a map that will add extract code execution time to your code
 	// If you have to use a library, it has to use a less cpu cycle as possible
+
+	defer func() {
+		metadataPool.Put(m.Metadata) // clean up pool data
+	}()
 
 	// Error should always be the highest priority
 	switch msg := m.Message.(type) {
