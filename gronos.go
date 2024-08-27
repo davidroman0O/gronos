@@ -180,15 +180,7 @@ func (n *LifecycleVertexData[K]) ID() string {
 	if n.cachedKey != "" {
 		return n.cachedKey
 	}
-	switch v := n.Key.(type) {
-	case string:
-		n.cachedKey = v
-	default:
-		n.cachedKey = fmt.Sprintf("%v", n.Key)
-	}
-	if len(n.cachedKey) == 0 {
-		n.cachedKey = fmt.Sprintf("node-%p", n.Key)
-	}
+	n.cachedKey = fmt.Sprintf("%v", n.Key) // Primitive allow us to be comfy af
 	return n.cachedKey
 }
 
@@ -539,7 +531,7 @@ func (g *gronos[K]) getRootKey() K {
 	if fmt.Sprintf("%v", rootKey) == "" {
 		switch typeOf.Kind() {
 		case reflect.String:
-			rootKey = reflect.ValueOf("root").Interface().(K)
+			rootKey = reflect.ValueOf("$gronos").Interface().(K)
 		case reflect.Int:
 			rootKey = reflect.ValueOf(1).Interface().(K)
 		case reflect.Int64:
@@ -570,7 +562,7 @@ func (g *gronos[K]) getRootKey() K {
 			var inter interface{} = rootKey
 			switch inter.(type) {
 			case fmt.Stringer:
-				rootKey = reflect.ValueOf("root").Interface().(K)
+				rootKey = reflect.ValueOf("$gronos").Interface().(K)
 			default: // really default default
 				rootKey = reflect.Zero(typeOf).Interface().(K)
 			}
