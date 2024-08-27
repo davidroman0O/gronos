@@ -87,19 +87,13 @@ func TestGronos(t *testing.T) {
 
 		<-appStarted
 
-		fmt.Println("\t\t\t\t\t START TERMINATION")
 		terminate, msg := MsgForceTerminateShutdown("test-app")
 		g.sendMessage(g.getSystemMetadata(), msg)
 		<-terminate
 
-		fmt.Println("\t\t\t\t\t TERMINATED")
-
-		fmt.Println("\t\t\t\t\t START REMOVE")
 		removed, msgr := MsgRemove("test-app")
 		g.sendMessage(g.getSystemMetadata(), msgr)
 		<-removed
-
-		fmt.Println("\t\t\t\t\t REMOVED")
 
 		data, msgg := MsgRequestGraph[string]()
 		g.Send(msgg)

@@ -314,8 +314,7 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 		state.mdone.Delete(key)
 		state.mcloser.Delete(key)
 		state.mcancel.Delete(key)
-		fmt.Println("delete vertex", metadata.GetKeyString())
-		if err := state.graph.DeleteVertex("dsadsadsadasdas"); err != nil {
+		if err := state.graph.DeleteVertex(fmt.Sprintf("%v", key)); err != nil {
 			log.Error("[GronosMessage] [RemoveMessage] failed to delete vertex", key, err)
 			return err
 		}
@@ -538,7 +537,6 @@ func (g *gronos[K]) handleTerminateShutdown(state *gronosState[K], key K, respon
 	go func() {
 
 		metadata := g.getSystemMetadata()
-		fmt.Println("wait for chn done")
 		<-chnDone
 		log.Debug("[GronosMessage] [TerminateShutdown] terminate shutdown done", key, ok)
 

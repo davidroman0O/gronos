@@ -16,14 +16,14 @@ type ctxWatermill string
 
 var ctxWatermillKey ctxWatermill
 
-type WatermillExtension[K comparable] struct {
+type WatermillExtension[K gronos.Primitive] struct {
 	pubs    sync.Map
 	subs    sync.Map
 	routers sync.Map
 	logger  watermill.LoggerAdapter
 }
 
-func New[K comparable](logger watermill.LoggerAdapter) *WatermillExtension[K] {
+func New[K gronos.Primitive](logger watermill.LoggerAdapter) *WatermillExtension[K] {
 	if logger == nil {
 		logger = watermill.NewStdLogger(false, false)
 	}
@@ -33,57 +33,57 @@ func New[K comparable](logger watermill.LoggerAdapter) *WatermillExtension[K] {
 }
 
 // Message types
-type AddPublisherMessage[K comparable] struct {
+type AddPublisherMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	Publisher                          message.Publisher
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
-type AddSubscriberMessage[K comparable] struct {
+type AddSubscriberMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	Subscriber                         message.Subscriber
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
-type HasPublisherMessage[K comparable] struct {
+type HasPublisherMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	gronos.RequestMessage[K, bool] // when it is done
 }
 
-type HasSubscriberMessage[K comparable] struct {
+type HasSubscriberMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	gronos.RequestMessage[K, bool] // when it is done
 }
 
-type AddRouterMessage[K comparable] struct {
+type AddRouterMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	Router                             *message.Router
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
-type HasRouterMessage[K comparable] struct {
+type HasRouterMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	gronos.RequestMessage[K, bool] // when it is done
 }
 
-type HasHandlerMessage[K comparable] struct {
+type HasHandlerMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	HandlerName                    string
 	gronos.RequestMessage[K, bool] // when it is done
 }
 
-type ClosePublisherMessage[K comparable] struct {
+type ClosePublisherMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
-type CloseSubscriberMessage[K comparable] struct {
+type CloseSubscriberMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
 // func(handlerName string, subscribeTopic string, subscriber message.Subscriber, handlerFunc message.NoPublishHandlerFunc) *message.Handler
-type AddNoPublisherHandlerMessage[K comparable] struct {
+type AddNoPublisherHandlerMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	HandlerName                        string
 	SubscribeTopic                     string
@@ -92,7 +92,7 @@ type AddNoPublisherHandlerMessage[K comparable] struct {
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
-type AddHandlerMessage[K comparable] struct {
+type AddHandlerMessage[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	HandlerName                        string
 	SubscribeTopic                     string
@@ -103,13 +103,13 @@ type AddHandlerMessage[K comparable] struct {
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
-type AddRouterPlugins[K comparable] struct {
+type AddRouterPlugins[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	Plugins                            []message.RouterPlugin
 	gronos.RequestMessage[K, struct{}] // when it is done
 }
 
-type AddRouterMiddlewares[K comparable] struct {
+type AddRouterMiddlewares[K gronos.Primitive] struct {
 	gronos.KeyMessage[K]
 	Middlewares                        []message.HandlerMiddleware
 	gronos.RequestMessage[K, struct{}] // when it is done
@@ -156,7 +156,7 @@ var addMiddlewaresPoolInited bool
 var addMiddlewaresPool sync.Pool
 
 // Message creation functions
-func MsgAddPublisher[K comparable](key K, publisher message.Publisher) (<-chan struct{}, *AddPublisherMessage[K]) {
+func MsgAddPublisher[K gronos.Primitive](key K, publisher message.Publisher) (<-chan struct{}, *AddPublisherMessage[K]) {
 	if !addPublisherPoolInited {
 		addPublisherPoolInited = true
 		addPublisherPool = sync.Pool{
@@ -172,7 +172,7 @@ func MsgAddPublisher[K comparable](key K, publisher message.Publisher) (<-chan s
 	return msg.Response, msg
 }
 
-func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) (<-chan struct{}, *AddSubscriberMessage[K]) {
+func MsgAddSubscriber[K gronos.Primitive](key K, subscriber message.Subscriber) (<-chan struct{}, *AddSubscriberMessage[K]) {
 	if !addSubscriberPoolInited {
 		addSubscriberPoolInited = true
 		addSubscriberPool = sync.Pool{
@@ -188,7 +188,7 @@ func MsgAddSubscriber[K comparable](key K, subscriber message.Subscriber) (<-cha
 	return msg.Response, msg
 }
 
-func MsgHasPublisher[K comparable](key K) (<-chan bool, *HasPublisherMessage[K]) {
+func MsgHasPublisher[K gronos.Primitive](key K) (<-chan bool, *HasPublisherMessage[K]) {
 	if !hasPublisherPoolInited {
 		hasPublisherPoolInited = true
 		hasPublisherPool = sync.Pool{
@@ -203,7 +203,7 @@ func MsgHasPublisher[K comparable](key K) (<-chan bool, *HasPublisherMessage[K])
 	return msg.Response, msg
 }
 
-func MsgHasSubscriber[K comparable](key K) (<-chan bool, *HasSubscriberMessage[K]) {
+func MsgHasSubscriber[K gronos.Primitive](key K) (<-chan bool, *HasSubscriberMessage[K]) {
 	if !hasSubscriberPoolInited {
 		hasSubscriberPoolInited = true
 		hasSubscriberPool = sync.Pool{
@@ -218,7 +218,7 @@ func MsgHasSubscriber[K comparable](key K) (<-chan bool, *HasSubscriberMessage[K
 	return msg.Response, msg
 }
 
-func MsgAddRouter[K comparable](key K, router *message.Router) (<-chan struct{}, *AddRouterMessage[K]) {
+func MsgAddRouter[K gronos.Primitive](key K, router *message.Router) (<-chan struct{}, *AddRouterMessage[K]) {
 	if !addRouterPoolInited {
 		addRouterPoolInited = true
 		addRouterPool = sync.Pool{
@@ -234,7 +234,7 @@ func MsgAddRouter[K comparable](key K, router *message.Router) (<-chan struct{},
 	return msg.Response, msg
 }
 
-func MsgClosePublisher[K comparable](key K) (<-chan struct{}, *ClosePublisherMessage[K]) {
+func MsgClosePublisher[K gronos.Primitive](key K) (<-chan struct{}, *ClosePublisherMessage[K]) {
 	if !closePublisherPoolInited {
 		closePublisherPoolInited = true
 		closePublisherPool = sync.Pool{
@@ -249,7 +249,7 @@ func MsgClosePublisher[K comparable](key K) (<-chan struct{}, *ClosePublisherMes
 	return msg.Response, msg
 }
 
-func MsgCloseSubscriber[K comparable](key K) (<-chan struct{}, *CloseSubscriberMessage[K]) {
+func MsgCloseSubscriber[K gronos.Primitive](key K) (<-chan struct{}, *CloseSubscriberMessage[K]) {
 	if !closeSubscriberPoolInited {
 		closeSubscriberPoolInited = true
 		closeSubscriberPool = sync.Pool{
@@ -264,7 +264,7 @@ func MsgCloseSubscriber[K comparable](key K) (<-chan struct{}, *CloseSubscriberM
 	return msg.Response, msg
 }
 
-func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, subscriberName string, publishTopic string, publisherName string, handlerFunc message.HandlerFunc) (<-chan struct{}, *AddHandlerMessage[K]) {
+func MsgAddHandler[K gronos.Primitive](key K, handlerName, subscribeTopic, subscriberName string, publishTopic string, publisherName string, handlerFunc message.HandlerFunc) (<-chan struct{}, *AddHandlerMessage[K]) {
 	if !addHandlerPoolInited {
 		addHandlerPoolInited = true
 		addHandlerPool = sync.Pool{
@@ -285,7 +285,7 @@ func MsgAddHandler[K comparable](key K, handlerName, subscribeTopic, subscriberN
 	return msg.Response, msg
 }
 
-func MsgHasRouter[K comparable](key K) (<-chan bool, *HasRouterMessage[K]) {
+func MsgHasRouter[K gronos.Primitive](key K) (<-chan bool, *HasRouterMessage[K]) {
 	if !hasRouterPoolInited {
 		hasRouterPoolInited = true
 		hasRouterPool = sync.Pool{
@@ -300,7 +300,7 @@ func MsgHasRouter[K comparable](key K) (<-chan bool, *HasRouterMessage[K]) {
 	return msg.Response, msg
 }
 
-func MsgHasHandler[K comparable](key K, handlerName string) (<-chan bool, *HasHandlerMessage[K]) {
+func MsgHasHandler[K gronos.Primitive](key K, handlerName string) (<-chan bool, *HasHandlerMessage[K]) {
 	if !hasHandlerPoolInited {
 		hasHandlerPoolInited = true
 		hasHandlerPool = sync.Pool{
@@ -317,7 +317,7 @@ func MsgHasHandler[K comparable](key K, handlerName string) (<-chan bool, *HasHa
 }
 
 // func(handlerName string, subscribeTopic string, subscriber message.Subscriber, handlerFunc message.NoPublishHandlerFunc) *message.Handler
-func MsgAddNoPublisherHandler[K comparable](key K, handlerName, subscribeTopic, subscriberName string, handlerFunc message.NoPublishHandlerFunc) (<-chan struct{}, *AddNoPublisherHandlerMessage[K]) {
+func MsgAddNoPublisherHandler[K gronos.Primitive](key K, handlerName, subscribeTopic, subscriberName string, handlerFunc message.NoPublishHandlerFunc) (<-chan struct{}, *AddNoPublisherHandlerMessage[K]) {
 	if !addNoPublisherHandlerPoolInited {
 		addNoPublisherHandlerPoolInited = true
 		addNoPublisherHandlerPool = sync.Pool{
@@ -336,7 +336,7 @@ func MsgAddNoPublisherHandler[K comparable](key K, handlerName, subscribeTopic, 
 	return msg.Response, msg
 }
 
-func MsgAddPlugins[K comparable](key K, plugins ...message.RouterPlugin) (<-chan struct{}, *AddRouterPlugins[K]) {
+func MsgAddPlugins[K gronos.Primitive](key K, plugins ...message.RouterPlugin) (<-chan struct{}, *AddRouterPlugins[K]) {
 	if !addPluginsPoolInited {
 		addPluginsPoolInited = true
 		addPluginsPool = sync.Pool{
@@ -352,7 +352,7 @@ func MsgAddPlugins[K comparable](key K, plugins ...message.RouterPlugin) (<-chan
 	return msg.Response, msg
 }
 
-func MsgAddRouterMiddlewares[K comparable](key K, middlewares ...message.HandlerMiddleware) (<-chan struct{}, *AddRouterMiddlewares[K]) {
+func MsgAddRouterMiddlewares[K gronos.Primitive](key K, middlewares ...message.HandlerMiddleware) (<-chan struct{}, *AddRouterMiddlewares[K]) {
 	if !addMiddlewaresPoolInited {
 		addMiddlewaresPoolInited = true
 		addMiddlewaresPool = sync.Pool{
@@ -720,7 +720,7 @@ func (w *WatermillExtension[K]) handleAddHandler(ctx context.Context, msg *AddHa
 	return nil
 }
 
-func UsePublish[K comparable](ctx context.Context, name K) (func(topic string, messages ...*message.Message) error, error) {
+func UsePublish[K gronos.Primitive](ctx context.Context, name K) (func(topic string, messages ...*message.Message) error, error) {
 	middleware, err := getMiddleware[K](ctx)
 	if err != nil {
 		return nil, err
@@ -735,7 +735,7 @@ func UsePublish[K comparable](ctx context.Context, name K) (func(topic string, m
 	return pub.Publish, nil
 }
 
-func UseSubscribe[K comparable](ctx context.Context, name K) (func(ctx context.Context, topic string) (<-chan *message.Message, error), error) {
+func UseSubscribe[K gronos.Primitive](ctx context.Context, name K) (func(ctx context.Context, topic string) (<-chan *message.Message, error), error) {
 	middleware, err := getMiddleware[K](ctx)
 	if err != nil {
 		return nil, err
@@ -750,7 +750,7 @@ func UseSubscribe[K comparable](ctx context.Context, name K) (func(ctx context.C
 	return sub.Subscribe, nil
 }
 
-func UsePublisher[K comparable](ctx context.Context, name K) (message.Publisher, error) {
+func UsePublisher[K gronos.Primitive](ctx context.Context, name K) (message.Publisher, error) {
 	middleware, err := getMiddleware[K](ctx)
 	if err != nil {
 		return nil, err
@@ -765,7 +765,7 @@ func UsePublisher[K comparable](ctx context.Context, name K) (message.Publisher,
 	return pub, nil
 }
 
-func UseSubscriber[K comparable](ctx context.Context, name K) (message.Subscriber, error) {
+func UseSubscriber[K gronos.Primitive](ctx context.Context, name K) (message.Subscriber, error) {
 	middleware, err := getMiddleware[K](ctx)
 	if err != nil {
 		return nil, err
@@ -780,7 +780,7 @@ func UseSubscriber[K comparable](ctx context.Context, name K) (message.Subscribe
 	return sub, nil
 }
 
-func getMiddleware[K comparable](ctx context.Context) (*WatermillExtension[K], error) {
+func getMiddleware[K gronos.Primitive](ctx context.Context) (*WatermillExtension[K], error) {
 	middleware, ok := ctx.Value(ctxWatermillKey).(*WatermillExtension[K])
 	if !ok {
 		return nil, fmt.Errorf("watermill middleware not found in context")

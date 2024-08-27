@@ -15,6 +15,14 @@ import (
 	"github.com/heimdalr/dag"
 )
 
+// I can't believe we still don't have this in the standard library
+type Primitive interface {
+	int | int8 | int16 | int32 | int64 |
+		uint | uint8 | uint16 | uint32 | uint64 |
+		float32 | float64 |
+		string | bool
+}
+
 type ctxKey string
 
 var comKey ctxKey = "com"
@@ -111,7 +119,7 @@ type gronosConfig struct {
 	wait             bool
 }
 
-type MessagePayload[K comparable] struct {
+type MessagePayload[K Primitive] struct {
 	*Metadata[K]
 	Message
 }
@@ -127,8 +135,8 @@ func newIncrement() int {
 var metadataPool sync.Pool
 
 // gronos is the main struct that manages concurrent applications.
-// It is parameterized by a comparable key type K.
-type gronos[K comparable] struct {
+// It is parameterized by a any key type K.
+type gronos[K Primitive] struct {
 	com chan *MessagePayload[K]
 
 	// main waiting group for all applications
@@ -158,12 +166,12 @@ type gronos[K comparable] struct {
 	hasRootKey      atomic.Bool
 }
 
-type LifecycleVertexData[K comparable] struct {
+type LifecycleVertexData[K Primitive] struct {
 	Key       interface{}
 	cachedKey string
 }
 
-func NewLifecycleVertexData[K comparable](key K) *LifecycleVertexData[K] {
+func NewLifecycleVertexData[K Primitive](key K) *LifecycleVertexData[K] {
 	return &LifecycleVertexData[K]{Key: key}
 }
 
@@ -195,7 +203,7 @@ func (n *LifecycleVertexData[K]) SetMetadata(metadata map[string]string) {
 }
 
 // gronos instance doesn't know about the state, you have to request it for goroutine safety
-type gronosState[K comparable] struct {
+type gronosState[K Primitive] struct {
 	rootKey    K
 	rootVertex string
 
@@ -223,15 +231,15 @@ type gronosState[K comparable] struct {
 	shutting          atomic.Bool
 }
 
-type Option[K comparable] func(*gronos[K])
+type Option[K Primitive] func(*gronos[K])
 
-func WithExtension[K comparable](ext Extension[K]) Option[K] {
+func WithExtension[K Primitive](ext Extension[K]) Option[K] {
 	return func(ctx *gronos[K]) {
 		ctx.extensions = append(ctx.extensions, ext)
 	}
 }
 
-func Merge[K comparable](apps ...map[K]LifecyleFunc) map[K]LifecyleFunc {
+func Merge[K Primitive](apps ...map[K]LifecyleFunc) map[K]LifecyleFunc {
 	m := make(map[K]LifecyleFunc)
 	for _, app := range apps {
 		for k, v := range app {
@@ -241,7 +249,7 @@ func Merge[K comparable](apps ...map[K]LifecyleFunc) map[K]LifecyleFunc {
 	return m
 }
 
-func WithRootKey[K comparable](key K) Option[K] {
+func WithRootKey[K Primitive](key K) Option[K] {
 	return func(ctx *gronos[K]) {
 		ctx.computedRootKey = key
 		ctx.hasRootKey.Store(true)
@@ -249,7 +257,7 @@ func WithRootKey[K comparable](key K) Option[K] {
 }
 
 // New creates a new gronos instance with the given context and initial applications.
-func New[K comparable](ctx context.Context, init map[K]LifecyleFunc, opts ...Option[K]) (*gronos[K], chan error) {
+func New[K Primitive](ctx context.Context, init map[K]LifecyleFunc, opts ...Option[K]) (*gronos[K], chan error) {
 
 	// log.Default().SetLevel(log.DebugLevel) // debug
 
@@ -828,48 +836,48 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-func WithShutdownBehavior[K comparable](behavior ShutdownBehavior) Option[K] {
+func WithShutdownBehavior[K Primitive](behavior ShutdownBehavior) Option[K] {
 	return func(g *gronos[K]) {
 		g.config.shutdownBehavior = behavior
 	}
 }
 
-func WithGracePeriod[K comparable](period time.Duration) Option[K] {
+func WithGracePeriod[K Primitive](period time.Duration) Option[K] {
 	return func(g *gronos[K]) {
 		g.config.gracePeriod = period
 	}
 }
 
-func WithImmediatePeriod[K comparable](period time.Duration) Option[K] {
+func WithImmediatePeriod[K Primitive](period time.Duration) Option[K] {
 	return func(g *gronos[K]) {
 		g.config.immediatePeriod = period
 	}
 }
-func WithWait[K comparable]() Option[K] {
+func WithWait[K Primitive]() Option[K] {
 	return func(g *gronos[K]) {
 		g.config.wait = true
 	}
 }
 
-func WithMinRuntime[K comparable](duration time.Duration) Option[K] {
+func WithMinRuntime[K Primitive](duration time.Duration) Option[K] {
 	return func(g *gronos[K]) {
 		g.config.minRuntime = duration
 	}
 }
 
-func WithoutImmediatePeriod[K comparable]() Option[K] {
+func WithoutImmediatePeriod[K Primitive]() Option[K] {
 	return func(g *gronos[K]) {
 		g.config.immediatePeriod = 0
 	}
 }
 
-func WithoutGracePeriod[K comparable]() Option[K] {
+func WithoutGracePeriod[K Primitive]() Option[K] {
 	return func(g *gronos[K]) {
 		g.config.gracePeriod = 0
 	}
 }
 
-func WithoutMinRuntime[K comparable]() Option[K] {
+func WithoutMinRuntime[K Primitive]() Option[K] {
 	return func(g *gronos[K]) {
 		g.config.minRuntime = 0
 	}

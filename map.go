@@ -4,8 +4,12 @@ import "sync"
 
 // GMap is a wrapper for sync.Map
 // I needed a bit of convinience
-type GMap[K comparable, V any] struct {
+type GMap[K any, V any] struct {
 	m sync.Map
+}
+
+func NewGMap[K any, V any]() *GMap[K, V] {
+	return &GMap[K, V]{}
 }
 
 // Store sets the value for a key.
