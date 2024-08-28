@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/log"
 )
 
 func TestGronosContextCancellation(t *testing.T) {
@@ -79,7 +81,7 @@ func TestGronosContextCancellation(t *testing.T) {
 
 		app := func(ctx context.Context, shutdown <-chan struct{}) error {
 			close(appStarted)
-			defer fmt.Println("App received context cancellation")
+			defer log.Debug("App received context cancellation")
 			select {
 			case <-ctx.Done():
 				close(appFinished)

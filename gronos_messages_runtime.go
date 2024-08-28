@@ -242,7 +242,7 @@ func msgErroredShutdown[K comparable](key K, err error) (<-chan struct{}, *Error
 func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
 	case *AddMessage[K]:
-		log.Debug("[GronosMessage] [AddMessage]", msg.Key)
+		log.Debug("[GronosMessage] [AddMessage]", "key", msg.Key, "metadata", m.Metadata.String())
 		defer addRuntimeApplicationPool.Put(msg)
 		return g.handleAddRuntimeApplication(state, m.Metadata, msg.Key, msg.Response, msg.LifecyleFunc), true
 	case *RemoveMessage[K]:
@@ -382,6 +382,12 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], metadata 
 	for _, ext := range g.extensions {
 		ctx = ext.OnNewRuntime(ctx)
 	}
+
+	metadata.data.Range(func(k, v any) bool {
+		log.Debug("[GronosMessage] [AddMessage] add application with metadata", "key", key, k, v)
+		ctx = context.WithValue(ctx, k, v)
+		return true
+	})
 
 	state.mkeys.Store(key, key)
 	state.mapp.Store(key, app)
@@ -629,8 +635,6 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], metadata *Me
 
 	state.mstatus.Store(key, StatusRunning)
 
-	log.Debug("[RuntimeApplication] goroutine executed", key)
-
 	errChan := make(chan error, 1)
 	defer close(errChan)
 
@@ -646,8 +650,9 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], metadata *Me
 		return
 	}
 
+	log.Debug("[RuntimeApplication] goroutine executed", "key", key, "metadata", metadata.String(), "vertex", vertex)
+
 	if metadata.HasKey() {
-		// fmt.Println("metadata.HasKey()", state.rootVertex, vertex)
 		if metadata.GetKey() == g.computedRootKey {
 			if err = state.graph.AddEdge(state.rootVertex, vertex); err != nil {
 				// TODO: log error on cerr

@@ -1,17 +1,31 @@
 package gronos
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
+
+	"github.com/charmbracelet/log"
 )
 
 type Metadata[K comparable] struct {
-	data sync.Map
+	data     sync.Map
+	returned bool
 }
 
 func NewMetadata[K comparable]() *Metadata[K] {
 	return &Metadata[K]{}
+}
+
+func (m *Metadata[K]) Put() {
+	if !m.returned {
+		m.returned = true
+		metadataPool.Put(m)
+	} else {
+		log.Debug("Attempted to return metadata to pool more than once")
+	}
 }
 
 func (m *Metadata[K]) Get(key string) interface{} {
@@ -125,4 +139,44 @@ func (m *Metadata[K]) HasName() bool {
 func (m *Metadata[K]) HasError() bool {
 	_, ok := m.data.Load("$error")
 	return ok
+}
+
+func (m *Metadata[K]) String() string {
+	var buffer bytes.Buffer
+
+	buffer.WriteString("Metadata {\n")
+
+	// Helper function to write a formatted line
+	writeLine := func(key string, value interface{}) {
+		buffer.WriteString(fmt.Sprintf("  %-10s: %v\n", key, value))
+	}
+
+	// Special fields
+	if m.HasKey() {
+		writeLine("Key", m.GetKeyString())
+	}
+	if m.HasID() {
+		writeLine("ID", m.GetID())
+	}
+	if m.HasType() {
+		writeLine("Type", m.GetType())
+	}
+	if m.HasName() {
+		writeLine("Name", m.GetName())
+	}
+	if m.HasError() {
+		writeLine("Error", m.GetError())
+	}
+
+	// Other fields
+	m.data.Range(func(key, value interface{}) bool {
+		k := key.(string)
+		if !strings.HasPrefix(k, "$") { // Skip special fields already handled
+			writeLine(k, value)
+		}
+		return true
+	})
+
+	buffer.WriteString("}")
+	return buffer.String()
 }

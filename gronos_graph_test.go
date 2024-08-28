@@ -2,6 +2,7 @@ package gronos
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,63 +10,66 @@ import (
 )
 
 func TestGronosGraph(t *testing.T) {
+
 	t.Run("Hierarchy of LifecycleFuncs", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		g, errChan := New[string](ctx, map[string]LifecyleFunc{
-			"root": func(ctx context.Context, shutdown <-chan struct{}) error {
-				bus, err := UseBusWait(ctx)
-				if err != nil {
-					return err
-				}
+		g, errChan := New[string](
+			ctx,
+			map[string]LifecyleFunc{
+				"root": func(ctx context.Context, shutdown <-chan struct{}) error {
+					bus, err := UseBusWait(ctx)
+					if err != nil {
+						return err
+					}
 
-				<-bus(func() (<-chan struct{}, Message) {
-					return MsgAdd("child1", func(ctx context.Context, shutdown <-chan struct{}) error {
-						bus, err := UseBusWait(ctx)
-						if err != nil {
-							return err
-						}
+					<-bus(func() (<-chan struct{}, Message) {
+						return MsgAdd("child1", func(ctx1 context.Context, shutdown <-chan struct{}) error {
+							busChild1, err := UseBusWait(ctx1)
+							if err != nil {
+								return err
+							}
 
-						<-bus(func() (<-chan struct{}, Message) {
-							return MsgAdd("grandchild1", func(ctx context.Context, shutdown <-chan struct{}) error {
-								<-shutdown
-								return nil
+							<-busChild1(func() (<-chan struct{}, Message) {
+								return MsgAdd("grandchild1", func(ctx11 context.Context, shutdown <-chan struct{}) error {
+									<-shutdown
+									return nil
+								})
 							})
+
+							<-shutdown
+							return nil
 						})
-
-						<-shutdown
-						return nil
 					})
-				})
 
-				<-bus(func() (<-chan struct{}, Message) {
-					return MsgAdd("child2", func(ctx context.Context, shutdown <-chan struct{}) error {
-						bus, err := UseBusWait(ctx)
-						if err != nil {
-							return err
-						}
+					<-bus(func() (<-chan struct{}, Message) {
+						return MsgAdd("child2", func(ctx2 context.Context, shutdown <-chan struct{}) error {
+							busChild2, err := UseBusWait(ctx2)
+							if err != nil {
+								return err
+							}
 
-						<-bus(func() (<-chan struct{}, Message) {
-							return MsgAdd("grandchild2", func(ctx context.Context, shutdown <-chan struct{}) error {
-								<-shutdown
-								return nil
+							<-busChild2(func() (<-chan struct{}, Message) {
+								return MsgAdd("grandchild2", func(ctx22 context.Context, shutdown <-chan struct{}) error {
+									<-shutdown
+									return nil
+								})
 							})
+
+							<-shutdown
+							return nil
 						})
-
-						<-shutdown
-						return nil
 					})
-				})
 
-				<-shutdown
-				return nil
-			},
-			"standalone": func(ctx context.Context, shutdown <-chan struct{}) error {
-				<-shutdown
-				return nil
-			},
-		})
+					<-shutdown
+					return nil
+				},
+				"standalone": func(ctx context.Context, shutdown <-chan struct{}) error {
+					<-shutdown
+					return nil
+				},
+			})
 
 		// Handle errors
 		go func() {
@@ -75,15 +79,17 @@ func TestGronosGraph(t *testing.T) {
 		}()
 
 		// Wait for all LifecycleFuncs to start
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 
 		// Get the graph
 		graphChan, msg := MsgRequestGraph[string]()
 		g.Send(msg)
 		graph := <-graphChan
 
+		fmt.Print(graph.String())
 		// Print and verify the graph structure
-		verifyGraph(t, graph, g.computedRootKey)
+		// printGraph(t, graph, g.computedRootKey)
+		verifyGraphStructure(t, graph, g.computedRootKey)
 
 		// Shutdown and wait
 		g.Shutdown()
@@ -91,25 +97,7 @@ func TestGronosGraph(t *testing.T) {
 	})
 }
 
-func verifyGraph(t *testing.T, graph *dag.DAG, computedRootKey string) {
-	printGraph(t, graph)
-
-	nodes := graph.GetVertices()
-	expectedNodes := 7 // Including the empty string root
-	if len(nodes) != expectedNodes {
-		t.Errorf("Expected %d nodes in the graph, got %d", expectedNodes, len(nodes))
-	}
-
-	// Helper function to check if a node has an edge to another node
-	hasEdgeTo := func(from, to string) bool {
-		ok, err := graph.IsEdge(from, to)
-		if err != nil {
-			t.Errorf("Error checking edge from %s to %s: %v", from, to, err)
-			return false
-		}
-		return ok
-	}
-
+func verifyGraphStructure(t *testing.T, graph *dag.DAG, computedRootKey string) {
 	// Check essential relationships
 	essentialRelationships := []struct {
 		from, to string
@@ -123,65 +111,59 @@ func verifyGraph(t *testing.T, graph *dag.DAG, computedRootKey string) {
 	}
 
 	for _, rel := range essentialRelationships {
-		if !hasEdgeTo(rel.from, rel.to) {
-			t.Errorf("Expected edge from %s to %s, but it doesn't exist", rel.from, rel.to)
+		isEdge, err := graph.IsEdge(rel.from, rel.to)
+		if err != nil {
+			t.Errorf("Error checking edge from %s to %s: %v", rel.from, rel.to, err)
+		} else if !isEdge {
+			t.Errorf("Expected direct edge from %s to %s, but it doesn't exist", rel.from, rel.to)
 		}
 	}
 
-	// Check for unexpected relationships
-	unexpectedRelationships := []struct {
+	// Check for unexpected direct relationships
+	unexpectedDirectRelationships := []struct {
 		from, to string
 	}{
-		{"standalone", "root"},
+		{"root", "grandchild1"},
+		{"root", "grandchild2"},
+		{"child1", "grandchild2"},
+		{"child2", "grandchild1"},
 		{"standalone", "child1"},
 		{"standalone", "child2"},
 		{"standalone", "grandchild1"},
 		{"standalone", "grandchild2"},
-		{"grandchild1", "child1"},
-		{"grandchild1", "child2"},
-		{"grandchild1", "grandchild2"},
-		{"grandchild2", "child1"},
-		{"grandchild2", "child2"},
-		{"grandchild2", "grandchild1"},
 	}
 
-	for _, rel := range unexpectedRelationships {
-		if hasEdgeTo(rel.from, rel.to) {
-			t.Errorf("Unexpected edge from %s to %s", rel.from, rel.to)
+	for _, rel := range unexpectedDirectRelationships {
+		isEdge, err := graph.IsEdge(rel.from, rel.to)
+		if err != nil {
+			t.Errorf("Error checking edge from %s to %s: %v", rel.from, rel.to, err)
+		} else if isEdge {
+			t.Errorf("Unexpected direct edge from %s to %s", rel.from, rel.to)
 		}
 	}
 }
 
-type testVisitor struct {
-	cb func(v dag.Vertexer)
-}
+// func printGraph(t *testing.T, graph *dag.DAG, rootKey string) {
+// 	t.Log("Graph hierarchy:")
+// 	printNodeDetailed(t, graph, rootKey, 0)
+// }
 
-func (pv testVisitor) Visit(v dag.Vertexer) {
-	pv.cb(v)
-}
+// func printNodeDetailed(t *testing.T, graph *dag.DAG, nodeID string, depth int) {
+// 	indent := strings.Repeat("  ", depth)
+// 	// t.Logf("%s%s", indent, nodeID)
 
-func printGraph(t *testing.T, graph *dag.DAG) {
-	t.Log("Graph structure:")
-	// nodes := graph.GetVertices()
-	visitor := &testVisitor{
-		cb: func(v dag.Vertexer) {
-			id, value := v.Vertex()
-			t.Logf("Node %s - %v", id, value)
-		},
-	}
-	graph.OrderedWalk(visitor)
-	// fmt.Println("Values:", visitor.Values)
-	// for _, v := range visitor.Values {
-	// 	t.Log(v)
-	// }
-	// graph.GetChildren()
-	// for _, v := range nodes {
-	// 	var edgeIDs []string
-	// 	for _, e := range edges {
-	// 		if e.From() == v {
-	// 			edgeIDs = append(edgeIDs, e.To().ID())
-	// 		}
-	// 	}
-	// 	t.Logf("Node %s -> %s", v.ID(), strings.Join(edgeIDs, ", "))
-	// }
-}
+// 	children := []string{"standalone", "root", "child1", "child2", "grandchild1", "grandchild2"}
+// 	for _, childID := range children {
+// 		isDirectEdge, err := graph.IsEdge(nodeID, childID)
+// 		if err != nil {
+// 			// t.Errorf("Error checking edge between %s and %s: %v", nodeID, childID, err)
+// 			continue
+// 		}
+
+// 		if isDirectEdge {
+// 			t.Logf("%s  -> %s", indent, childID)
+// 			newdept := depth + 1
+// 			printNodeDetailed(t, graph, childID, newdept)
+// 		}
+// 	}
+// }

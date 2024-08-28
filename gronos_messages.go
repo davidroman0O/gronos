@@ -3,7 +3,6 @@ package gronos
 import (
 	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/charmbracelet/log"
 )
@@ -32,13 +31,7 @@ type RequestMessage[K comparable, Y any] struct {
 // handleMessage processes incoming messages and updates the gronos state accordingly.
 func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload[K]) error {
 
-	log.Debug("[GronosMessage] handle message", "name", m.Metadata.GetName(), "metadata", m.Metadata, "message", m.Message)
-
-	// clean up pool data
-	defer func() {
-		metadataPool.Put(m.Metadata)
-		messagePayloadPool.Put(m)
-	}()
+	log.Debug("[GronosMessage] handle message", "metadata", m.String(), "message", m.Message)
 
 	// Try to handle the message with the gronos core
 	coreErr := g.handleGronosMessage(state, m)
@@ -62,9 +55,6 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload[K]) e
 
 	// If the message wasn't handled by core or any extension, return an error
 	if errors.Is(coreErr, ErrUnhandledMessage) {
-		fmt.Println(reflect.TypeOf(m.Message).Name())
-		fmt.Println(m.Message)
-		fmt.Println(m.Metadata)
 		return fmt.Errorf("unhandled message type: %T", m)
 	}
 
@@ -73,7 +63,6 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload[K]) e
 }
 
 func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload[K]) error {
-	log.Debug("[GronosMessage] handle gronos message", reflect.TypeOf(m).Name(), m)
 
 	// While read the rest of the functions: if you're asking "wouldn't be simpler with a map?"
 	// the answer is simple, i don't want to impede on the performance of the user of gronos
@@ -81,10 +70,6 @@ func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload
 	// If i use a map, sure it might add some flexibility FOR ME but who cares? I will manage it
 	// i don't want YOU to have a map that will add extract code execution time to your code
 	// If you have to use a library, it has to use a less cpu cycle as possible
-
-	defer func() {
-		metadataPool.Put(m.Metadata) // clean up pool data
-	}()
 
 	// Error should always be the highest priority
 	switch msg := m.Message.(type) {
