@@ -99,8 +99,8 @@ func TestGronos(t *testing.T) {
 		g.Send(msgg)
 		state := <-data
 
-		if state.GetSize() != 0 {
-			t.Fatalf("Expected 0 applications, got %d", state.GetSize())
+		if state.Size() != 0 {
+			t.Fatalf("Expected 0 applications, got %d", state.Size())
 		}
 
 		select {

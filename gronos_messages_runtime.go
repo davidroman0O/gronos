@@ -8,6 +8,7 @@ import (
 
 	"github.com/avast/retry-go/v3"
 	"github.com/charmbracelet/log"
+	"github.com/hmdsefi/gograph"
 )
 
 type AddMessage[K comparable] struct {
@@ -314,10 +315,14 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 		state.mdone.Delete(key)
 		state.mcloser.Delete(key)
 		state.mcancel.Delete(key)
-		if err := state.graph.DeleteVertex(fmt.Sprintf("%v", key)); err != nil {
-			log.Error("[GronosMessage] [RemoveMessage] failed to delete vertex", key, err)
-			return err
-		}
+
+		state.Do(func(s *gronosState[K]) {
+			s.graph.RemoveVertices(gograph.NewVertex(key))
+		})
+		// if err := state.graph.DeleteVertex(fmt.Sprintf("%v", key)); err != nil {
+		// 	log.Error("[GronosMessage] [RemoveMessage] failed to delete vertex", key, err)
+		// 	return err
+		// }
 		log.Debug("[GronosMessage] [RemoveMessage] application removed", key)
 		done <- true
 		close(done)
@@ -639,39 +644,55 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], metadata *Me
 	defer close(errChan)
 
 	// TODO: add priority for shutdown as a weight
-	// vertex := gograph.NewVertex(key, gograph.WithVertexWeight(1))
-	// state.graph.AddVertex(vertex)
-	var err error
-	var vertex string
+	vertex := gograph.NewVertex(key, gograph.WithVertexWeight(1))
+	state.Do(func(s *gronosState[K]) {
+		s.graph.AddVertex(vertex)
 
-	if vertex, err = state.graph.AddVertex(NewLifecycleVertexData(key)); err != nil {
-		// TODO: log error on cerr
-		log.Error("[RuntimeApplication] failed to add vertex", key, err)
-		return
-	}
-
-	log.Debug("[RuntimeApplication] goroutine executed", "key", key, "metadata", metadata.String(), "vertex", vertex)
-
-	if metadata.HasKey() {
-		fmt.Println("metadata.HasKey()", state.rootVertex, vertex)
-		if metadata.GetKey() == g.computedRootKey {
-			if err = state.graph.AddEdge(state.rootVertex, vertex); err != nil {
-				// TODO: log error on cerr
-				log.Error("[RuntimeApplication] failed to add edge", state.rootVertex, vertex, err)
-				return
+		if metadata.HasKey() {
+			fmt.Println("metadata.HasKey()", s.rootVertex, vertex)
+			if metadata.GetKey() == g.computedRootKey {
+				s.graph.AddEdge(s.rootVertex, vertex)
+			} else {
+				fmt.Println("\tparent", metadata.GetKey(), "of", vertex)
+				s.graph.AddEdge(gograph.NewVertex(metadata.GetKey()), vertex)
 			}
 		} else {
-			parent := metadata.GetKeyString()
-			fmt.Println("\tparent", parent, "of", vertex)
-			if err = state.graph.AddEdge(parent, vertex); err != nil {
-				// TODO: log error on cerr
-				log.Error("[RuntimeApplication] failed to add edge", parent, vertex, err)
-				return
-			}
+			// TODO: i think that a bug, come back later to think about it
 		}
-	} else {
-		// TODO: i think that a bug, come back later to think about it
-	}
+	})
+
+	var err error
+
+	// var vertex string
+
+	// if vertex, err = state.graph.AddVertex(NewLifecycleVertexData(key)); err != nil {
+	// 	// TODO: log error on cerr
+	// 	log.Error("[RuntimeApplication] failed to add vertex", key, err)
+	// 	return
+	// }
+
+	// log.Debug("[RuntimeApplication] goroutine executed", "key", key, "metadata", metadata.String(), "vertex", vertex)
+
+	// if metadata.HasKey() {
+	// 	fmt.Println("metadata.HasKey()", state.rootVertex, vertex)
+	// 	if metadata.GetKey() == g.computedRootKey {
+	// 		if err = state.graph.AddEdge(state.rootVertex, vertex); err != nil {
+	// 			// TODO: log error on cerr
+	// 			log.Error("[RuntimeApplication] failed to add edge", state.rootVertex, vertex, err)
+	// 			return
+	// 		}
+	// 	} else {
+	// 		parent := metadata.GetKeyString()
+	// 		fmt.Println("\tparent", parent, "of", vertex)
+	// 		if err = state.graph.AddEdge(parent, vertex); err != nil {
+	// 			// TODO: log error on cerr
+	// 			log.Error("[RuntimeApplication] failed to add edge", parent, vertex, err)
+	// 			return
+	// 		}
+	// 	}
+	// } else {
+	// 	// TODO: i think that a bug, come back later to think about it
+	// }
 
 	done := make(chan struct{})
 	state.wait.Add(1)

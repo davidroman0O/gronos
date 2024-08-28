@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
-	"github.com/heimdalr/dag"
+	"github.com/hmdsefi/gograph"
 )
 
 type RequestStatus[K comparable] struct {
@@ -36,7 +36,7 @@ type RequestStatusAsync[K comparable] struct {
 }
 
 type RequestGraph[K comparable] struct {
-	RequestMessage[K, *dag.DAG]
+	RequestMessage[K, gograph.Graph[K]]
 }
 
 var requestStatusPoolInited bool
@@ -135,7 +135,7 @@ func MsgRequestStatusAsync[K comparable](key K, when StatusState) (<-chan struct
 	return response, msg
 }
 
-func MsgRequestGraph[K comparable]() (<-chan *dag.DAG, *RequestGraph[K]) {
+func MsgRequestGraph[K comparable]() (<-chan gograph.Graph[K], *RequestGraph[K]) {
 	if !requestGraphInited {
 		requestGraphInited = true
 		requestGraphPool = sync.Pool{
@@ -145,7 +145,7 @@ func MsgRequestGraph[K comparable]() (<-chan *dag.DAG, *RequestGraph[K]) {
 		}
 	}
 	msg := requestGraphPool.Get().(*RequestGraph[K])
-	msg.Response = make(chan *dag.DAG, 1)
+	msg.Response = make(chan gograph.Graph[K], 1)
 	return msg.Response, msg
 }
 
@@ -174,8 +174,10 @@ func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload[
 	case *RequestGraph[K]:
 		log.Debug("[GronosMessage] [RequestGraph]")
 		defer requestGraphPool.Put(msg)
-		msg.Response <- state.graph
-		close(msg.Response)
+		state.Do(func(s *gronosState[K]) {
+			msg.Response <- s.graph
+			close(msg.Response)
+		})
 		return nil, true
 	}
 	return nil, false

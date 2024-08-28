@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
-	"github.com/heimdalr/dag"
+	"github.com/hmdsefi/gograph"
 )
 
 // I can't believe we still don't have this in the standard library
@@ -196,11 +196,13 @@ func (n *LifecycleVertexData[K]) SetMetadata(metadata map[string]string) {
 
 // gronos instance doesn't know about the state, you have to request it for goroutine safety
 type gronosState[K Primitive] struct {
+	sync.Mutex
+
 	rootKey    K
-	rootVertex string
+	rootVertex *gograph.Vertex[K]
 
 	// We need to know dynamically the structure of the application
-	graph *dag.DAG
+	graph gograph.Graph[K]
 
 	// it add a slight overhead in memory but faster access
 	// we mostly do reads so it's fine to have sync.Map
@@ -221,6 +223,12 @@ type gronosState[K Primitive] struct {
 	wait              sync.WaitGroup
 	automaticShutdown atomic.Bool
 	shutting          atomic.Bool
+}
+
+func (state *gronosState[K]) Do(fn func(s *gronosState[K])) {
+	state.Lock()
+	defer state.Unlock()
+	fn(state)
 }
 
 type Option[K Primitive] func(*gronos[K])
@@ -251,7 +259,7 @@ func WithRootKey[K Primitive](key K) Option[K] {
 // New creates a new gronos instance with the given context and initial applications.
 func New[K Primitive](ctx context.Context, init map[K]LifecyleFunc, opts ...Option[K]) (*gronos[K], chan error) {
 
-	log.Default().SetLevel(log.DebugLevel) // debug
+	// log.Default().SetLevel(log.DebugLevel) // debug
 
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
@@ -603,11 +611,14 @@ func (g *gronos[K]) run(errChan chan<- error) {
 		g.sendMessage(g.getSystemMetadata(), MsgDestroy[K]())
 	}()
 
-	dag := dag.NewDAG()
-
 	state := &gronosState[K]{
+
 		// dag with weights
-		graph:   dag,
+		graph: gograph.New[K](
+			gograph.Acyclic(),
+			gograph.Directed(),
+			gograph.Weighted(),
+		),
 		mkeys:   &GMap[K, K]{},
 		mapp:    &GMap[K, LifecyleFunc]{},
 		mctx:    &GMap[K, context.Context]{},
@@ -625,11 +636,16 @@ func (g *gronos[K]) run(errChan chan<- error) {
 	// Prepare the graph
 	state.rootKey = g.getRootKey()
 
-	var err error
-	if state.rootVertex, err = state.graph.AddVertex(NewLifecycleVertexData(state.rootKey)); err != nil {
-		errChan <- fmt.Errorf("error adding root vertex: %w", err)
-		return
-	}
+	state.Do(func(s *gronosState[K]) {
+		vertex := s.graph.AddVertexByLabel(s.rootKey)
+		s.rootVertex = vertex
+	})
+
+	// var err error
+	// if state.rootVertex, err = state.graph.AddVertex(NewLifecycleVertexData(state.rootKey)); err != nil {
+	// 	errChan <- fmt.Errorf("error adding root vertex: %w", err)
+	// 	return
+	// }
 
 	g.startTime = time.Now()
 
