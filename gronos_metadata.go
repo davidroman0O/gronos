@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/log"
 )
@@ -26,6 +27,10 @@ func (m *Metadata[K]) Put() {
 	} else {
 		log.Debug("Attempted to return metadata to pool more than once")
 	}
+}
+
+func (m *Metadata[K]) Timestamp() {
+	m.Set("timestamp", time.Now().UnixMilli())
 }
 
 func (m *Metadata[K]) Get(key string) interface{} {
@@ -144,28 +149,33 @@ func (m *Metadata[K]) HasError() bool {
 func (m *Metadata[K]) String() string {
 	var buffer bytes.Buffer
 
-	buffer.WriteString("Metadata {\n")
+	buffer.WriteString(fmt.Sprintf("Metadata at %p {\n", m))
 
-	// Helper function to write a formatted line
+	// Helper function to write a formatted line with pointer
 	writeLine := func(key string, value interface{}) {
-		buffer.WriteString(fmt.Sprintf("  %-10s: %v\n", key, value))
+		buffer.WriteString(fmt.Sprintf("  %-10s: %v (at %p)\n", key, value, &value))
 	}
 
 	// Special fields
 	if m.HasKey() {
-		writeLine("Key", m.GetKeyString())
+		key := m.GetKeyString()
+		writeLine("Key", key)
 	}
 	if m.HasID() {
-		writeLine("ID", m.GetID())
+		id := m.GetID()
+		writeLine("ID", id)
 	}
 	if m.HasType() {
-		writeLine("Type", m.GetType())
+		typeVal := m.GetType()
+		writeLine("Type", typeVal)
 	}
 	if m.HasName() {
-		writeLine("Name", m.GetName())
+		name := m.GetName()
+		writeLine("Name", name)
 	}
 	if m.HasError() {
-		writeLine("Error", m.GetError())
+		err := m.GetError()
+		writeLine("Error", err)
 	}
 
 	// Other fields

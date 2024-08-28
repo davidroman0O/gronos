@@ -653,6 +653,7 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], metadata *Me
 	log.Debug("[RuntimeApplication] goroutine executed", "key", key, "metadata", metadata.String(), "vertex", vertex)
 
 	if metadata.HasKey() {
+		fmt.Println("metadata.HasKey()", state.rootVertex, vertex)
 		if metadata.GetKey() == g.computedRootKey {
 			if err = state.graph.AddEdge(state.rootVertex, vertex); err != nil {
 				// TODO: log error on cerr
@@ -661,6 +662,7 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], metadata *Me
 			}
 		} else {
 			parent := metadata.GetKeyString()
+			fmt.Println("\tparent", parent, "of", vertex)
 			if err = state.graph.AddEdge(parent, vertex); err != nil {
 				// TODO: log error on cerr
 				log.Error("[RuntimeApplication] failed to add edge", parent, vertex, err)

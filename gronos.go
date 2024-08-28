@@ -251,7 +251,7 @@ func WithRootKey[K Primitive](key K) Option[K] {
 // New creates a new gronos instance with the given context and initial applications.
 func New[K Primitive](ctx context.Context, init map[K]LifecyleFunc, opts ...Option[K]) (*gronos[K], chan error) {
 
-	// log.Default().SetLevel(log.DebugLevel) // debug
+	log.Default().SetLevel(log.DebugLevel) // debug
 
 	ctx, cancel := context.WithCancel(ctx)
 	g := &gronos[K]{
@@ -429,12 +429,22 @@ func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) *Messag
 }
 
 func (g *gronos[K]) poolMetadata() *Metadata[K] {
-	value := metadataPool.Get().(*Metadata[K])
-	// if value.returned {
-	// 	value.returned = false
-	// 	value.Clear()
-	// }
-	log.Debug("get new metadata", value.String())
+	var value *Metadata[K]
+	for {
+		value = metadataPool.Get().(*Metadata[K])
+		// If we got a metadata object that wasn't put back in the pool, we need to get another one
+		if value.returned {
+			fmt.Println("metadata good to go")
+			break
+		} else {
+			fmt.Println("trying to use metadata that wasn't returned yet")
+			value = metadataPool.New().(*Metadata[K])
+			break
+		}
+	}
+	value.Clear()
+	value.returned = false // casue it was returned
+	log.Debug("get new metadata", "metadata", value.String())
 	return value
 }
 
@@ -811,42 +821,25 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	ctx = context.WithValue(ctx, keyKey, key)
 
 	ctx = context.WithValue(ctx, comKey, func(m Message) bool {
-		metadataAny := metadataPool.Get()
-		metadata := metadataAny.(*Metadata[K])
-
+		metadata := g.poolMetadata()
 		log.Debug("get new metadata for sendMessage", metadata.String())
-		// if metadata.returned {
-		// 	metadata.returned = false
-		// 	metadata.Clear()
-		// }
 		metadata.SetID(contextID)
 		metadata.SetKey(key)
 		return g.sendMessage(metadata, m)
 	})
 
 	ctx = context.WithValue(ctx, comKeyWait, func(fn FnWait) <-chan struct{} {
-		metadataAny := metadataPool.Get()
-		metadata := metadataAny.(*Metadata[K])
+		metadata := g.poolMetadata()
 
 		log.Debug("get new metadata for sendMessageWait", metadata.String())
-		// if metadata.returned {
-		// 	metadata.returned = false
-		// 	metadata.Clear()
-		// }
 		metadata.SetID(contextID)
 		metadata.SetKey(key)
 		return g.sendMessageWait(metadata, fn)
 	})
 
 	ctx = context.WithValue(ctx, comKeyConfirm, func(fn FnConfirm) <-chan bool {
-		metadataAny := metadataPool.Get()
-		metadata := metadataAny.(*Metadata[K])
-
+		metadata := g.poolMetadata()
 		log.Debug("get new metadata for sendMessageConfirm", metadata.String())
-		// if metadata.returned {
-		// 	metadata.returned = false
-		// 	metadata.Clear()
-		// }
 		metadata.SetID(contextID)
 		metadata.SetKey(key)
 		return g.sendMessageConfirm(metadata, fn)
