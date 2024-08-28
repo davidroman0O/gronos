@@ -124,7 +124,6 @@ type MessagePayload[K Primitive] struct {
 	Message
 }
 
-var messagePayloadPool sync.Pool
 var runtimeApplicationIncrement = 0
 
 func newIncrement() int {
@@ -132,12 +131,11 @@ func newIncrement() int {
 	return runtimeApplicationIncrement
 }
 
-var metadataPool sync.Pool
-
 // gronos is the main struct that manages concurrent applications.
 // It is parameterized by a any key type K.
 type gronos[K Primitive] struct {
-	com chan *MessagePayload[K]
+	publicChn  chan *MessagePayload[K] // communication and events
+	privateChn chan Message            // internal preparations
 
 	// main waiting group for all applications
 	// wait sync.WaitGroup
@@ -199,6 +197,9 @@ type gronosState[K Primitive] struct {
 	rootKey    K
 	rootVertex string
 
+	metadataPool       sync.Pool
+	messagePayloadPool sync.Pool
+
 	// We need to know dynamically the structure of the application
 	graph *dag.DAG
 
@@ -257,8 +258,9 @@ func New[K Primitive](ctx context.Context, init map[K]LifecyleFunc, opts ...Opti
 	g := &gronos[K]{
 		init: init,
 
-		com:    make(chan *MessagePayload[K], 500),
-		cancel: cancel,
+		privateChn: make(chan Message, 100),
+		publicChn:  make(chan *MessagePayload[K], 500),
+		cancel:     cancel,
 		// Context will be monitored to detect cancellation and trigger ForceCancelShutdown
 		ctx: ctx,
 		// Shutdown channel will be monitored to detect shutdown and trigger ForceTerminateShutdown
@@ -293,29 +295,13 @@ func New[K Primitive](ctx context.Context, init map[K]LifecyleFunc, opts ...Opti
 		g.hasRootKey.Store(true)
 	}
 
-	// dynamically
-	metadataPool = sync.Pool{
-		New: func() interface{} {
-			return NewMetadata[K]()
-		},
-	}
-
-	messagePayloadPool = sync.Pool{
-		New: func() interface{} {
-			return &MessagePayload[K]{
-				Metadata: nil,
-				Message:  nil,
-			}
-		},
-	}
-
 	return g, g.Start()
 }
 
 func (g *gronos[K]) reinitialize() {
 	g.shutdownChan = make(chan struct{})
 	g.doneChan = make(chan struct{})
-	g.com = make(chan *MessagePayload[K], 200)
+	g.publicChn = make(chan *MessagePayload[K], 200)
 	g.errChan = make(chan error, 100)
 	g.isShutting.Store(false)
 	g.started.Store(false)
@@ -350,6 +336,8 @@ func (g *gronos[K]) Start() chan error {
 
 	// really starting it so we can process messages from here
 	go g.run(g.errChan)
+
+	go g.internals(g.errChan)
 
 	// TODO: might send them all at once and wait for all of them to be added
 	for k, v := range g.init {
@@ -403,9 +391,30 @@ func (g *gronos[K]) OnDone() <-chan struct{} {
 
 // We don't want to infringe on the memory space of the user
 // It will be Put back when the message is processed
-func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) *MessagePayload[K] {
-	payload := messagePayloadPool.Get()
-	msgPayload := payload.(*MessagePayload[K])
+func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) (*MessagePayload[K], error) {
+
+	resp, msg := MsgRequestPayload[K]()
+	if !g.send(msg) {
+		return nil, fmt.Errorf("unable to request payload, channel closed")
+	}
+
+	value, err := resp.Wait(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	switch msg := value.(type) {
+	case Success[MessagePayload[K]]:
+		payload := msg.Value
+	case Failure:
+		return nil, msg.Err
+	}
+
+	// it is not a regular message
+	if metadata == nil {
+		return msgPayload, nil
+	}
+
 	msgPayload.Metadata = metadata
 
 	// it's always pointers normally
@@ -424,28 +433,23 @@ func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) *Messag
 	if _, loaded := g.typeMapping.LoadOrStore(msgPayload.Metadata.GetName(), typeOf); !loaded {
 		// TODO: send an event for metrics for "new message type" detected
 	}
+
 	msgPayload.Message = m
-	return msgPayload
+	return msgPayload, nil
 }
 
 func (g *gronos[K]) poolMetadata() *Metadata[K] {
-	var value *Metadata[K]
-	for {
-		value = metadataPool.Get().(*Metadata[K])
-		// If we got a metadata object that wasn't put back in the pool, we need to get another one
-		if value.returned {
-			fmt.Println("metadata good to go")
-			break
-		} else {
-			fmt.Println("trying to use metadata that wasn't returned yet")
-			value = metadataPool.New().(*Metadata[K])
-			break
-		}
+	future, msg := MsgRequestMetadata[K]()
+	if !g.send(msg) {
+		return nil
 	}
-	value.Clear()
-	value.returned = false // casue it was returned
-	log.Debug("get new metadata", "metadata", value.String())
-	return value
+	switch value := future.Get().(type) {
+	case Success[*Metadata[K]]:
+		return value.Value
+	case Failure:
+		return nil
+	}
+
 }
 
 func (g *gronos[K]) getSystemMetadata() *Metadata[K] {
@@ -467,13 +471,31 @@ func (g *gronos[K]) Confirm(fn FnConfirm) <-chan bool {
 	return g.sendMessageConfirm(g.getSystemMetadata(), fn)
 }
 
-func (g *gronos[K]) sendMessage(metadata *Metadata[K], m Message) bool {
+func (g *gronos[K]) send(m Message) bool {
 	if !g.comClosed.Load() {
 		select {
-		case g.com <- g.poolMessagePayload(metadata, m):
+		case g.privateChn <- m:
 			return true
 		default:
-			log.Debug("[Gronos] Unable to send message, channel might be full")
+			log.Debug("[Gronos] Unable to send message, com channel might be full")
+			return false
+		}
+	}
+	return false
+}
+
+func (g *gronos[K]) sendMessage(metadata *Metadata[K], m Message) bool {
+	if !g.comClosed.Load() {
+		payload, err := g.poolMessagePayload(metadata, m)
+		if err != nil {
+			log.Debug("[Gronos] Unable to pool message payload")
+			return false
+		}
+		select {
+		case g.publicChn <- payload:
+			return true
+		default:
+			log.Debug("[Gronos] Unable to send message, internal channel might be full")
 			return false
 		}
 	}
@@ -488,8 +510,13 @@ func (g *gronos[K]) sendMessageWait(metadata *Metadata[K], fn FnWait) <-chan str
 	done, msg := fn()
 
 	if !g.comClosed.Load() {
+		payload, err := g.poolMessagePayload(metadata, msg)
+		if err != nil {
+			log.Debug("[Gronos] Unable to pool message payload")
+			return done
+		}
 		select {
-		case g.com <- g.poolMessagePayload(metadata, msg):
+		case g.publicChn <- payload:
 			return done
 		default:
 			log.Debug("[Gronos] Unable to send message, channel might be full")
@@ -507,8 +534,13 @@ func (g *gronos[K]) sendMessageConfirm(metadata *Metadata[K], fn FnConfirm) <-ch
 	done, msg := fn()
 
 	if !g.comClosed.Load() {
+		payload, err := g.poolMessagePayload(metadata, msg)
+		if err != nil {
+			log.Debug("[Gronos] Unable to pool message payload")
+			return done
+		}
 		select {
-		case g.com <- g.poolMessagePayload(metadata, msg):
+		case g.publicChn <- payload:
 			return done
 		default:
 			log.Debug("[Gronos] Unable to send message, channel might be full")
@@ -585,73 +617,6 @@ func (g *gronos[K]) getRootKey() K {
 		}
 	}
 	return rootKey
-}
-
-// run is the main loop of the gronos instance, handling messages and managing applications.
-func (g *gronos[K]) run(errChan chan<- error) {
-
-	log.Debug("[Gronos] Entering run method")
-	defer log.Debug("[Gronos] Exiting run method")
-
-	defer func() {
-		// Apply extensions' OnStop hooks
-		for _, ext := range g.extensions {
-			if err := ext.OnStop(g.ctx, errChan); err != nil {
-				errChan <- fmt.Errorf("extension error on stop: %w", err)
-			}
-		}
-		g.sendMessage(g.getSystemMetadata(), MsgDestroy[K]())
-	}()
-
-	dag := dag.NewDAG()
-
-	state := &gronosState[K]{
-		// dag with weights
-		graph:   dag,
-		mkeys:   &GMap[K, K]{},
-		mapp:    &GMap[K, LifecyleFunc]{},
-		mctx:    &GMap[K, context.Context]{},
-		mcom:    &GMap[K, chan *MessagePayload[K]]{},
-		mret:    &GMap[K, uint]{},
-		mshu:    &GMap[K, chan struct{}]{},
-		mali:    &GMap[K, bool]{},
-		mrea:    &GMap[K, error]{},
-		mcloser: &GMap[K, func()]{},
-		mcancel: &GMap[K, func()]{},
-		mstatus: &GMap[K, StatusState]{},
-		mdone:   &GMap[K, chan struct{}]{},
-	}
-
-	// Prepare the graph
-	state.rootKey = g.getRootKey()
-
-	var err error
-	if state.rootVertex, err = state.graph.AddVertex(NewLifecycleVertexData(state.rootKey)); err != nil {
-		errChan <- fmt.Errorf("error adding root vertex: %w", err)
-		return
-	}
-
-	g.startTime = time.Now()
-
-	// global shutdown or cancellation detection
-	go func() {
-		select {
-		case <-g.ctx.Done():
-			log.Debug("[Gronos] Context cancelled, initiating shutdown")
-			g.sendMessage(g.getSystemMetadata(), MsgInitiateContextCancellation[K]())
-		case <-g.shutdownChan:
-			log.Debug("[Gronos] Shutdown initiated, initiating shutdown")
-			g.sendMessage(g.getSystemMetadata(), MsgInitiateShutdown[K]())
-		}
-	}()
-
-	for m := range g.com {
-		if err := g.handleMessage(state, m); err != nil {
-			errChan <- err
-		}
-		m.Metadata.Put()
-	}
-	log.Debug("[Gronos] Communication channel closed")
 }
 
 // IsStarted checks if a component has started
@@ -821,6 +786,7 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	ctx = context.WithValue(ctx, keyKey, key)
 
 	ctx = context.WithValue(ctx, comKey, func(m Message) bool {
+		log.Debug("get new metadata for sendMessage", key)
 		metadata := g.poolMetadata()
 		log.Debug("get new metadata for sendMessage", metadata.String())
 		metadata.SetID(contextID)
@@ -829,8 +795,8 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	})
 
 	ctx = context.WithValue(ctx, comKeyWait, func(fn FnWait) <-chan struct{} {
+		log.Debug("get new metadata for sendMessageWait", key)
 		metadata := g.poolMetadata()
-
 		log.Debug("get new metadata for sendMessageWait", metadata.String())
 		metadata.SetID(contextID)
 		metadata.SetKey(key)
@@ -838,6 +804,7 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	})
 
 	ctx = context.WithValue(ctx, comKeyConfirm, func(fn FnConfirm) <-chan bool {
+		log.Debug("get new metadata for sendMessageConfirm", key)
 		metadata := g.poolMetadata()
 		log.Debug("get new metadata for sendMessageConfirm", metadata.String())
 		metadata.SetID(contextID)
@@ -867,6 +834,7 @@ func WithImmediatePeriod[K Primitive](period time.Duration) Option[K] {
 		g.config.immediatePeriod = period
 	}
 }
+
 func WithWait[K Primitive]() Option[K] {
 	return func(g *gronos[K]) {
 		g.config.wait = true

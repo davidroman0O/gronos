@@ -9,21 +9,21 @@ import (
 
 /// Each message is a set of properties that will mutate one by one the state of the system
 
-// Message is an interface type for internal communication within gronos.
+// Message is given by the user or the system, represent the data of a passed message.
 type Message interface{}
 
-type Envelope[K comparable] struct {
+type Envelope[K Primitive] struct {
 	From K
 	Message
 }
 
 // Composable header
-type KeyMessage[K comparable] struct {
+type KeyMessage[K Primitive] struct {
 	Key K
 }
 
 // Used for generic requests
-type RequestMessage[K comparable, Y any] struct {
+type RequestMessage[K Primitive, Y any] struct {
 	KeyMessage[K]
 	Response chan Y
 }

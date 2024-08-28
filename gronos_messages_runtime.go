@@ -10,62 +10,62 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-type AddMessage[K comparable] struct {
+type AddMessage[K Primitive] struct {
 	KeyMessage[K]
 	LifecyleFunc
 	RequestMessage[K, struct{}]
 }
 
-type RemoveMessage[K comparable] struct {
+type RemoveMessage[K Primitive] struct {
 	KeyMessage[K]
 	RequestMessage[K, bool]
 }
 
-type RuntimeError[K comparable] struct {
+type RuntimeError[K Primitive] struct {
 	KeyMessage[K]
 	Error error
 }
 
-func MsgRuntimeError[K comparable](key K, err error) *RuntimeError[K] {
+func MsgRuntimeError[K Primitive](key K, err error) *RuntimeError[K] {
 	return &RuntimeError[K]{KeyMessage[K]{key}, err}
 }
 
 // global system force cancel
-type ForceCancelShutdown[K comparable] struct {
+type ForceCancelShutdown[K Primitive] struct {
 	KeyMessage[K]
 	Error error
 	RequestMessage[K, struct{}]
 }
 
 // global system force terminate
-type ForceTerminateShutdown[K comparable] struct {
+type ForceTerminateShutdown[K Primitive] struct {
 	KeyMessage[K]
 	RequestMessage[K, struct{}]
 }
 
-type CancelledShutdown[K comparable] struct {
-	KeyMessage[K]
-	Error error
-	RequestMessage[K, struct{}]
-}
-
-type TerminatedShutdown[K comparable] struct {
-	RequestMessage[K, struct{}]
-}
-
-type PanickedShutdown[K comparable] struct {
+type CancelledShutdown[K Primitive] struct {
 	KeyMessage[K]
 	Error error
 	RequestMessage[K, struct{}]
 }
 
-type ErroredShutdown[K comparable] struct {
+type TerminatedShutdown[K Primitive] struct {
+	RequestMessage[K, struct{}]
+}
+
+type PanickedShutdown[K Primitive] struct {
 	KeyMessage[K]
 	Error error
 	RequestMessage[K, struct{}]
 }
 
-type GetListRuntimeApplication[K comparable] struct {
+type ErroredShutdown[K Primitive] struct {
+	KeyMessage[K]
+	Error error
+	RequestMessage[K, struct{}]
+}
+
+type GetListRuntimeApplication[K Primitive] struct {
 	RequestMessage[K, []K]
 }
 
@@ -96,7 +96,7 @@ var erroredShutdownPool sync.Pool
 var getListRuntimeApplicationPoolInited bool = false
 var getListRuntimeApplicationPool sync.Pool
 
-func MsgGetListRuntimeApplication[K comparable]() (<-chan []K, *GetListRuntimeApplication[K]) {
+func MsgGetListRuntimeApplication[K Primitive]() (<-chan []K, *GetListRuntimeApplication[K]) {
 	if !getListRuntimeApplicationPoolInited {
 		getListRuntimeApplicationPoolInited = true
 		getListRuntimeApplicationPool = sync.Pool{
@@ -110,7 +110,7 @@ func MsgGetListRuntimeApplication[K comparable]() (<-chan []K, *GetListRuntimeAp
 	return msg.Response, msg
 }
 
-func MsgAdd[K comparable](key K, app LifecyleFunc) (<-chan struct{}, *AddMessage[K]) {
+func MsgAdd[K Primitive](key K, app LifecyleFunc) (<-chan struct{}, *AddMessage[K]) {
 	if !addRuntimeApplicationPoolInited {
 		addRuntimeApplicationPoolInited = true
 		addRuntimeApplicationPool = sync.Pool{
@@ -126,7 +126,7 @@ func MsgAdd[K comparable](key K, app LifecyleFunc) (<-chan struct{}, *AddMessage
 	return msg.Response, msg
 }
 
-func MsgRemove[K comparable](key K) (<-chan bool, *RemoveMessage[K]) {
+func MsgRemove[K Primitive](key K) (<-chan bool, *RemoveMessage[K]) {
 	if !removeRuntimeApplicationPoolInited {
 		removeRuntimeApplicationPoolInited = true
 		removeRuntimeApplicationPool = sync.Pool{
@@ -141,7 +141,7 @@ func MsgRemove[K comparable](key K) (<-chan bool, *RemoveMessage[K]) {
 	return msg.Response, msg
 }
 
-func MsgForceCancelShutdown[K comparable](key K, err error) (<-chan struct{}, *ForceCancelShutdown[K]) {
+func MsgForceCancelShutdown[K Primitive](key K, err error) (<-chan struct{}, *ForceCancelShutdown[K]) {
 	if !forceCancelShutdownPoolInited {
 		forceCancelShutdownPoolInited = true
 		forceCancelShutdownPool = sync.Pool{
@@ -157,7 +157,7 @@ func MsgForceCancelShutdown[K comparable](key K, err error) (<-chan struct{}, *F
 	return msg.Response, msg
 }
 
-func MsgForceTerminateShutdown[K comparable](key K) (<-chan struct{}, *ForceTerminateShutdown[K]) {
+func MsgForceTerminateShutdown[K Primitive](key K) (<-chan struct{}, *ForceTerminateShutdown[K]) {
 	if !forceTerminateShutdownPoolInited {
 		forceTerminateShutdownPoolInited = true
 		forceTerminateShutdownPool = sync.Pool{
@@ -172,7 +172,7 @@ func MsgForceTerminateShutdown[K comparable](key K) (<-chan struct{}, *ForceTerm
 	return msg.Response, msg
 }
 
-func msgCancelledShutdown[K comparable](key K, err error) (<-chan struct{}, *CancelledShutdown[K]) {
+func msgCancelledShutdown[K Primitive](key K, err error) (<-chan struct{}, *CancelledShutdown[K]) {
 	if !cancelShutdownPoolInited {
 		cancelShutdownPoolInited = true
 		cancelShutdownPool = sync.Pool{
@@ -189,7 +189,7 @@ func msgCancelledShutdown[K comparable](key K, err error) (<-chan struct{}, *Can
 	return response, msg
 }
 
-func msgTerminatedShutdown[K comparable](key K) (<-chan struct{}, *TerminatedShutdown[K]) {
+func msgTerminatedShutdown[K Primitive](key K) (<-chan struct{}, *TerminatedShutdown[K]) {
 	if !terminatedShutdownPoolInited {
 		terminatedShutdownPoolInited = true
 		terminatedShutdownPool = sync.Pool{
@@ -205,7 +205,7 @@ func msgTerminatedShutdown[K comparable](key K) (<-chan struct{}, *TerminatedShu
 	return response, msg
 }
 
-func msgPanickedShutdown[K comparable](key K, err error) (<-chan struct{}, *PanickedShutdown[K]) {
+func msgPanickedShutdown[K Primitive](key K, err error) (<-chan struct{}, *PanickedShutdown[K]) {
 	if !panicShutdownPoolInited {
 		panicShutdownPoolInited = true
 		panickedShutdownPool = sync.Pool{
@@ -222,7 +222,7 @@ func msgPanickedShutdown[K comparable](key K, err error) (<-chan struct{}, *Pani
 	return response, msg
 }
 
-func msgErroredShutdown[K comparable](key K, err error) (<-chan struct{}, *ErroredShutdown[K]) {
+func msgErroredShutdown[K Primitive](key K, err error) (<-chan struct{}, *ErroredShutdown[K]) {
 	if !erroredShutdownPoolInited {
 		erroredShutdownPoolInited = true
 		erroredShutdownPool = sync.Pool{
@@ -392,7 +392,7 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], metadata 
 	state.mkeys.Store(key, key)
 	state.mapp.Store(key, app)
 	state.mctx.Store(key, ctx)
-	state.mcom.Store(key, g.com)
+	state.mcom.Store(key, g.publicChn)
 	state.mshu.Store(key, shutdown)
 	state.mali.Store(key, true)
 	state.mrea.Store(key, nil)

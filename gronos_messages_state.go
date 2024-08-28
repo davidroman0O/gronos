@@ -10,32 +10,32 @@ import (
 	"github.com/heimdalr/dag"
 )
 
-type RequestStatus[K comparable] struct {
+type RequestStatus[K Primitive] struct {
 	KeyMessage[K]
 	RequestMessage[K, StatusState]
 }
 
-type RequestAlive[K comparable] struct {
+type RequestAlive[K Primitive] struct {
 	KeyMessage[K]
 	RequestMessage[K, bool]
 }
 
-type RequestReason[K comparable] struct {
+type RequestReason[K Primitive] struct {
 	KeyMessage[K]
 	RequestMessage[K, error]
 }
 
-type RequestAllAlive[K comparable] struct {
+type RequestAllAlive[K Primitive] struct {
 	RequestMessage[K, bool]
 }
 
-type RequestStatusAsync[K comparable] struct {
+type RequestStatusAsync[K Primitive] struct {
 	KeyMessage[K]
 	When StatusState
 	RequestMessage[K, struct{}]
 }
 
-type RequestGraph[K comparable] struct {
+type RequestGraph[K Primitive] struct {
 	RequestMessage[K, *dag.DAG]
 }
 
@@ -57,7 +57,7 @@ var requestStatusAsyncPool sync.Pool
 var requestGraphInited bool
 var requestGraphPool sync.Pool
 
-func MsgRequestStatus[K comparable](key K) (<-chan StatusState, *RequestStatus[K]) {
+func MsgRequestStatus[K Primitive](key K) (<-chan StatusState, *RequestStatus[K]) {
 	if !requestStatusPoolInited {
 		requestStatusPoolInited = true
 		requestStatusPool = sync.Pool{
@@ -73,7 +73,7 @@ func MsgRequestStatus[K comparable](key K) (<-chan StatusState, *RequestStatus[K
 	return response, msg
 }
 
-func MsgRequestAlive[K comparable](key K) *RequestAlive[K] {
+func MsgRequestAlive[K Primitive](key K) *RequestAlive[K] {
 	if !requestAlivePoolInited {
 		requestAlivePoolInited = true
 		requestAlivePool = sync.Pool{
@@ -88,7 +88,7 @@ func MsgRequestAlive[K comparable](key K) *RequestAlive[K] {
 	return msg
 }
 
-func MsgRequestReason[K comparable](key K) *RequestReason[K] {
+func MsgRequestReason[K Primitive](key K) *RequestReason[K] {
 	if !requestReasonPoolInited {
 		requestReasonPoolInited = true
 		requestReasonPool = sync.Pool{
@@ -103,7 +103,7 @@ func MsgRequestReason[K comparable](key K) *RequestReason[K] {
 	return msg
 }
 
-func MsgRequestAllAlive[K comparable]() (<-chan bool, *RequestAllAlive[K]) {
+func MsgRequestAllAlive[K Primitive]() (<-chan bool, *RequestAllAlive[K]) {
 	if !requestAllAlivePoolInited {
 		requestAllAlivePoolInited = true
 		requestAllAlivePool = sync.Pool{
@@ -118,7 +118,7 @@ func MsgRequestAllAlive[K comparable]() (<-chan bool, *RequestAllAlive[K]) {
 	return response, msg
 }
 
-func MsgRequestStatusAsync[K comparable](key K, when StatusState) (<-chan struct{}, *RequestStatusAsync[K]) {
+func MsgRequestStatusAsync[K Primitive](key K, when StatusState) (<-chan struct{}, *RequestStatusAsync[K]) {
 	if !requestStatusAsyncPoolInited {
 		requestStatusAsyncPoolInited = true
 		requestStatusAsyncPool = sync.Pool{
@@ -135,7 +135,7 @@ func MsgRequestStatusAsync[K comparable](key K, when StatusState) (<-chan struct
 	return response, msg
 }
 
-func MsgRequestGraph[K comparable]() (<-chan *dag.DAG, *RequestGraph[K]) {
+func MsgRequestGraph[K Primitive]() (<-chan *dag.DAG, *RequestGraph[K]) {
 	if !requestGraphInited {
 		requestGraphInited = true
 		requestGraphPool = sync.Pool{

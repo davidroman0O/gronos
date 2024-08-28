@@ -7,25 +7,15 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/charmbracelet/log"
 )
 
 type Metadata[K comparable] struct {
-	data     sync.Map
-	returned bool
+	data sync.Map
 }
 
 func NewMetadata[K comparable]() *Metadata[K] {
-	return &Metadata[K]{}
-}
-
-func (m *Metadata[K]) Put() {
-	if !m.returned {
-		m.returned = true
-		metadataPool.Put(m)
-	} else {
-		log.Debug("Attempted to return metadata to pool more than once")
+	return &Metadata[K]{
+		data: sync.Map{},
 	}
 }
 

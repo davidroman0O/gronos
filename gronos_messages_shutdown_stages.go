@@ -8,7 +8,7 @@ import (
 )
 
 // TODO: sync.Pool for all messages
-type GracePeriodExceededMessage[K comparable] struct {
+type GracePeriodExceededMessage[K Primitive] struct {
 	KeyMessage[K]
 }
 
@@ -18,17 +18,17 @@ var gracePeriodExceededPool = sync.Pool{
 	},
 }
 
-func MsgGracePeriodExceeded[K comparable]() *GracePeriodExceededMessage[K] {
+func MsgGracePeriodExceeded[K Primitive]() *GracePeriodExceededMessage[K] {
 	return gracePeriodExceededPool.Get().(*GracePeriodExceededMessage[K])
 }
 
-type ShutdownComplete[K comparable] struct{}
+type ShutdownComplete[K Primitive] struct{}
 
-type CheckAutomaticShutdown[K comparable] struct {
+type CheckAutomaticShutdown[K Primitive] struct {
 	RequestMessage[K, struct{}]
 }
 
-func MsgCheckAutomaticShutdown[K comparable]() (chan struct{}, *CheckAutomaticShutdown[K]) {
+func MsgCheckAutomaticShutdown[K Primitive]() (chan struct{}, *CheckAutomaticShutdown[K]) {
 	done := make(chan struct{})
 	msg := &CheckAutomaticShutdown[K]{}
 	msg.Response = done
@@ -36,13 +36,13 @@ func MsgCheckAutomaticShutdown[K comparable]() (chan struct{}, *CheckAutomaticSh
 }
 
 // Message creation functions
-func MsgInitiateShutdown[K comparable]() *InitiateShutdown[K] {
+func MsgInitiateShutdown[K Primitive]() *InitiateShutdown[K] {
 	return &InitiateShutdown[K]{}
 }
 
-type Destroy[K comparable] struct{}
+type Destroy[K Primitive] struct{}
 
-func MsgDestroy[K comparable]() *Destroy[K] {
+func MsgDestroy[K Primitive]() *Destroy[K] {
 	return &Destroy[K]{}
 }
 
@@ -155,7 +155,8 @@ func (g *gronos[K]) handleDestroy(state *gronosState[K]) error {
 	log.Debug("[GronosMessage] Destroying gronos")
 	g.comClosed.Store(true)
 	log.Debug("[GronosMessage] run closing")
-	close(g.com)
+	close(g.publicChn)
+	close(g.privateChn)
 	close(g.doneChan)
 	log.Debug("[GronosMessage] run closed - no more channels")
 	return nil
