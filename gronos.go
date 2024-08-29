@@ -25,6 +25,7 @@ type Primitive interface {
 
 type ctxKey string
 
+var ctxCommunicationPublicKey = ctxKey("communication_public")
 var comKey ctxKey = "com"
 var comKeyWait ctxKey = "comwait"
 var comKeyConfirm ctxKey = "comconfirm"
@@ -719,15 +720,37 @@ func (g *gronos[K]) IsMissing(k K) bool {
 
 // GetStatus retrieves the current status of a component
 func (g *gronos[K]) GetStatus(k K) StatusState {
-	done, msg := MsgRequestStatus(k)
-	g.sendMessage(g.getSystemMetadata(), msg)
-	return <-done
+	switch metadata := g.getSystemMetadata().(type) {
+	case Success[*Metadata[K]]:
+		switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageRequestStatus[K](k)).Get().(type) {
+		case Success[StatusState]:
+			return value.Value
+		case Failure:
+			log.Debug("[Gronos] Unable to get status")
+			return StatusNotFound // pretty sure we can return a MaybeResult instead
+		}
+	case Failure:
+		log.Debug("[Gronos] Unable to get system metadata")
+		return StatusNotFound // pretty sure we can return a MaybeResult instead
+	}
+	return StatusNotFound // pretty sure we can return a MaybeResult instead
 }
 
 func (g *gronos[K]) GetList() ([]K, error) {
-	done, msg := MsgGetListRuntimeApplication[K]()
-	g.sendMessage(g.getSystemMetadata(), msg)
-	return <-done, nil
+	switch metadata := g.getSystemMetadata().(type) {
+	case Success[*Metadata[K]]:
+		switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageGetListRuntimeApplication[K]()).Get().(type) {
+		case Success[[]K]:
+			return value.Value, nil
+		case Failure:
+			log.Debug("[Gronos] Unable to get list")
+			return nil, fmt.Errorf("unable to get list: %w", value.Err)
+		}
+	case Failure:
+		log.Debug("[Gronos] Unable to get system metadata")
+		return nil, fmt.Errorf("unable to get system metadata: %w", metadata.Err)
+	}
+	return nil, fmt.Errorf("unable to get system metadata")
 }
 
 // ShutdownAndWait initiates shutdown for specified applications and waits for their completion.
@@ -751,8 +774,15 @@ func (g *gronos[K]) ShutdownAndWait(keys ...K) map[K]StatusState {
 				status != StatusShutdownPanicked {
 
 				// Initiate terminate shutdown
-				_, msg := MsgForceTerminateShutdown(k)
-				g.sendMessage(g.getSystemMetadata(), msg)
+				switch metadata := g.getSystemMetadata().(type) {
+				case Success[*Metadata[K]]:
+					switch g.enqueue(ChannelTypePublic, metadata.Value, NewMessageForceTerminateShutdown[K](k)).Get().(type) {
+					case Success[Void]:
+						log.Debug("[Gronos] Force shutdown initiated")
+					case Failure:
+						log.Debug("[Gronos] Unable to force terminate shutdown")
+					}
+				}
 
 				// Wait for the application to reach a final state
 				for {
@@ -791,7 +821,7 @@ func (g *gronos[K]) Push(apps map[K]LifecyleFunc, opts ...addOption) <-chan stru
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		acc := []<-chan struct{}{}
+		acc := []<-chan error{}
 		for k, v := range apps {
 			acc = append(acc, g.Add(k, v, opts...))
 		}
@@ -825,12 +855,18 @@ func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan error {
 			log.Debug("[Gronos] Unable to get system metadata")
 		}
 
-		// Add new runtime application
-		if !g.sendMessage(metadata, msg) {
-			log.Debug("[Gronos] Unable to add runtime application")
-			cerr <- fmt.Errorf("unable to add runtime application")
-			return
+		switch g.enqueue(ChannelTypePublic, metadata, msg).WaitWithTimeout(time.Second).(type) {
+		case Success[any]:
+			log.Debug("[Gronos] Application added successfully")
+		case Failure:
+			log.Debug("[Gronos] Unable to add application")
 		}
+		// Add new runtime application
+		// if !g.sendMessage(metadata, msg) {
+		// 	log.Debug("[Gronos] Unable to add runtime application")
+		// 	cerr <- fmt.Errorf("unable to add runtime application")
+		// 	return
+		// }
 
 		switch g.enqueue(ChannelTypePublic, metadata, msg).WaitWithTimeout(time.Second * 5).(type) {
 		case Success[*MessageAddLifecycleFunction[K]]:
@@ -849,14 +885,23 @@ func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan error {
 		// 	return nil
 		// }
 
-		// Request asynchronous confirmation of the state
-		doneStatus, msgStatus := MsgRequestStatusAsync(k, cfg.whenState)
-
-		// send the message
-		if !g.sendMessage(metadata, msgStatus) {
-			log.Debug("[Gronos] Unable to request status")
-			return nil
+		switch value := g.enqueue(ChannelTypePublic, metadata, NewMessageRequestStatusAsync(k, cfg.whenState)).WaitWithTimeout(time.Second).(type) {
+		case Success[StatusState]:
+			log.Debug("[Gronos] Application added successfully", k, value.Value)
+		case Failure:
+			log.Debug("[Gronos] Unable to get status")
 		}
+
+		close(cerr)
+
+		// Request asynchronous confirmation of the state
+		// doneStatus, msgStatus := MsgRequestStatusAsync(k, cfg.whenState)
+
+		// // send the message
+		// if !g.sendMessage(metadata, msgStatus) {
+		// 	log.Debug("[Gronos] Unable to request status")
+		// 	return nil
+		// }
 	}()
 
 	// proxy := make(chan struct{})
@@ -882,32 +927,16 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 
 	ctx = context.WithValue(ctx, keyKey, key)
 
-	ctx = context.WithValue(ctx, comKey, func(m Message) bool {
-		log.Debug("get new metadata for sendMessage", key)
-		metadata := g.poolMetadata()
-		log.Debug("get new metadata for sendMessage", metadata.String())
-		metadata.SetID(contextID)
-		metadata.SetKey(key)
-		return g.sendMessage(metadata, m)
+	// Only mean of communication between LF and gronos
+	ctx = context.WithValue(ctx, ctxCommunicationPublicKey, func(m FutureMessageInterface) Future[any] {
+		switch maybeMetadata := g.poolMetadata().(type) {
+		case Success[*Metadata[K]]:
+			return g.enqueue(ChannelTypePublic, maybeMetadata.Value, m)
+		case Failure:
+			return NewFutureFailure[any](fmt.Errorf("unable to get metadata: %w", maybeMetadata.Err))
+		}
+		return NewFutureFailure[any](ErrUnhandledMessage)
 	})
-
-	// ctx = context.WithValue(ctx, comKeyWait, func(fn FnWait) <-chan struct{} {
-	// 	log.Debug("get new metadata for sendMessageWait", key)
-	// 	metadata := g.poolMetadata()
-	// 	log.Debug("get new metadata for sendMessageWait", metadata.String())
-	// 	metadata.SetID(contextID)
-	// 	metadata.SetKey(key)
-	// 	return g.sendMessageWait(metadata, fn)
-	// })
-
-	// ctx = context.WithValue(ctx, comKeyConfirm, func(fn FnConfirm) <-chan bool {
-	// 	log.Debug("get new metadata for sendMessageConfirm", key)
-	// 	metadata := g.poolMetadata()
-	// 	log.Debug("get new metadata for sendMessageConfirm", metadata.String())
-	// 	metadata.SetID(contextID)
-	// 	metadata.SetKey(key)
-	// 	return g.sendMessageConfirm(metadata, fn)
-	// })
 
 	ctx, cancel := context.WithCancel(ctx)
 
