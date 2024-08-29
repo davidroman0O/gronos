@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/heimdalr/dag"
 )
 
 func TestGronos(t *testing.T) {
@@ -87,20 +89,40 @@ func TestGronos(t *testing.T) {
 
 		<-appStarted
 
-		terminate, msg := MsgForceTerminateShutdown("test-app")
-		g.sendMessage(g.getSystemMetadata(), msg)
-		<-terminate
+		switch maybeMetadata := g.getSystemMetadata().(type) {
+		case Success[*Metadata[string]]:
+			switch g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageTerminatedShutdown("test-app")).WaitWithTimeout(time.Second).(type) {
+			case Success[any]:
+			case Failure:
+				t.Fatal("Failed to send message")
+			}
+		case Failure:
+			t.Fatal("Failed to get metadata")
+		}
 
-		removed, msgr := MsgRemove("test-app")
-		g.sendMessage(g.getSystemMetadata(), msgr)
-		<-removed
+		switch maybeMetadata := g.getSystemMetadata().(type) {
+		case Success[*Metadata[string]]:
+			switch g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageRemoveLifecycleFunction("test-app")).WaitWithTimeout(time.Second).(type) {
+			case Success[any]:
+			case Failure:
+				t.Fatal("Failed to send message")
+			}
+		case Failure:
+			t.Fatal("Failed to get metadata")
+		}
 
-		data, msgg := MsgRequestGraph[string]()
-		g.Send(msgg)
-		state := <-data
-
-		if state.GetSize() != 0 {
-			t.Fatalf("Expected 0 applications, got %d", state.GetSize())
+		switch maybeMetadata := g.getSystemMetadata().(type) {
+		case Success[*Metadata[string]]:
+			switch value := g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageRequestGraph[string]()).WaitWithTimeout(time.Second).(type) {
+			case Success[*dag.DAG]:
+				if value.Value.GetSize() != 0 {
+					t.Fatalf("Expected 0 applications, got %d", value.Value.GetSize())
+				}
+			case Failure:
+				t.Fatal("Failed to send message")
+			}
+		case Failure:
+			t.Fatal("Failed to get metadata")
 		}
 
 		select {

@@ -20,7 +20,7 @@ func main() {
 			"app1": func(ctx context.Context, shutdown <-chan struct{}) error {
 				log.Println("app1 started")
 
-				bus, err := gronos.UseBusWait(ctx)
+				bus, err := gronos.UseBus(ctx)
 				if err != nil {
 					return err
 				}
@@ -28,19 +28,26 @@ func main() {
 				go func() {
 					<-time.After(time.Second * 1)
 
-					<-bus(func() (<-chan struct{}, gronos.Message) {
-						return gronos.MsgAdd("worker3",
-							gronos.Worker(time.Second, gronos.ManagedTimeline, func(ctx context.Context) error {
+					switch bus(
+						gronos.NewMessageAddLifecycleFunction(
+							"worker3",
+							func(ctx context.Context, shutdown <-chan struct{}) error {
 								log.Println("worker3 tick")
 								return nil
-							}))
-					})
+							})).WaitWithTimeout(time.Second * 1).(type) {
+					case gronos.Success[any]:
+						log.Println("worker3 added")
+					case gronos.Failure:
+						log.Println("worker3 failed to add")
+					}
 
-					<-bus(func() (<-chan struct{}, gronos.Message) {
-
-						return gronos.MsgForceTerminateShutdown("app1")
-					})
-
+					switch bus(
+						gronos.NewMessageForceTerminateShutdown("app1")).WaitWithTimeout(time.Second * 1).(type) {
+					case gronos.Success[any]:
+						log.Println("app1 terminated")
+					case gronos.Failure:
+						log.Println("app1 failed to terminate")
+					}
 				}()
 
 				select {
@@ -57,21 +64,32 @@ func main() {
 				gronos.ManagedTimeline,
 				func(ctx context.Context) error {
 					log.Println("worker1 tick")
-					bus, err := gronos.UseBusWait(ctx)
+
+					bus, err := gronos.UseBus(ctx)
 					if err != nil {
 						return err
 					}
+
 					go func() {
 						<-time.After(time.Second * 1)
-						<-bus(func() (<-chan struct{}, gronos.Message) {
-							return gronos.MsgForceTerminateShutdown("worker2")
-						})
+						switch bus(
+							gronos.NewMessageForceTerminateShutdown("worker2")).WaitWithTimeout(time.Second * 1).(type) {
+						case gronos.Success[any]:
+							log.Println("worker2 terminated")
+						case gronos.Failure:
+							log.Println("worker2 failed to terminate")
+						}
+
 					}()
 					go func() {
 						<-time.After(time.Second * 2)
-						<-bus(func() (<-chan struct{}, gronos.Message) {
-							return gronos.MsgForceTerminateShutdown("worker3")
-						})
+						switch bus(
+							gronos.NewMessageForceTerminateShutdown("worker3")).WaitWithTimeout(time.Second * 1).(type) {
+						case gronos.Success[any]:
+							log.Println("worker3 terminated")
+						case gronos.Failure:
+							log.Println("worker3 failed to terminate")
+						}
 					}()
 					<-ctx.Done()
 					return nil
