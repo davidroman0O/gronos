@@ -10,213 +10,226 @@ import (
 	"github.com/heimdalr/dag"
 )
 
-type RequestStatus[K Primitive] struct {
-	KeyMessage[K]
-	RequestMessage[K, StatusState]
+type MessageRequestStatus[K Primitive] struct {
+	FutureMessage[KeyMessage[K], StatusState]
 }
 
-type RequestAlive[K Primitive] struct {
-	KeyMessage[K]
-	RequestMessage[K, bool]
-}
+var messageRequestStatusPoolInited bool = false
+var messageRequestStatusPool sync.Pool
 
-type RequestReason[K Primitive] struct {
-	KeyMessage[K]
-	RequestMessage[K, error]
-}
-
-type RequestAllAlive[K Primitive] struct {
-	RequestMessage[K, bool]
-}
-
-type RequestStatusAsync[K Primitive] struct {
-	KeyMessage[K]
-	When StatusState
-	RequestMessage[K, struct{}]
-}
-
-type RequestGraph[K Primitive] struct {
-	RequestMessage[K, *dag.DAG]
-}
-
-var requestStatusPoolInited bool
-var requestStatusPool sync.Pool
-
-var requestAlivePoolInited bool
-var requestAlivePool sync.Pool
-
-var requestReasonPoolInited bool
-var requestReasonPool sync.Pool
-
-var requestAllAlivePoolInited bool
-var requestAllAlivePool sync.Pool
-
-var requestStatusAsyncPoolInited bool
-var requestStatusAsyncPool sync.Pool
-
-var requestGraphInited bool
-var requestGraphPool sync.Pool
-
-func MsgRequestStatus[K Primitive](key K) (<-chan StatusState, *RequestStatus[K]) {
-	if !requestStatusPoolInited {
-		requestStatusPoolInited = true
-		requestStatusPool = sync.Pool{
+func NewMessageRequestStatus[K Primitive](key K) *MessageRequestStatus[K] {
+	if !messageRequestStatusPoolInited {
+		messageRequestStatusPoolInited = true
+		messageRequestStatusPool = sync.Pool{
 			New: func() any {
-				return &RequestStatus[K]{}
+				return &MessageRequestStatus[K]{}
 			},
 		}
 	}
-	response := make(chan StatusState, 1)
-	msg := requestStatusPool.Get().(*RequestStatus[K])
-	msg.Key = key
-	msg.Response = response
-	return response, msg
+	return &MessageRequestStatus[K]{
+		FutureMessage: FutureMessage[KeyMessage[K], StatusState]{
+			Data:   KeyMessage[K]{Key: key},
+			Result: NewFuture[StatusState](),
+		},
+	}
 }
 
-func MsgRequestAlive[K Primitive](key K) *RequestAlive[K] {
-	if !requestAlivePoolInited {
-		requestAlivePoolInited = true
-		requestAlivePool = sync.Pool{
+type MessageRequestAlive[K Primitive] struct {
+	FutureMessage[KeyMessage[K], bool]
+}
+
+var messageRequestAlivePoolInited bool = false
+var messageRequestAlivePool sync.Pool
+
+func NewMessageRequestAlive[K Primitive](key K) *MessageRequestAlive[K] {
+	if !messageRequestAlivePoolInited {
+		messageRequestAlivePoolInited = true
+		messageRequestAlivePool = sync.Pool{
 			New: func() any {
-				return &RequestAlive[K]{}
+				return &MessageRequestAlive[K]{}
 			},
 		}
 	}
-	msg := requestAlivePool.Get().(*RequestAlive[K])
-	msg.Key = key
-	msg.Response = make(chan bool, 1)
-	return msg
+	return &MessageRequestAlive[K]{
+		FutureMessage: FutureMessage[KeyMessage[K], bool]{
+			Data:   KeyMessage[K]{Key: key},
+			Result: NewFuture[bool](),
+		},
+	}
 }
 
-func MsgRequestReason[K Primitive](key K) *RequestReason[K] {
-	if !requestReasonPoolInited {
-		requestReasonPoolInited = true
-		requestReasonPool = sync.Pool{
+type MessageRequestReason[K Primitive] struct {
+	FutureMessage[KeyMessage[K], error]
+}
+
+var messageRequestReasonPoolInited bool = false
+var messageRequestReasonPool sync.Pool
+
+func NewMessageRequestReason[K Primitive](key K) *MessageRequestReason[K] {
+	if !messageRequestReasonPoolInited {
+		messageRequestReasonPoolInited = true
+		messageRequestReasonPool = sync.Pool{
 			New: func() any {
-				return &RequestReason[K]{}
+				return &MessageRequestReason[K]{}
 			},
 		}
 	}
-	msg := requestReasonPool.Get().(*RequestReason[K])
-	msg.Key = key
-	msg.Response = make(chan error, 1)
-	return msg
+	return &MessageRequestReason[K]{
+		FutureMessage: FutureMessage[KeyMessage[K], error]{
+			Data:   KeyMessage[K]{Key: key},
+			Result: NewFuture[error](),
+		},
+	}
 }
 
-func MsgRequestAllAlive[K Primitive]() (<-chan bool, *RequestAllAlive[K]) {
-	if !requestAllAlivePoolInited {
-		requestAllAlivePoolInited = true
-		requestAllAlivePool = sync.Pool{
+type MessageRequestAllAlive[K Primitive] struct {
+	FutureMessage[Void, bool]
+}
+
+var messageRequestAllAlivePoolInited bool = false
+var messageRequestAllAlivePool sync.Pool
+
+func NewMessageRequestAllAlive[K Primitive]() *MessageRequestAllAlive[K] {
+	if !messageRequestAllAlivePoolInited {
+		messageRequestAllAlivePoolInited = true
+		messageRequestAllAlivePool = sync.Pool{
 			New: func() any {
-				return &RequestAllAlive[K]{}
+				return &MessageRequestAllAlive[K]{}
 			},
 		}
 	}
-	response := make(chan bool, 1)
-	msg := requestAllAlivePool.Get().(*RequestAllAlive[K])
-	msg.Response = response
-	return response, msg
+	return &MessageRequestAllAlive[K]{
+		FutureMessage: FutureMessage[Void, bool]{
+			Data:   Void{},
+			Result: NewFuture[bool](),
+		},
+	}
 }
 
-func MsgRequestStatusAsync[K Primitive](key K, when StatusState) (<-chan struct{}, *RequestStatusAsync[K]) {
-	if !requestStatusAsyncPoolInited {
-		requestStatusAsyncPoolInited = true
-		requestStatusAsyncPool = sync.Pool{
+type MessageRequestStatusAsync[K Primitive] struct {
+	FutureMessage[struct {
+		KeyMessage[K]
+		When StatusState
+	}, Void]
+}
+
+var messageRequestStatusAsyncPoolInited bool = false
+var messageRequestStatusAsyncPool sync.Pool
+
+func NewMessageRequestStatusAsync[K Primitive](key K, when StatusState) *MessageRequestStatusAsync[K] {
+	if !messageRequestStatusAsyncPoolInited {
+		messageRequestStatusAsyncPoolInited = true
+		messageRequestStatusAsyncPool = sync.Pool{
 			New: func() any {
-				return &RequestStatusAsync[K]{}
+				return &MessageRequestStatusAsync[K]{}
 			},
 		}
 	}
-	response := make(chan struct{}, 1)
-	msg := requestStatusAsyncPool.Get().(*RequestStatusAsync[K])
-	msg.Key = key
-	msg.When = when
-	msg.Response = response
-	return response, msg
+	return &MessageRequestStatusAsync[K]{
+		FutureMessage: FutureMessage[struct {
+			KeyMessage[K]
+			When StatusState
+		}, Void]{
+			Data: struct {
+				KeyMessage[K]
+				When StatusState
+			}{
+				KeyMessage: KeyMessage[K]{Key: key},
+				When:       when,
+			},
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
-func MsgRequestGraph[K Primitive]() (<-chan *dag.DAG, *RequestGraph[K]) {
-	if !requestGraphInited {
-		requestGraphInited = true
-		requestGraphPool = sync.Pool{
+type MessageRequestGraph[K Primitive] struct {
+	FutureMessage[Void, *dag.DAG]
+}
+
+var messageRequestGraphPoolInited bool = false
+var messageRequestGraphPool sync.Pool
+
+func NewMessageRequestGraph[K Primitive]() *MessageRequestGraph[K] {
+	if !messageRequestGraphPoolInited {
+		messageRequestGraphPoolInited = true
+		messageRequestGraphPool = sync.Pool{
 			New: func() any {
-				return &RequestGraph[K]{}
+				return &MessageRequestGraph[K]{}
 			},
 		}
 	}
-	msg := requestGraphPool.Get().(*RequestGraph[K])
-	msg.Response = make(chan *dag.DAG, 1)
-	return msg.Response, msg
+	return &MessageRequestGraph[K]{
+		FutureMessage: FutureMessage[Void, *dag.DAG]{
+			Data:   Void{},
+			Result: NewFuture[*dag.DAG](),
+		},
+	}
 }
 
 func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
-	case *RequestStatus[K]:
-		log.Debug("[GronosMessage] [RequestStatus]", msg.Key)
-		defer requestStatusPool.Put(msg)
-		return g.handleRequestStatus(state, msg.Key, msg.Response), true
-	case *RequestAlive[K]:
-		log.Debug("[GronosMessage] [RequestAlive]", msg.Key)
-		defer requestAlivePool.Put(msg)
-		return g.handleRequestAlive(state, msg.Key, msg.Response), true
-	case *RequestReason[K]:
-		log.Debug("[GronosMessage] [RequestReason]", msg.Key)
-		defer requestReasonPool.Put(msg)
-		return g.handleRequestReason(state, msg.Key, msg.Response), true
-	case *RequestAllAlive[K]:
+	case *MessageRequestStatus[K]:
+		log.Debug("[GronosMessage] [RequestStatus]", msg.Data.Key)
+		defer messageRequestStatusPool.Put(msg)
+		return g.handleRequestStatus(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageRequestAlive[K]:
+		log.Debug("[GronosMessage] [RequestAlive]", msg.Data.Key)
+		defer messageRequestAlivePool.Put(msg)
+		return g.handleRequestAlive(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageRequestReason[K]:
+		log.Debug("[GronosMessage] [RequestReason]", msg.Data.Key)
+		defer messageRequestReasonPool.Put(msg)
+		return g.handleRequestReason(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageRequestAllAlive[K]:
 		log.Debug("[GronosMessage] [RequestAllAlive]")
-		defer requestAllAlivePool.Put(msg)
-		return g.handleRequestAllAlive(state, msg.Response), true
-	case *RequestStatusAsync[K]:
-		log.Debug("[GronosMessage] [RequestStatusAsync]", msg.Key)
-		defer requestStatusAsyncPool.Put(msg)
-		return g.handleRequestStatusAsync(state, msg.Key, msg.When, msg.Response), true
-	case *RequestGraph[K]:
+		defer messageRequestAllAlivePool.Put(msg)
+		return g.handleRequestAllAlive(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageRequestStatusAsync[K]: // TODO: is it still needed?
+		log.Debug("[GronosMessage] [RequestStatusAsync]", msg.Data.Key)
+		defer messageRequestStatusAsyncPool.Put(msg)
+		return g.handleRequestStatusAsync(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageRequestGraph[K]:
 		log.Debug("[GronosMessage] [RequestGraph]")
-		defer requestGraphPool.Put(msg)
-		msg.Response <- state.graph
-		close(msg.Response)
+		defer messageRequestGraphPool.Put(msg)
+		msg.Result.Publish(state.graph)
 		return nil, true
 	}
 	return nil, false
 }
 
-func (g *gronos[K]) handleRequestStatus(state *gronosState[K], key K, response chan<- StatusState) error {
-	defer close(response)
+func (g *gronos[K]) handleRequestStatus(state *gronosState[K], metadata *Metadata[K], data KeyMessage[K], future Future[StatusState]) error {
 	var value StatusState
 	var ok bool
-	if value, ok = state.mstatus.Load(key); !ok {
-		response <- StatusNotFound
+	if value, ok = state.mstatus.Load(data.Key); !ok {
+		future.Publish(StatusNotFound)
 		// return fmt.Errorf("app not found (status property) %v", key)
 		return nil
 	}
-	response <- value
+	future.Publish(value)
 	return nil
 }
 
-func (g *gronos[K]) handleRequestAlive(state *gronosState[K], key K, response chan<- bool) error {
+func (g *gronos[K]) handleRequestAlive(state *gronosState[K], metadata *Metadata[K], data KeyMessage[K], future Future[bool]) error {
 	var value bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
-		return fmt.Errorf("app not found (alive property) %v", key)
+	if value, ok = state.mali.Load(data.Key); !ok {
+		return fmt.Errorf("app not found (alive property) %v", data.Key)
 	}
-	response <- value
-	close(response)
+	future.Publish(value)
 	return nil
 }
 
-func (g *gronos[K]) handleRequestReason(state *gronosState[K], key K, response chan<- error) error {
+func (g *gronos[K]) handleRequestReason(state *gronosState[K], metadata *Metadata[K], data KeyMessage[K], future Future[error]) error {
 	var value error
 	var ok bool
-	if value, ok = state.mrea.Load(key); !ok {
-		return fmt.Errorf("app not found (reason property) %v", key)
+	if value, ok = state.mrea.Load(data.Key); !ok {
+		return fmt.Errorf("app not found (reason property) %v", data.Key)
 	}
-	response <- value
-	close(response)
+	future.Publish(value)
 	return nil
 }
 
-func (g *gronos[K]) handleRequestAllAlive(state *gronosState[K], response chan<- bool) error {
+func (g *gronos[K]) handleRequestAllAlive(state *gronosState[K], metadata *Metadata[K], data Void, future Future[bool]) error {
 	var alive bool
 	state.mali.Range(func(key K, value bool) bool {
 		if value {
@@ -225,24 +238,31 @@ func (g *gronos[K]) handleRequestAllAlive(state *gronosState[K], response chan<-
 		}
 		return true
 	})
-	response <- alive
-	close(response)
+	future.Publish(alive)
 	log.Debug("[GronosMessage] all alive", alive)
 	return nil
 }
 
-func (g *gronos[K]) handleRequestStatusAsync(state *gronosState[K], key K, when StatusState, response chan<- struct{}) error {
+func (g *gronos[K]) handleRequestStatusAsync(
+	state *gronosState[K],
+	metadata *Metadata[K],
+	data struct {
+		KeyMessage[K]
+		When StatusState
+	},
+	future Future[Void],
+) error {
 	go func() {
 		var currentState int
-		for currentState < stateNumber(when) {
-			if value, ok := state.mstatus.Load(key); ok {
+		for currentState < stateNumber(data.When) {
+			if value, ok := state.mstatus.Load(data.Key); ok {
 				currentState = stateNumber(value)
 			}
 			<-time.After(time.Second / 16)
 			runtime.Gosched()
 		}
-		log.Debug("[GronosMessage] status async", key, currentState)
-		close(response)
+		log.Debug("[GronosMessage] status async", data.Key, currentState)
+		future.Close()
 	}()
 	return nil
 }
