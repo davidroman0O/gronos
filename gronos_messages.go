@@ -22,10 +22,16 @@ type KeyMessage[K Primitive] struct {
 	Key K
 }
 
+// TODO: remove that after the FutureMessage is used everywhere
 // Used for generic requests
 type RequestMessage[K Primitive, Y any] struct {
 	KeyMessage[K]
 	Response chan Y
+}
+
+type MessagePayload[K Primitive] struct {
+	*Metadata[K]
+	Message
 }
 
 // handleMessage processes incoming messages and updates the gronos state accordingly.

@@ -10,11 +10,46 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-type AddMessage[K Primitive] struct {
-	KeyMessage[K]
-	LifecyleFunc
-	RequestMessage[K, struct{}]
+type MessageAddLifecycleFunction[K Primitive] FutureMessage[
+	struct {
+		KeyMessage[K]
+		LifecyleFunc
+	},
+	Void,
+]
+
+var messageFutureAddLifecycleFunctionPoolInited bool = false
+var messageFutureAddLifecycleFunctionPool sync.Pool
+
+func NewMessageAddLifecycleFunction[K Primitive](
+	key K,
+	app LifecyleFunc,
+) *MessageAddLifecycleFunction[K] {
+	if !messageFutureAddLifecycleFunctionPoolInited {
+		messageFutureAddLifecycleFunctionPoolInited = true
+		messageFutureAddLifecycleFunctionPool = sync.Pool{
+			New: func() any {
+				return &MessageAddLifecycleFunction[K]{}
+			},
+		}
+	}
+	return &MessageAddLifecycleFunction[K]{
+		Data: struct {
+			KeyMessage[K]
+			LifecyleFunc
+		}{
+			KeyMessage:   KeyMessage[K]{Key: key},
+			LifecyleFunc: app,
+		},
+		Result: make(Future[Void], 1),
+	}
 }
+
+// type AddMessage[K Primitive] struct {
+// 	KeyMessage[K]
+// 	LifecyleFunc
+// 	RequestMessage[K, struct{}]
+// }
 
 type RemoveMessage[K Primitive] struct {
 	KeyMessage[K]
@@ -110,21 +145,21 @@ func MsgGetListRuntimeApplication[K Primitive]() (<-chan []K, *GetListRuntimeApp
 	return msg.Response, msg
 }
 
-func MsgAdd[K Primitive](key K, app LifecyleFunc) (<-chan struct{}, *AddMessage[K]) {
-	if !addRuntimeApplicationPoolInited {
-		addRuntimeApplicationPoolInited = true
-		addRuntimeApplicationPool = sync.Pool{
-			New: func() any {
-				return &AddMessage[K]{}
-			},
-		}
-	}
-	msg := addRuntimeApplicationPool.Get().(*AddMessage[K])
-	msg.Key = key
-	msg.LifecyleFunc = app
-	msg.Response = make(chan struct{}, 1)
-	return msg.Response, msg
-}
+// func MsgAdd[K Primitive](key K, app LifecyleFunc) (<-chan struct{}, *AddMessage[K]) {
+// 	if !addRuntimeApplicationPoolInited {
+// 		addRuntimeApplicationPoolInited = true
+// 		addRuntimeApplicationPool = sync.Pool{
+// 			New: func() any {
+// 				return &AddMessage[K]{}
+// 			},
+// 		}
+// 	}
+// 	msg := addRuntimeApplicationPool.Get().(*AddMessage[K])
+// 	msg.Key = key
+// 	msg.LifecyleFunc = app
+// 	msg.Response = make(chan struct{}, 1)
+// 	return msg.Response, msg
+// }
 
 func MsgRemove[K Primitive](key K) (<-chan bool, *RemoveMessage[K]) {
 	if !removeRuntimeApplicationPoolInited {
@@ -241,10 +276,10 @@ func msgErroredShutdown[K Primitive](key K, err error) (<-chan struct{}, *Errore
 
 func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
-	case *AddMessage[K]:
-		log.Debug("[GronosMessage] [AddMessage]", "key", msg.Key, "metadata", m.Metadata.String())
+	case *MessageAddLifecycleFunction[K]:
+		log.Debug("[GronosMessage] [AddMessage]", "key", msg.Data.Key, "metadata", m.Metadata.String())
 		defer addRuntimeApplicationPool.Put(msg)
-		return g.handleAddRuntimeApplication(state, m.Metadata, msg.Key, msg.Response, msg.LifecyleFunc), true
+		return g.handleAddRuntimeApplication(state, m.Metadata, msg.Data.Key, msg.Result, msg.Data.LifecyleFunc), true
 	case *RemoveMessage[K]:
 		log.Debug("[GronosMessage] [RemoveMessage]", msg.Key)
 		defer removeRuntimeApplicationPool.Put(msg)
@@ -356,8 +391,8 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 	}
 }
 
-func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], metadata *Metadata[K], key K, done chan struct{}, app LifecyleFunc) error {
-	defer close(done)
+func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], metadata *Metadata[K], key K, result Future[Void], app LifecyleFunc) error {
+	defer close(result)
 
 	if state.shutting.Load() {
 		return fmt.Errorf("gronos is shutting down")

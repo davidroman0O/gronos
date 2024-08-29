@@ -25,7 +25,7 @@ func TestGronosGraph(t *testing.T) {
 					}
 
 					<-bus(func() (<-chan struct{}, Message) {
-						return MsgAdd("child1", func(ctx1 context.Context, shutdown <-chan struct{}) error {
+						return NewMessageAddLifecycleFunction("child1", func(ctx1 context.Context, shutdown <-chan struct{}) error {
 							busChild1, err := UseBusWait(ctx1)
 							if err != nil {
 								return err
@@ -77,6 +77,18 @@ func TestGronosGraph(t *testing.T) {
 				t.Logf("Error received: %v", err)
 			}
 		}()
+
+		{
+			// that's the new direction of the next iteration of the message system
+			msg := NewMessageAddLifecycleFunction("test", func(ctx1 context.Context, shutdown <-chan struct{}) error { return nil })
+			// That's exact what i wanted
+			switch value := g.enqueue(nil, msg).(type) {
+			case *Success[MessageAddLifecycleFunction[string]]:
+				fmt.Println(value)
+			case *Failure:
+				fmt.Println(value.Err)
+			}
+		}
 
 		// Wait for all LifecycleFuncs to start
 		time.Sleep(500 * time.Millisecond)

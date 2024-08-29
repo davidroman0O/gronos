@@ -119,11 +119,6 @@ type gronosConfig struct {
 	wait             bool
 }
 
-type MessagePayload[K Primitive] struct {
-	*Metadata[K]
-	Message
-}
-
 var runtimeApplicationIncrement = 0
 
 func newIncrement() int {
@@ -482,6 +477,45 @@ func (g *gronos[K]) send(m Message) bool {
 		}
 	}
 	return false
+}
+
+func (g *gronos[K]) enqueue(metadata *Metadata[K], msg Message) Result {
+	// Check that msg is a FutureMessage[T any, R any] OR FutureMessageVoid[T any] type, using reflect
+	msgType := reflect.TypeOf(msg)
+	futureMessageType := reflect.TypeOf((*FutureMessage[any, any])(nil)).Elem()
+	futureMessageVoidType := reflect.TypeOf((*FutureMessageVoid[any])(nil)).Elem()
+
+	if !msgType.Implements(futureMessageType) && !msgType.Implements(futureMessageVoidType) {
+		log.Debug("[Gronos] Message type is not supported")
+		return Failure{errors.New("unsupported message type")}
+	}
+
+	// Access the Result property using reflection
+	msgValue := reflect.ValueOf(msg)
+	resultField := msgValue.FieldByName("Result")
+
+	if !resultField.IsValid() {
+		log.Debug("[Gronos] Message does not have a Result field")
+		return Failure{errors.New("message does not have a Result field")}
+	}
+
+	result := resultField.Interface().(Result)
+
+	if !g.comClosed.Load() {
+		payload, err := g.poolMessagePayload(metadata, msg)
+		if err != nil {
+			log.Debug("[Gronos] Unable to pool message payload")
+			return Failure{err}
+		}
+		select {
+		case g.publicChn <- payload:
+			return result
+		default:
+			log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
+			return Failure{errors.New("internal channel full")}
+		}
+	}
+	return Failure{errors.New("communication closed")}
 }
 
 func (g *gronos[K]) sendMessage(metadata *Metadata[K], m Message) bool {

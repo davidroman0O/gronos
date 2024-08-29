@@ -12,3 +12,7 @@ type Extension[K Primitive] interface {
 	OnStopRuntime(ctx context.Context) context.Context
 	OnMsg(ctx context.Context, m *MessagePayload[K]) error
 }
+
+type Pool[K Primitive] interface {
+	OnMsg(ctx context.Context, m *MessagePayload[K]) error
+}

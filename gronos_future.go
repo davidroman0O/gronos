@@ -9,6 +9,21 @@ import (
 /// After trying to implement a proper graph, I realized that we're not really managing the error cases when publishing messages properly.
 /// To avoid having weird sync.Pool bugs due to concurrency, we're going to take a more pragmatic approach to own the results whatever it might be.
 
+// type FuturePool[M any] struct {
+// 	sync.Pool
+// }
+
+// func NewFuturePool[M any]() *FuturePool[M] {
+// 	return &FuturePool[M]{
+// 		Pool: sync.Pool{
+// 			New: func() any {
+// 				typeOf := reflect.TypeFor[M]().Elem()
+// 				return reflect.New(typeOf).Interface()
+// 			},
+// 		},
+// 	}
+// }
+
 // Common errors
 var (
 	ErrNoValue     = errors.New("no value present")
@@ -49,6 +64,23 @@ func FailureResult[T any](err error) MaybeResult[T] {
 	return Failure{Err: err}
 }
 
+// Message is a generic type to hold both the data and the result
+type FutureMessage[T any, R any] struct {
+	Data   T
+	Result Future[R]
+}
+
+func (m FutureMessage[T, R]) GetResult() Result {
+	return <-m.Result
+}
+
+type FutureMessageVoid[T any] struct {
+	Data   T
+	Result FutureVoid
+}
+
+type Void struct{}
+
 // Future represents an asynchronous computation that returns a Result
 type Future[T any] chan Result
 
@@ -79,30 +111,38 @@ func (f Future[T]) WaitWithTimeout(timeout time.Duration) (Result, error) {
 }
 
 // FutureVoid represents an asynchronous computation that doesn't return a value
-type FutureVoid chan error
+type FutureVoid chan Result
 
 // Get waits for the FutureVoid to complete and returns the error (if any)
-func (f FutureVoid) Get() error {
+func (f FutureVoid) Get() Result {
 	return <-f
 }
 
 // Wait waits for the FutureVoid to complete or for the context to be cancelled
-func (f FutureVoid) Wait(ctx context.Context) error {
+func (f FutureVoid) Wait(ctx context.Context) Result {
 	select {
-	case err := <-f:
-		return err
+	case res := <-f:
+		switch res.(type) {
+		case Success[Void]:
+			return SuccessResult(Void{})
+		case Failure:
+			return res
+		default:
+			return Failure{Err: errors.New("unexpected result type")}
+		}
 	case <-ctx.Done():
-		return ErrCancelled
+		return Failure{Err: errors.Join(ErrCancelled, ctx.Err())}
 	}
 }
 
 // WaitWithTimeout waits for the FutureVoid to complete with a timeout
-func (f FutureVoid) WaitWithTimeout(timeout time.Duration) error {
+func (f FutureVoid) WaitWithTimeout(timeout time.Duration) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	err := f.Wait(ctx)
-	if err == ErrCancelled {
-		return ErrTimeout
-	}
-	return err
+	return f.Wait(ctx)
+
+	// if errors.As(err, ErrCancelled) {
+	// 	return Failure{Err: errors.Join(ErrCancelled, ErrTimeout, ctx.Err())}
+	// }
+	// return err
 }
