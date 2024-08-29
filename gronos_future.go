@@ -70,19 +70,52 @@ type FutureMessage[T any, R any] struct {
 	Result Future[R]
 }
 
-func (m FutureMessage[T, R]) GetResult() Result {
-	return <-m.Result
+type FutureResultOptions struct {
+	Timeout *time.Duration
+	Context context.Context
+}
+
+type FutureResultOption func(*FutureResultOptions)
+
+func WithDefault() FutureResultOption {
+	return func(o *FutureResultOptions) {
+	}
+}
+
+func WithTimeout(timeout time.Duration) FutureResultOption {
+	return func(o *FutureResultOptions) {
+		o.Timeout = &timeout
+	}
+}
+
+func WithContext(ctx context.Context) FutureResultOption {
+	return func(o *FutureResultOptions) {
+		o.Context = ctx
+	}
+}
+
+func NewFutureResultOptions(opt FutureResultOption) FutureResultOptions {
+	cfg := FutureResultOptions{}
+	opt(&cfg)
+	return cfg
+}
+
+func (m FutureMessage[T, R]) GetResult(opt FutureResultOption) Result {
+	cfg := NewFutureResultOptions(opt)
+	if cfg.Timeout != nil {
+		return m.Result.WaitWithTimeout(*cfg.Timeout)
+	}
+	if cfg.Context != nil {
+		return m.Result.Wait(cfg.Context)
+	}
+	return m.Result.Get()
 }
 
 // Secret sauce that allow that whole futureness to become a messaging system
 type FutureMessageInterface interface {
-	GetResult() Result
+	GetResult(opt FutureResultOption) Result
 }
 
-//	type FutureMessageVoid[T any] struct {
-//		Data   T
-//		Result FutureVoid
-//	}
 type Void struct{}
 
 // Future represents an asynchronous computation that returns a Result
@@ -127,12 +160,12 @@ func (f Future[T]) Get() Result {
 }
 
 // Wait waits for the Future to complete or for the context to be cancelled
-func (f Future[T]) Wait(ctx context.Context) (Result, error) {
+func (f Future[T]) Wait(ctx context.Context) Result {
 	select {
 	case res := <-f:
-		return res, nil
+		return res
 	case <-ctx.Done():
-		return Failure{Err: ErrCancelled}, ctx.Err()
+		return Failure{Err: errors.Join(ErrCancelled, ctx.Err())}
 	}
 }
 
@@ -140,46 +173,11 @@ func (f Future[T]) Wait(ctx context.Context) (Result, error) {
 func (f Future[T]) WaitWithTimeout(timeout time.Duration) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	result, err := f.Wait(ctx)
-	if err != nil {
-		return Failure{Err: ErrTimeout}
+
+	switch value := f.Wait(ctx).(type) {
+	case Failure:
+		return Failure{Err: errors.Join(ErrTimeout, value.Err)}
+	default:
+		return value
 	}
-	return result
 }
-
-// // FutureVoid represents an asynchronous computation that doesn't return a value
-// type FutureVoid chan Result
-
-// // Get waits for the FutureVoid to complete and returns the error (if any)
-// func (f FutureVoid) Get() Result {
-// 	return <-f
-// }
-
-// // Wait waits for the FutureVoid to complete or for the context to be cancelled
-// func (f FutureVoid) Wait(ctx context.Context) Result {
-// 	select {
-// 	case res := <-f:
-// 		switch res.(type) {
-// 		case Success[Void]:
-// 			return SuccessResult(Void{})
-// 		case Failure:
-// 			return res
-// 		default:
-// 			return Failure{Err: errors.New("unexpected result type")}
-// 		}
-// 	case <-ctx.Done():
-// 		return Failure{Err: errors.Join(ErrCancelled, ctx.Err())}
-// 	}
-// }
-
-// // WaitWithTimeout waits for the FutureVoid to complete with a timeout
-// func (f FutureVoid) WaitWithTimeout(timeout time.Duration) Result {
-// 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-// 	defer cancel()
-// 	return f.Wait(ctx)
-
-// 	// if errors.As(err, ErrCancelled) {
-// 	// 	return Failure{Err: errors.Join(ErrCancelled, ErrTimeout, ctx.Err())}
-// 	// }
-// 	// return err
-// }

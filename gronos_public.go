@@ -24,7 +24,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 		}
 		switch value := g.getSystemMetadata().(type) {
 		case Success[*Metadata[K]]:
-			g.enqueue(ChannelTypePublic, value.Value, NewMessageDestroy[K]())
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageDestroy[K](), WithDefault())
 		case Failure:
 			errChan <- fmt.Errorf("failed to get system metadata for destroy: %w", value.Err)
 		}
@@ -67,7 +67,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 			select {
 			case <-g.ctx.Done():
 				log.Debug("[Gronos] Context cancelled, initiating shutdown")
-				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageInitiateShutdown[K]()).Get().(type) {
+				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageInitiateShutdown[K](), WithDefault()).(type) {
 				case Success[Void]:
 					log.Debug("[Gronos] Sent initiate shutdown")
 				case Failure:
@@ -76,7 +76,7 @@ func (g *gronos[K]) run(errChan chan<- error) {
 				}
 			case <-g.shutdownChan:
 				log.Debug("[Gronos] Shutdown initiated, initiating shutdown")
-				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageInitiateShutdown[K]()).Get().(type) {
+				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageInitiateShutdown[K](), WithDefault()).(type) {
 				case Success[Void]:
 					log.Debug("[Gronos] Sent initiate shutdown")
 				case Failure:

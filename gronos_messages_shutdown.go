@@ -140,7 +140,7 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 			case <-time.After(g.config.gracePeriod + g.config.immediatePeriod):
 				switch value := g.getSystemMetadata().(type) {
 				case Success[*Metadata[K]]:
-					switch g.enqueue(ChannelTypePublic, value.Value, NewMessageGracePeriodExceeded[K]()).Get().(type) {
+					switch g.enqueue(ChannelTypePublic, value.Value, NewMessageGracePeriodExceeded[K](), WithDefault()).(type) {
 					case Success[Void]:
 						log.Debug("[GronosMessage] sent grace period exceeded")
 					case Failure:
@@ -154,7 +154,7 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 
 		switch value := g.getSystemMetadata().(type) {
 		case Success[*Metadata[K]]:
-			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageShutdownComplete[K]()).Get().(type) {
+			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageShutdownComplete[K](), WithDefault()).(type) {
 			case Success[Void]:
 				log.Debug("[GronosMessage] sent shutdown complete")
 			case Failure:
@@ -192,7 +192,7 @@ func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
 	case Success[*Metadata[K]]:
 		if kind == ShutdownKindTerminate {
 			log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
-			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageForceTerminateShutdown[K](key)).Get().(type) {
+			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageForceTerminateShutdown[K](key), WithDefault()).(type) {
 			case Success[Void]:
 				log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
 			case Failure:
@@ -201,7 +201,7 @@ func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
 			}
 		} else {
 			log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
-			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageForceCancelShutdown[K](key, nil)).Get().(type) {
+			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageForceCancelShutdown[K](key, nil), WithDefault()).(type) {
 			case Success[Void]:
 				log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
 			case Failure:

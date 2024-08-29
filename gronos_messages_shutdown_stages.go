@@ -169,7 +169,7 @@ func (g *gronos[K]) handleShutdownProgress(state *gronosState[K], metadata *Meta
 	switch value := g.getSystemMetadata().(type) {
 	case Success[*Metadata[K]]:
 		if data.RemainingApps == 0 {
-			g.enqueue(ChannelTypePublic, value.Value, NewMessageShutdownComplete[K]())
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageShutdownComplete[K](), WithDefault())
 		} else {
 			// Check again after a short delay
 			time.AfterFunc(time.Second, func() {
@@ -192,7 +192,7 @@ func (g *gronos[K]) checkRemainingApps(state *gronosState[K], metadata *Metadata
 		}
 		return true
 	})
-	g.enqueue(ChannelTypePublic, metadata, NewMessageShutdownProgress[K](remainingApps))
+	g.enqueue(ChannelTypePublic, metadata, NewMessageShutdownProgress[K](remainingApps), WithDefault())
 }
 
 func (g *gronos[K]) handleShutdownComplete(state *gronosState[K], metadata *Metadata[K], data Void, future Future[Void]) error {
@@ -206,7 +206,7 @@ func (g *gronos[K]) handleShutdownComplete(state *gronosState[K], metadata *Meta
 		}
 		switch value := g.getSystemMetadata().(type) {
 		case Success[*Metadata[K]]:
-			g.enqueue(ChannelTypePublic, value.Value, NewMessageDestroy[K]())
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageDestroy[K](), WithDefault())
 		case Failure:
 			future.PublishError(fmt.Errorf("failed to get system metadata"))
 			return
@@ -242,7 +242,7 @@ func (g *gronos[K]) handleCheckAutomaticShutdown(state *gronosState[K], metadata
 		switch value := g.getSystemMetadata().(type) {
 		case Success[*Metadata[K]]:
 			// asynchronously trigger it
-			g.enqueue(ChannelTypePublic, value.Value, NewMessageInitiateShutdown[K]())
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageInitiateShutdown[K](), WithDefault())
 		case Failure:
 			future.PublishError(fmt.Errorf("failed to get system metadata"))
 			return nil

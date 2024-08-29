@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"sync/atomic"
 	"time"
 
@@ -34,7 +36,7 @@ func main() {
 							func(ctx context.Context, shutdown <-chan struct{}) error {
 								log.Println("worker3 tick")
 								return nil
-							})).WaitWithTimeout(time.Second * 1).(type) {
+							}), gronos.WithTimeout(time.Second)).(type) {
 					case gronos.Success[any]:
 						log.Println("worker3 added")
 					case gronos.Failure:
@@ -42,7 +44,7 @@ func main() {
 					}
 
 					switch bus(
-						gronos.NewMessageForceTerminateShutdown("app1")).WaitWithTimeout(time.Second * 1).(type) {
+						gronos.NewMessageForceTerminateShutdown("app1"), gronos.WithTimeout(time.Second)).(type) {
 					case gronos.Success[any]:
 						log.Println("app1 terminated")
 					case gronos.Failure:
@@ -73,7 +75,7 @@ func main() {
 					go func() {
 						<-time.After(time.Second * 1)
 						switch bus(
-							gronos.NewMessageForceTerminateShutdown("worker2")).WaitWithTimeout(time.Second * 1).(type) {
+							gronos.NewMessageForceTerminateShutdown("worker2"), gronos.WithTimeout(time.Second)).(type) {
 						case gronos.Success[any]:
 							log.Println("worker2 terminated")
 						case gronos.Failure:
@@ -84,7 +86,7 @@ func main() {
 					go func() {
 						<-time.After(time.Second * 2)
 						switch bus(
-							gronos.NewMessageForceTerminateShutdown("worker3")).WaitWithTimeout(time.Second * 1).(type) {
+							gronos.NewMessageForceTerminateShutdown("worker3"), gronos.WithTimeout(time.Second)).(type) {
 						case gronos.Success[any]:
 							log.Println("worker3 terminated")
 						case gronos.Failure:
@@ -114,15 +116,15 @@ func main() {
 	ctrlc := atomic.Bool{}
 	timour := atomic.Bool{}
 
-	// go func() {
-	// 	c := make(chan os.Signal, 1)
-	// 	signal.Notify(c, os.Interrupt)
-	// 	<-c
-	// 	ctrlc.Store(true)
-	// 	if !timour.Load() {
-	// 		nono.Shutdown()
-	// 	}
-	// }()
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		<-c
+		ctrlc.Store(true)
+		if !timour.Load() {
+			nono.Shutdown()
+		}
+	}()
 
 	go func() {
 		<-time.After(time.Second * 1)

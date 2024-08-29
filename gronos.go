@@ -347,7 +347,7 @@ func (g *gronos[K]) Start() chan error {
 
 	// TODO: might send them all at once and wait for all of them to be added
 	for k, v := range g.init {
-		switch g.enqueue(ChannelTypePublic, metadata, NewMessageAddLifecycleFunction(k, v)).WaitWithTimeout(time.Second).(type) {
+		switch g.enqueue(ChannelTypePublic, metadata, NewMessageAddLifecycleFunction(k, v), WithTimeout(time.Second)).(type) {
 		case Failure:
 			g.errChan <- fmt.Errorf("unable to add initial application %v", k)
 		case Success[MessageAddLifecycleFunction[K]]:
@@ -407,8 +407,7 @@ func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) MaybeRe
 		enqueue(
 			ChannelTypePrivate,
 			nil,
-			NewMessageRequestPayload[K]()).
-		WaitWithTimeout(time.Second).(type) {
+			NewMessageRequestPayload[K](), WithTimeout(time.Second)).(type) {
 	case Success[*MessagePayload[K]]:
 		payload = value.Value
 	case Failure:
@@ -440,7 +439,7 @@ func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) MaybeRe
 }
 
 func (g *gronos[K]) poolMetadata() MaybeResult[*Metadata[K]] {
-	return <-g.enqueue(ChannelTypePrivate, nil, NewMessageRequestMetadata[K]())
+	return g.enqueue(ChannelTypePrivate, nil, NewMessageRequestMetadata[K](), WithDefault())
 }
 
 func (g *gronos[K]) getSystemMetadata() MaybeResult[*Metadata[K]] {
@@ -463,10 +462,7 @@ const (
 	ChannelTypePublic
 )
 
-func (g *gronos[K]) enqueue(chn ChannelType, metadata *Metadata[K], future FutureMessageInterface) Future[any] {
-	msgValue := reflect.ValueOf(future)
-	resultField := msgValue.FieldByName("Result")
-	result := resultField.Interface().(Future[any])
+func (g *gronos[K]) enqueue(chn ChannelType, metadata *Metadata[K], future FutureMessageInterface, opt FutureResultOption) Result {
 
 	if !g.comClosed.Load() {
 		switch chn {
@@ -474,10 +470,10 @@ func (g *gronos[K]) enqueue(chn ChannelType, metadata *Metadata[K], future Futur
 		case ChannelTypePrivate:
 			select {
 			case g.privateChn <- future:
-				return result
+				return future.GetResult(opt)
 			default:
 				log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
-				return NewFutureFailure[any](fmt.Errorf("private channel full"))
+				return <-NewFutureFailure[any](fmt.Errorf("private channel full"))
 			}
 
 		case ChannelTypePublic:
@@ -485,20 +481,20 @@ func (g *gronos[K]) enqueue(chn ChannelType, metadata *Metadata[K], future Futur
 			case Success[*MessagePayload[K]]:
 				select {
 				case g.publicChn <- maybePayload.Value:
-					return result
+					return future.GetResult(opt)
 				default:
 					log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
-					return NewFutureFailure[any](fmt.Errorf("public channel full"))
+					return FailureResult[any](fmt.Errorf("public channel full"))
 				}
 			case Failure:
 				log.Debug("[Gronos] Unable to pool message payload")
-				return NewFutureFailure[any](fmt.Errorf("cannot get message payload"))
+				return FailureResult[any](fmt.Errorf("cannot get message payload"))
 			}
 
 		}
 	}
 
-	return NewFutureFailure[any](fmt.Errorf("communication closed"))
+	return FailureResult[any](fmt.Errorf("communication closed"))
 }
 
 // func (g *gronos[K]) enqueue(chn ChannelType, metadata *Metadata[K], msg Message) Result {
@@ -638,7 +634,7 @@ func (g *gronos[K]) automaticShutdown() {
 			}
 			switch metadata := g.getSystemMetadata().(type) {
 			case Success[*Metadata[K]]:
-				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageCheckAutomaticShutdown[K]()).Get().(type) {
+				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageCheckAutomaticShutdown[K](), WithDefault()).(type) {
 				case Success[Void]:
 					log.Debug("[Gronos] Sent check automatic shutdown")
 				case Failure:
@@ -722,7 +718,7 @@ func (g *gronos[K]) IsMissing(k K) bool {
 func (g *gronos[K]) GetStatus(k K) StatusState {
 	switch metadata := g.getSystemMetadata().(type) {
 	case Success[*Metadata[K]]:
-		switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageRequestStatus[K](k)).Get().(type) {
+		switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageRequestStatus[K](k), WithDefault()).(type) {
 		case Success[StatusState]:
 			return value.Value
 		case Failure:
@@ -739,7 +735,7 @@ func (g *gronos[K]) GetStatus(k K) StatusState {
 func (g *gronos[K]) GetList() ([]K, error) {
 	switch metadata := g.getSystemMetadata().(type) {
 	case Success[*Metadata[K]]:
-		switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageGetListRuntimeApplication[K]()).Get().(type) {
+		switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageGetListRuntimeApplication[K](), WithDefault()).(type) {
 		case Success[[]K]:
 			return value.Value, nil
 		case Failure:
@@ -776,7 +772,7 @@ func (g *gronos[K]) ShutdownAndWait(keys ...K) map[K]StatusState {
 				// Initiate terminate shutdown
 				switch metadata := g.getSystemMetadata().(type) {
 				case Success[*Metadata[K]]:
-					switch g.enqueue(ChannelTypePublic, metadata.Value, NewMessageForceTerminateShutdown[K](k)).Get().(type) {
+					switch g.enqueue(ChannelTypePublic, metadata.Value, NewMessageForceTerminateShutdown[K](k), WithDefault()).(type) {
 					case Success[Void]:
 						log.Debug("[Gronos] Force shutdown initiated")
 					case Failure:
@@ -848,14 +844,14 @@ func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan error {
 		msg := NewMessageAddLifecycleFunction(k, v)
 
 		var metadata *Metadata[K]
-		switch data := g.enqueue(ChannelTypePrivate, nil, msg).WaitWithTimeout(time.Second).(type) {
+		switch data := g.enqueue(ChannelTypePrivate, nil, msg, WithTimeout(time.Second)).(type) {
 		case Success[*Metadata[K]]:
 			metadata = data.Value
 		case Failure:
 			log.Debug("[Gronos] Unable to get system metadata")
 		}
 
-		switch g.enqueue(ChannelTypePublic, metadata, msg).WaitWithTimeout(time.Second).(type) {
+		switch g.enqueue(ChannelTypePublic, metadata, msg, WithTimeout(time.Second)).(type) {
 		case Success[any]:
 			log.Debug("[Gronos] Application added successfully")
 		case Failure:
@@ -868,7 +864,7 @@ func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan error {
 		// 	return
 		// }
 
-		switch g.enqueue(ChannelTypePublic, metadata, msg).WaitWithTimeout(time.Second * 5).(type) {
+		switch g.enqueue(ChannelTypePublic, metadata, msg, WithTimeout(time.Second*5)).(type) {
 		case Success[*MessageAddLifecycleFunction[K]]:
 		case Failure:
 			log.Debug("[Gronos] Unable to add runtime application")
@@ -885,7 +881,7 @@ func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan error {
 		// 	return nil
 		// }
 
-		switch value := g.enqueue(ChannelTypePublic, metadata, NewMessageRequestStatusAsync(k, cfg.whenState)).WaitWithTimeout(time.Second).(type) {
+		switch value := g.enqueue(ChannelTypePublic, metadata, NewMessageRequestStatusAsync(k, cfg.whenState), WithTimeout(time.Second)).(type) {
 		case Success[StatusState]:
 			log.Debug("[Gronos] Application added successfully", k, value.Value)
 		case Failure:
@@ -928,14 +924,14 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 	ctx = context.WithValue(ctx, keyKey, key)
 
 	// Only mean of communication between LF and gronos
-	ctx = context.WithValue(ctx, ctxCommunicationPublicKey, func(m FutureMessageInterface) Future[any] {
+	ctx = context.WithValue(ctx, ctxCommunicationPublicKey, func(m FutureMessageInterface, opt FutureResultOption) Result {
 		switch maybeMetadata := g.poolMetadata().(type) {
 		case Success[*Metadata[K]]:
-			return g.enqueue(ChannelTypePublic, maybeMetadata.Value, m)
+			return g.enqueue(ChannelTypePublic, maybeMetadata.Value, m, opt)
 		case Failure:
-			return NewFutureFailure[any](fmt.Errorf("unable to get metadata: %w", maybeMetadata.Err))
+			return FailureResult[any](fmt.Errorf("unable to get metadata: %w", maybeMetadata.Err))
 		}
-		return NewFutureFailure[any](ErrUnhandledMessage)
+		return FailureResult[any](ErrUnhandledMessage)
 	})
 
 	ctx, cancel := context.WithCancel(ctx)

@@ -426,17 +426,17 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], metada
 	} else {
 		log.Debug("[GronosMessage] [RemoveMessage] try to remove when terminated asynchronously", data.Key)
 
-		msg := g.enqueue(ChannelTypePublic, metadata, NewMessageForceTerminateShutdown(data.Key))
+		msg := g.enqueue(ChannelTypePublic, metadata, NewMessageForceTerminateShutdown(data.Key), WithTimeout(time.Second))
 		go func() {
-			switch value := msg.WaitWithTimeout(time.Second).(type) {
+			switch value := msg.(type) {
 			case Failure:
 				log.Debug("[GronosMessage] [RemoveMessage] failed to terminate application", data.Key, value.Err)
-				g.enqueue(ChannelTypePublic, metadata, NewMessageRuntimeError(data.Key, value.Err))
+				g.enqueue(ChannelTypePublic, metadata, NewMessageRuntimeError(data.Key, value.Err), WithDefault())
 				return
 			}
 			if err := remove(); err != nil {
 				log.Debug("[GronosMessage] [RemoveMessage] failed to remove application", data.Key, err)
-				g.enqueue(ChannelTypePublic, metadata, NewMessageRuntimeError(data.Key, err))
+				g.enqueue(ChannelTypePublic, metadata, NewMessageRuntimeError(data.Key, err), WithDefault())
 			}
 		}()
 
@@ -656,7 +656,7 @@ func (g *gronos[K]) handleCancelledShutdown(
 
 		if alive, ok = state.mali.Load(data.Key); !ok {
 			log.Debug("[GronosMessage] [CancelledShutdown] app not found (alive property)", data.Key)
-			g.enqueue(ChannelTypePublic, metadata, NewMessageRuntimeError(data.Key, fmt.Errorf("app not found (alive property) %v", data.Key)))
+			g.enqueue(ChannelTypePublic, metadata, NewMessageRuntimeError(data.Key, fmt.Errorf("app not found (alive property) %v", data.Key)), WithDefault())
 			// g.sendMessage(metadata, MsgRuntimeError(data.Key, fmt.Errorf("app not found (alive property) %v", data.Key)))
 			future.PublishError(fmt.Errorf("app not found (alive property) %v", data.Key))
 			return
@@ -704,7 +704,7 @@ func (g *gronos[K]) handleTerminateShutdown(state *gronosState[K], metadata *Met
 			future.PublishError(fmt.Errorf("app not found (alive property) %v", data.Key))
 			switch value := g.getSystemMetadata().(type) {
 			case Success[*Metadata[K]]:
-				g.enqueue(ChannelTypePublic, value.Value, NewMessageRuntimeError(data.Key, fmt.Errorf("app not found (alive property) %v", data.Key)))
+				g.enqueue(ChannelTypePublic, value.Value, NewMessageRuntimeError(data.Key, fmt.Errorf("app not found (alive property) %v", data.Key)), WithDefault())
 			case Failure:
 				// TODO: we need a custom log system or just use slog for being able to process it
 				log.Error("[GronosMessage] [TerminateShutdown] failed to send runtime error", value.Err)
@@ -755,7 +755,7 @@ func (g *gronos[K]) handlePanicShutdown(
 
 	switch value := g.getSystemMetadata().(type) {
 	case Success[*Metadata[K]]:
-		g.enqueue(ChannelTypePublic, value.Value, NewMessageRuntimeError(data.Key, data.Error))
+		g.enqueue(ChannelTypePublic, value.Value, NewMessageRuntimeError(data.Key, data.Error), WithDefault())
 	case Failure:
 		future.PublishError(value.Err)
 		return value.Err
@@ -788,7 +788,7 @@ func (g *gronos[K]) handleErrorShutdown(state *gronosState[K], metadata *Metadat
 
 	switch value := g.getSystemMetadata().(type) {
 	case Success[*Metadata[K]]:
-		g.enqueue(ChannelTypePublic, value.Value, NewMessageRuntimeError(data.Key, data.Error))
+		g.enqueue(ChannelTypePublic, value.Value, NewMessageRuntimeError(data.Key, data.Error), WithDefault())
 	case Failure:
 		future.PublishError(value.Err)
 		return value.Err
@@ -947,17 +947,17 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], metadata *Me
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				log.Debug("[RuntimeApplication] com canceled", key, err)
-				g.enqueue(ChannelTypePublic, value.Value, NewMessageCancelledShutdown(key, err))
+				g.enqueue(ChannelTypePublic, value.Value, NewMessageCancelledShutdown(key, err), WithDefault())
 			} else if errors.Is(err, ErrPanic) {
 				log.Debug("[RuntimeApplication] com panic", key, err)
-				g.enqueue(ChannelTypePublic, value.Value, NewMessagePanickedShutdown(key, err))
+				g.enqueue(ChannelTypePublic, value.Value, NewMessagePanickedShutdown(key, err), WithDefault())
 			} else {
 				log.Debug("[RuntimeApplication] com error", key, err)
-				g.enqueue(ChannelTypePublic, value.Value, NewMessageErroredShutdown(key, err))
+				g.enqueue(ChannelTypePublic, value.Value, NewMessageErroredShutdown(key, err), WithDefault())
 			}
 		} else {
 			log.Debug("[RuntimeApplication] com terminate", key)
-			g.enqueue(ChannelTypePublic, value.Value, NewMessageTerminatedShutdown(key))
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageTerminatedShutdown(key), WithDefault())
 		}
 	case Failure:
 		log.Error("[RuntimeApplication] failed to get system metadata and notify end of application", value.Err)
