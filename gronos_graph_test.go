@@ -80,7 +80,11 @@ func TestGronosGraph(t *testing.T) {
 
 		{
 			// that's the new direction of the next iteration of the message system
-			msg := NewMessageAddLifecycleFunction("test", func(ctx1 context.Context, shutdown <-chan struct{}) error { return nil })
+			msg := NewMessageAddLifecycleFunction(
+				"test",
+				func(ctx1 context.Context, shutdown <-chan struct{}) error {
+					return nil
+				})
 			// That's exact what i wanted
 			switch value := g.enqueue(nil, msg).(type) {
 			case *Success[MessageAddLifecycleFunction[string]]:

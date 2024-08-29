@@ -303,6 +303,7 @@ func (g *gronos[K]) reinitialize() {
 	// Reset any other necessary fields
 }
 
+// TODO: return a maybe result
 // Start begins running the gronos instance and returns a channel for receiving errors.
 func (g *gronos[K]) Start() chan error {
 	// can't trigger twice in a row Start until it is shutdown
@@ -334,11 +335,23 @@ func (g *gronos[K]) Start() chan error {
 
 	go g.internals(g.errChan)
 
+	var metadata *Metadata[K]
+	switch data := g.poolMetadata().(type) {
+	case Success[*Metadata[K]]:
+		metadata = data.Value
+	case Failure:
+		g.errChan <- fmt.Errorf("unable to get system metadata: %w", data.Err)
+		return g.errChan
+	}
+
 	// TODO: might send them all at once and wait for all of them to be added
 	for k, v := range g.init {
-		wait, msg := MsgAdd[K](k, v)
-		g.sendMessage(g.getSystemMetadata(), msg)
-		<-wait
+		switch g.enqueue(ChannelTypePublic, metadata, NewMessageAddLifecycleFunction(k, v)).WaitWithTimeout(time.Second).(type) {
+		case Failure:
+			g.errChan <- fmt.Errorf("unable to add initial application %v", k)
+		case Success[MessageAddLifecycleFunction[K]]:
+			log.Debug("[Gronos] Initial application added", k)
+		}
 	}
 
 	// Start automatic shutdown if configured
@@ -386,203 +399,226 @@ func (g *gronos[K]) OnDone() <-chan struct{} {
 
 // We don't want to infringe on the memory space of the user
 // It will be Put back when the message is processed
-func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) (*MessagePayload[K], error) {
+func (g *gronos[K]) poolMessagePayload(metadata *Metadata[K], m Message) MaybeResult[*MessagePayload[K]] {
+	var payload *MessagePayload[K]
 
-	resp, msg := MsgRequestPayload[K]()
-	if !g.send(msg) {
-		return nil, fmt.Errorf("unable to request payload, channel closed")
-	}
-
-	value, err := resp.Wait(context.Background())
-	if err != nil {
-		return nil, err
-	}
-
-	switch msg := value.(type) {
-	case Success[MessagePayload[K]]:
-		payload := msg.Value
+	switch value := g.
+		enqueue(
+			ChannelTypePrivate,
+			nil,
+			NewMessageRequestPayload[K]()).
+		WaitWithTimeout(time.Second).(type) {
+	case Success[*MessagePayload[K]]:
+		payload = value.Value
 	case Failure:
-		return nil, msg.Err
+		return FailureResult[K](fmt.Errorf("unable to request payload: %w", value.Err))
 	}
 
-	// it is not a regular message
-	if metadata == nil {
-		return msgPayload, nil
-	}
-
-	msgPayload.Metadata = metadata
+	payload.Metadata = metadata
 
 	// it's always pointers normally
 	typeOf := reflect.TypeOf(m)
 
-	msgPayload.Metadata.SetType(typeOf)
+	payload.Metadata.SetType(typeOf)
 
 	if typeOf.Kind() == reflect.Ptr {
-		msgPayload.Metadata.SetName(fmt.Sprintf("%s.%s", typeOf.Elem().PkgPath(), typeOf.Elem().Name()))
+		payload.Metadata.SetName(fmt.Sprintf("%s.%s", typeOf.Elem().PkgPath(), typeOf.Elem().Name()))
 	} else {
-		msgPayload.Metadata.SetName(fmt.Sprintf("%s.%s", typeOf.PkgPath(), typeOf.Name()))
-		msgPayload.Metadata.SetError(fmt.Errorf("it should be a pointer"))
+		payload.Metadata.SetName(fmt.Sprintf("%s.%s", typeOf.PkgPath(), typeOf.Name()))
+		payload.Metadata.SetError(fmt.Errorf("it should be a pointer"))
 	}
 
 	// every messages that users are sending will be pre-analyzed
-	if _, loaded := g.typeMapping.LoadOrStore(msgPayload.Metadata.GetName(), typeOf); !loaded {
+	if _, loaded := g.typeMapping.LoadOrStore(payload.Metadata.GetName(), typeOf); !loaded {
 		// TODO: send an event for metrics for "new message type" detected
 	}
 
-	msgPayload.Message = m
-	return msgPayload, nil
+	payload.Message = m
+
+	return SuccessResult(payload)
 }
 
-func (g *gronos[K]) poolMetadata() *Metadata[K] {
-	future, msg := MsgRequestMetadata[K]()
-	if !g.send(msg) {
-		return nil
-	}
-	switch value := future.Get().(type) {
+func (g *gronos[K]) poolMetadata() MaybeResult[*Metadata[K]] {
+	return <-g.enqueue(ChannelTypePrivate, nil, NewMessageRequestMetadata[K]())
+}
+
+func (g *gronos[K]) getSystemMetadata() MaybeResult[*Metadata[K]] {
+	switch data := g.poolMetadata().(type) {
 	case Success[*Metadata[K]]:
-		return value.Value
+		data.Value.SetID(0)
+		data.Value.SetKey(g.computedRootKey)
+		return SuccessResult(data.Value)
 	case Failure:
-		return nil
+		return FailureResult[K](fmt.Errorf("unable to get system metadata: %w", data.Err))
+	default:
+		return FailureResult[K](ErrUnhandledMessage)
 	}
-
 }
 
-func (g *gronos[K]) getSystemMetadata() *Metadata[K] {
-	metadata := g.poolMetadata()
-	metadata.SetID(0)
-	metadata.SetKey(g.computedRootKey)
-	return metadata
-}
+type ChannelType int
 
-func (g *gronos[K]) Send(m Message) bool {
-	return g.sendMessage(g.getSystemMetadata(), m)
-}
+const (
+	ChannelTypePrivate ChannelType = iota
+	ChannelTypePublic
+)
 
-func (g *gronos[K]) WaitFor(fn FnWait) <-chan struct{} {
-	return g.sendMessageWait(g.getSystemMetadata(), fn)
-}
-
-func (g *gronos[K]) Confirm(fn FnConfirm) <-chan bool {
-	return g.sendMessageConfirm(g.getSystemMetadata(), fn)
-}
-
-func (g *gronos[K]) send(m Message) bool {
-	if !g.comClosed.Load() {
-		select {
-		case g.privateChn <- m:
-			return true
-		default:
-			log.Debug("[Gronos] Unable to send message, com channel might be full")
-			return false
-		}
-	}
-	return false
-}
-
-func (g *gronos[K]) enqueue(metadata *Metadata[K], msg Message) Result {
-	// Check that msg is a FutureMessage[T any, R any] OR FutureMessageVoid[T any] type, using reflect
-	msgType := reflect.TypeOf(msg)
-	futureMessageType := reflect.TypeOf((*FutureMessage[any, any])(nil)).Elem()
-	futureMessageVoidType := reflect.TypeOf((*FutureMessageVoid[any])(nil)).Elem()
-
-	if !msgType.Implements(futureMessageType) && !msgType.Implements(futureMessageVoidType) {
-		log.Debug("[Gronos] Message type is not supported")
-		return Failure{errors.New("unsupported message type")}
-	}
-
-	// Access the Result property using reflection
-	msgValue := reflect.ValueOf(msg)
+func (g *gronos[K]) enqueue(chn ChannelType, metadata *Metadata[K], future FutureMessageInterface) Future[any] {
+	msgValue := reflect.ValueOf(future)
 	resultField := msgValue.FieldByName("Result")
-
-	if !resultField.IsValid() {
-		log.Debug("[Gronos] Message does not have a Result field")
-		return Failure{errors.New("message does not have a Result field")}
-	}
-
-	result := resultField.Interface().(Result)
+	result := resultField.Interface().(Future[any])
 
 	if !g.comClosed.Load() {
-		payload, err := g.poolMessagePayload(metadata, msg)
-		if err != nil {
-			log.Debug("[Gronos] Unable to pool message payload")
-			return Failure{err}
-		}
-		select {
-		case g.publicChn <- payload:
-			return result
-		default:
-			log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
-			return Failure{errors.New("internal channel full")}
+		switch chn {
+
+		case ChannelTypePrivate:
+			select {
+			case g.privateChn <- future:
+				return result
+			default:
+				log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
+				return NewFutureFailure[any](fmt.Errorf("private channel full"))
+			}
+
+		case ChannelTypePublic:
+			switch maybePayload := g.poolMessagePayload(metadata, future).(type) {
+			case Success[*MessagePayload[K]]:
+				select {
+				case g.publicChn <- maybePayload.Value:
+					return result
+				default:
+					log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
+					return NewFutureFailure[any](fmt.Errorf("public channel full"))
+				}
+			case Failure:
+				log.Debug("[Gronos] Unable to pool message payload")
+				return NewFutureFailure[any](fmt.Errorf("cannot get message payload"))
+			}
+
 		}
 	}
-	return Failure{errors.New("communication closed")}
+
+	return NewFutureFailure[any](fmt.Errorf("communication closed"))
 }
 
-func (g *gronos[K]) sendMessage(metadata *Metadata[K], m Message) bool {
-	if !g.comClosed.Load() {
-		payload, err := g.poolMessagePayload(metadata, m)
-		if err != nil {
-			log.Debug("[Gronos] Unable to pool message payload")
-			return false
-		}
-		select {
-		case g.publicChn <- payload:
-			return true
-		default:
-			log.Debug("[Gronos] Unable to send message, internal channel might be full")
-			return false
-		}
-	}
-	return false
-}
+// func (g *gronos[K]) enqueue(chn ChannelType, metadata *Metadata[K], msg Message) Result {
+// 	// Check that msg is a FutureMessage[T any, R any] OR FutureMessageVoid[T any] type, using reflect
+// 	msgType := reflect.TypeOf(msg)
+// 	futureMessageType := reflect.TypeOf((*FutureMessage[any, any])(nil)).Elem()
+// 	futureMessageVoidType := reflect.TypeOf((*FutureMessageVoid[any])(nil)).Elem()
 
-type FnWait func() (<-chan struct{}, Message)
+// 	if !msgType.Implements(futureMessageType) && !msgType.Implements(futureMessageVoidType) {
+// 		log.Debug("[Gronos] Message type is not supported")
+// 		return Failure{errors.New("unsupported message type")}
+// 	}
 
-func (g *gronos[K]) sendMessageWait(metadata *Metadata[K], fn FnWait) <-chan struct{} {
-	// fn is supposed to be a function that returns a `<-chan struct` and `message`
-	// execute the function and return the channel and message
-	done, msg := fn()
+// 	// Access the Result property using reflection
+// 	msgValue := reflect.ValueOf(msg)
+// 	resultField := msgValue.FieldByName("Result")
 
-	if !g.comClosed.Load() {
-		payload, err := g.poolMessagePayload(metadata, msg)
-		if err != nil {
-			log.Debug("[Gronos] Unable to pool message payload")
-			return done
-		}
-		select {
-		case g.publicChn <- payload:
-			return done
-		default:
-			log.Debug("[Gronos] Unable to send message, channel might be full")
-			return done
-		}
-	}
-	return done
-}
+// 	if !resultField.IsValid() {
+// 		log.Debug("[Gronos] Message does not have a Result field")
+// 		return Failure{errors.New("message does not have a Result field")}
+// 	}
 
-type FnConfirm func() (<-chan bool, Message)
+// 	result := resultField.Interface().(Result)
 
-func (g *gronos[K]) sendMessageConfirm(metadata *Metadata[K], fn FnConfirm) <-chan bool {
-	// fn is supposed to be a function that returns a `<-chan struct` and `message`
-	// execute the function and return the channel and message
-	done, msg := fn()
+// 	if !g.comClosed.Load() {
+// 		switch chn {
 
-	if !g.comClosed.Load() {
-		payload, err := g.poolMessagePayload(metadata, msg)
-		if err != nil {
-			log.Debug("[Gronos] Unable to pool message payload")
-			return done
-		}
-		select {
-		case g.publicChn <- payload:
-			return done
-		default:
-			log.Debug("[Gronos] Unable to send message, channel might be full")
-			return done
-		}
-	}
-	return done
-}
+// 		case ChannelTypePrivate:
+// 			select {
+// 			case g.privateChn <- msg:
+// 				return result
+// 			default:
+// 				log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
+// 				return Failure{errors.New("internal channel full")}
+// 			}
+
+// 		case ChannelTypePublic:
+// 			payload, err := g.poolMessagePayload(metadata, msg)
+// 			if err != nil {
+// 				log.Debug("[Gronos] Unable to pool message payload")
+// 				return Failure{err}
+// 			}
+
+// 			select {
+// 			case g.publicChn <- payload:
+// 				return result
+// 			default:
+// 				log.Debug("[Gronos] Unable to enqueue message, internal channel might be full")
+// 				return Failure{errors.New("internal channel full")}
+// 			}
+
+// 		}
+// 	}
+// 	return Failure{errors.New("communication closed")}
+// }
+
+// func (g *gronos[K]) sendMessage(metadata *Metadata[K], m Message) bool {
+// 	if !g.comClosed.Load() {
+// 		payload, err := g.poolMessagePayload(metadata, m)
+// 		if err != nil {
+// 			log.Debug("[Gronos] Unable to pool message payload")
+// 			return false
+// 		}
+// 		select {
+// 		case g.publicChn <- payload:
+// 			return true
+// 		default:
+// 			log.Debug("[Gronos] Unable to send message, internal channel might be full")
+// 			return false
+// 		}
+// 	}
+// 	return false
+// }
+
+// type FnWait func() (<-chan struct{}, Message)
+
+// func (g *gronos[K]) sendMessageWait(metadata *Metadata[K], fn FnWait) <-chan struct{} {
+// 	// fn is supposed to be a function that returns a `<-chan struct` and `message`
+// 	// execute the function and return the channel and message
+// 	done, msg := fn()
+
+// 	if !g.comClosed.Load() {
+// 		payload, err := g.poolMessagePayload(metadata, msg)
+// 		if err != nil {
+// 			log.Debug("[Gronos] Unable to pool message payload")
+// 			return done
+// 		}
+// 		select {
+// 		case g.publicChn <- payload:
+// 			return done
+// 		default:
+// 			log.Debug("[Gronos] Unable to send message, channel might be full")
+// 			return done
+// 		}
+// 	}
+// 	return done
+// }
+
+// type FnConfirm func() (<-chan bool, Message)
+
+// func (g *gronos[K]) sendMessageConfirm(metadata *Metadata[K], fn FnConfirm) <-chan bool {
+// 	// fn is supposed to be a function that returns a `<-chan struct` and `message`
+// 	// execute the function and return the channel and message
+// 	done, msg := fn()
+
+// 	if !g.comClosed.Load() {
+// 		payload, err := g.poolMessagePayload(metadata, msg)
+// 		if err != nil {
+// 			log.Debug("[Gronos] Unable to pool message payload")
+// 			return done
+// 		}
+// 		select {
+// 		case g.publicChn <- payload:
+// 			return done
+// 		default:
+// 			log.Debug("[Gronos] Unable to send message, channel might be full")
+// 			return done
+// 		}
+// 	}
+// 	return done
+// }
 
 // if configured on automatic shutdown, it will check the status of the applications
 func (g *gronos[K]) automaticShutdown() {
@@ -760,7 +796,7 @@ func (g *gronos[K]) Push(apps map[K]LifecyleFunc, opts ...addOption) <-chan stru
 }
 
 // Add adds a new application to the gronos instance with the given key and RuntimeApplication.
-func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan struct{} {
+func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan error {
 	cfg := addOptions{
 		whenState: StatusAdded,
 	}
@@ -768,47 +804,66 @@ func (g *gronos[K]) Add(k K, v LifecyleFunc, opts ...addOption) <-chan struct{} 
 		opt(&cfg)
 	}
 
-	done, msgAdd := MsgAdd(k, v)
+	cerr := make(chan error, 1)
 
-	metadata := g.getSystemMetadata()
-
-	// Add new runtime application
-	if !g.sendMessage(metadata, msgAdd) {
-		log.Debug("[Gronos] Unable to add runtime application")
-		return nil
-	}
-
-	select {
-	case <-done:
-		// Application added successfully
-	case <-time.After(5 * time.Second):
-		log.Debug("[Gronos] Timeout waiting for application to be added")
-		g.sendMessage(metadata, MsgRuntimeError(k, fmt.Errorf("timeout waiting for application to be added")))
-		return nil
-	}
-
-	// Request asynchronous confirmation of the state
-	doneStatus, msgStatus := MsgRequestStatusAsync(k, cfg.whenState)
-
-	// send the message
-	if !g.sendMessage(metadata, msgStatus) {
-		log.Debug("[Gronos] Unable to request status")
-		return nil
-	}
-
-	proxy := make(chan struct{})
 	go func() {
-		select {
-		case <-time.After(5 * time.Second):
-			log.Debug("Timeout waiting for application to reach state", k, cfg.whenState)
-		case <-doneStatus:
-			log.Debug("Application reached state", k, cfg.whenState)
+		msg := NewMessageAddLifecycleFunction(k, v)
+
+		var metadata *Metadata[K]
+		switch data := g.enqueue(ChannelTypePrivate, nil, msg).WaitWithTimeout(time.Second).(type) {
+		case Success[*Metadata[K]]:
+			metadata = data.Value
+		case Failure:
+			log.Debug("[Gronos] Unable to get system metadata")
 		}
-		close(proxy)
+
+		// Add new runtime application
+		if !g.sendMessage(metadata, msg) {
+			log.Debug("[Gronos] Unable to add runtime application")
+			cerr <- fmt.Errorf("unable to add runtime application")
+			return
+		}
+
+		switch g.enqueue(ChannelTypePublic, metadata, msg).WaitWithTimeout(time.Second * 5).(type) {
+		case Success[*MessageAddLifecycleFunction[K]]:
+		case Failure:
+			log.Debug("[Gronos] Unable to add runtime application")
+			cerr <- fmt.Errorf("unable to add runtime application")
+			return
+		}
+
+		// select {
+		// case <-:
+		// 	// Application added successfully
+		// case <-time.After(5 * time.Second):
+		// 	log.Debug("[Gronos] Timeout waiting for application to be added")
+		// 	g.sendMessage(metadata, MsgRuntimeError(k, fmt.Errorf("timeout waiting for application to be added")))
+		// 	return nil
+		// }
+
+		// Request asynchronous confirmation of the state
+		doneStatus, msgStatus := MsgRequestStatusAsync(k, cfg.whenState)
+
+		// send the message
+		if !g.sendMessage(metadata, msgStatus) {
+			log.Debug("[Gronos] Unable to request status")
+			return nil
+		}
 	}()
 
+	// proxy := make(chan struct{})
+	// go func() {
+	// 	select {
+	// 	case <-time.After(5 * time.Second):
+	// 		log.Debug("Timeout waiting for application to reach state", k, cfg.whenState)
+	// 	case <-doneStatus:
+	// 		log.Debug("Application reached state", k, cfg.whenState)
+	// 	}
+	// 	close(proxy)
+	// }()
+
 	// return receive only channel if the user want to listen when the runtime application is added
-	return proxy
+	return cerr
 }
 
 // createContext creates a new context with the gronos communication channel embedded.
@@ -828,23 +883,23 @@ func (g *gronos[K]) createContext(key K) (context.Context, context.CancelFunc) {
 		return g.sendMessage(metadata, m)
 	})
 
-	ctx = context.WithValue(ctx, comKeyWait, func(fn FnWait) <-chan struct{} {
-		log.Debug("get new metadata for sendMessageWait", key)
-		metadata := g.poolMetadata()
-		log.Debug("get new metadata for sendMessageWait", metadata.String())
-		metadata.SetID(contextID)
-		metadata.SetKey(key)
-		return g.sendMessageWait(metadata, fn)
-	})
+	// ctx = context.WithValue(ctx, comKeyWait, func(fn FnWait) <-chan struct{} {
+	// 	log.Debug("get new metadata for sendMessageWait", key)
+	// 	metadata := g.poolMetadata()
+	// 	log.Debug("get new metadata for sendMessageWait", metadata.String())
+	// 	metadata.SetID(contextID)
+	// 	metadata.SetKey(key)
+	// 	return g.sendMessageWait(metadata, fn)
+	// })
 
-	ctx = context.WithValue(ctx, comKeyConfirm, func(fn FnConfirm) <-chan bool {
-		log.Debug("get new metadata for sendMessageConfirm", key)
-		metadata := g.poolMetadata()
-		log.Debug("get new metadata for sendMessageConfirm", metadata.String())
-		metadata.SetID(contextID)
-		metadata.SetKey(key)
-		return g.sendMessageConfirm(metadata, fn)
-	})
+	// ctx = context.WithValue(ctx, comKeyConfirm, func(fn FnConfirm) <-chan bool {
+	// 	log.Debug("get new metadata for sendMessageConfirm", key)
+	// 	metadata := g.poolMetadata()
+	// 	log.Debug("get new metadata for sendMessageConfirm", metadata.String())
+	// 	metadata.SetID(contextID)
+	// 	metadata.SetKey(key)
+	// 	return g.sendMessageConfirm(metadata, fn)
+	// })
 
 	ctx, cancel := context.WithCancel(ctx)
 

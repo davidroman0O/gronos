@@ -6,46 +6,56 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-type requestMetadata[K Primitive] struct {
-	Response Future[*Metadata[K]]
+type MessageRequestMetadata[K Primitive] struct {
+	FutureMessage[struct{}, *Metadata[K]]
 }
 
-type requestPayload[K Primitive] struct {
-	Response Future[*MessagePayload[K]]
+func NewMessageRequestMetadata[K Primitive]() *MessageRequestMetadata[K] {
+	return &MessageRequestMetadata[K]{
+		FutureMessage: FutureMessage[struct{}, *Metadata[K]]{
+			Data:   struct{}{},
+			Result: NewFuture[*Metadata[K]](),
+		},
+	}
 }
 
-type releaseMetadata[K Primitive] struct {
-	Metadata *Metadata[K]
-	Response FutureVoid
+type MessageRequestPayload[K Primitive] struct {
+	FutureMessage[struct{}, *MessagePayload[K]]
 }
 
-type releasePayload[K Primitive] struct {
-	Payload  *MessagePayload[K]
-	Response FutureVoid
+func NewMessageRequestPayload[K Primitive]() *MessageRequestPayload[K] {
+	return &MessageRequestPayload[K]{
+		FutureMessage: FutureMessage[struct{}, *MessagePayload[K]]{
+			Data:   struct{}{},
+			Result: NewFuture[*MessagePayload[K]](),
+		},
+	}
 }
 
-func MsgRequestMetadata[K Primitive]() (Future[*Metadata[K]], *requestMetadata[K]) {
-	response := make(Future[*Metadata[K]], 1)
-	msg := &requestMetadata[K]{Response: response}
-	return response, msg
+type MessageReleaseMetadata[K Primitive] struct {
+	FutureMessage[*Metadata[K], Void]
 }
 
-func MsgRequestPayload[K Primitive]() (Future[*MessagePayload[K]], *requestPayload[K]) {
-	response := make(Future[*MessagePayload[K]], 1)
-	msg := &requestPayload[K]{Response: response}
-	return response, msg
+func NewMessageReleaseMetadata[K Primitive](m *Metadata[K]) *MessageReleaseMetadata[K] {
+	return &MessageReleaseMetadata[K]{
+		FutureMessage: FutureMessage[*Metadata[K], Void]{
+			Data:   m,
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
-func MsgReleaseMetadata[K Primitive](m *Metadata[K]) (FutureVoid, *releaseMetadata[K]) {
-	response := make(FutureVoid, 1)
-	msg := &releaseMetadata[K]{Metadata: m, Response: response}
-	return response, msg
+type MessageReleasePayload[K Primitive] struct {
+	FutureMessage[*MessagePayload[K], Void]
 }
 
-func MsgReleasePayload[K Primitive](m *MessagePayload[K]) (FutureVoid, *releasePayload[K]) {
-	response := make(FutureVoid, 1)
-	msg := &releasePayload[K]{Payload: m, Response: response}
-	return response, msg
+func NewMessageReleasePayload[K Primitive](m *MessagePayload[K]) *MessageReleasePayload[K] {
+	return &MessageReleasePayload[K]{
+		FutureMessage: FutureMessage[*MessagePayload[K], Void]{
+			Data:   m,
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
 func (g *gronos[K]) internals(errChan chan<- error) {
@@ -56,7 +66,7 @@ func (g *gronos[K]) internals(errChan chan<- error) {
 		},
 	}
 
-	var messagePayloadPool = sync.Pool{
+	var payloadPool = sync.Pool{
 		New: func() interface{} {
 			return &MessagePayload[K]{
 				Metadata: nil,
@@ -67,29 +77,28 @@ func (g *gronos[K]) internals(errChan chan<- error) {
 
 	for m := range g.privateChn {
 		switch msg := m.(type) {
-		case *requestMetadata[K]:
-			log.Debug("[GronosInternals] [RequestMetadata]")
+		case *MessageRequestMetadata[K]:
+			log.Debug("[GronosInternals] [MessageRequestMetadata]")
 			metadata := metadataPool.Get().(*Metadata[K])
-			msg.Response <- SuccessResult(metadata)
-			close(msg.Response)
+			msg.Result <- SuccessResult(metadata)
+			close(msg.Result)
 
-		case *requestPayload[K]:
-			log.Debug("[GronosInternals] [RequestPayload]")
-			payload := messagePayloadPool.Get().(*MessagePayload[K])
-			msg.Response <- SuccessResult(payload)
-			close(msg.Response)
+		case *MessageRequestPayload[K]:
+			log.Debug("[GronosInternals] [MessageRequestPayload]")
+			payload := payloadPool.Get().(*MessagePayload[K])
+			msg.Result <- SuccessResult(payload)
+			close(msg.Result)
 
-		case *releaseMetadata[K]:
-			log.Debug("[GronosInternals] [ReleaseMetadata]")
-			metadataPool.Put(msg.Metadata)
-			msg.Response <- nil
-			close(msg.Response)
+		case *MessageReleaseMetadata[K]:
+			log.Debug("[GronosInternals] [MessageReleaseMetadata]")
+			metadataPool.Put(msg.Data)
+			close(msg.Result)
 
-		case *releasePayload[K]:
-			log.Debug("[GronosInternals] [ReleasePayload]")
-			messagePayloadPool.Put(msg.Payload)
-			msg.Response <- nil
-			close(msg.Response)
+		case *MessageReleasePayload[K]:
+			log.Debug("[GronosInternals] [MessageReleasePayload]")
+			payloadPool.Put(msg.Data)
+			payloadPool.Put(msg.Data)
+			close(msg.Result)
 		}
 	}
 

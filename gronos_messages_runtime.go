@@ -10,13 +10,15 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-type MessageAddLifecycleFunction[K Primitive] FutureMessage[
-	struct {
-		KeyMessage[K]
-		LifecyleFunc
-	},
-	Void,
-]
+type MessageAddLifecycleFunction[K Primitive] struct {
+	FutureMessage[
+		struct {
+			KeyMessage[K]
+			LifecyleFunc
+		},
+		Void,
+	]
+}
 
 var messageFutureAddLifecycleFunctionPoolInited bool = false
 var messageFutureAddLifecycleFunctionPool sync.Pool
@@ -34,22 +36,21 @@ func NewMessageAddLifecycleFunction[K Primitive](
 		}
 	}
 	return &MessageAddLifecycleFunction[K]{
-		Data: struct {
+		FutureMessage: FutureMessage[struct {
 			KeyMessage[K]
 			LifecyleFunc
-		}{
-			KeyMessage:   KeyMessage[K]{Key: key},
-			LifecyleFunc: app,
+		}, Void]{
+			Data: struct {
+				KeyMessage[K]
+				LifecyleFunc
+			}{
+				KeyMessage:   KeyMessage[K]{Key: key},
+				LifecyleFunc: app,
+			},
+			Result: NewFuture[Void](),
 		},
-		Result: make(Future[Void], 1),
 	}
 }
-
-// type AddMessage[K Primitive] struct {
-// 	KeyMessage[K]
-// 	LifecyleFunc
-// 	RequestMessage[K, struct{}]
-// }
 
 type RemoveMessage[K Primitive] struct {
 	KeyMessage[K]
