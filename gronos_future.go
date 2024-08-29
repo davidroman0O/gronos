@@ -88,6 +88,28 @@ type Void struct{}
 // Future represents an asynchronous computation that returns a Result
 type Future[T any] chan Result
 
+func (f Future[T]) Publish(value T) {
+	f <- SuccessResult[T](value)
+	close(f)
+}
+
+func (f Future[T]) PublishError(err error) {
+	f <- FailureResult[T](err)
+	close(f)
+}
+
+func (f Future[T]) Send(value T) {
+	f <- SuccessResult[T](value)
+}
+
+func (f Future[T]) Error(err error) {
+	f <- FailureResult[T](err)
+}
+
+func (f Future[T]) Close() {
+	close(f)
+}
+
 func NewFuture[T any]() Future[T] {
 	return make(Future[T], 1)
 }
