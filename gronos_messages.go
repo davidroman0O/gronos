@@ -3,11 +3,19 @@ package gronos
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/charmbracelet/log"
 )
 
 /// Each message is a set of properties that will mutate one by one the state of the system
+
+type MessageProcessor[K Primitive, D any, F any] func(state *gronosState[K], metadata *Metadata[K], data D, future Future[F]) (error, bool)
+
+type MessagePoolProcessor[K Primitive, D any, F any] struct {
+	pool      sync.Pool
+	processor MessageProcessor[K, D, F]
+}
 
 // Message is given by the user or the system, represent the data of a passed message.
 type Message interface{}
@@ -79,9 +87,10 @@ func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload
 
 	// Error should always be the highest priority
 	switch msg := m.Message.(type) {
-	case *RuntimeError[K]:
+	case *MessageRuntimeError[K]:
 		log.Debug("[GronosMessage] [RuntimeError]")
-		g.errChan <- msg.Error
+		g.errChan <- msg.Data.Error
+		messageRuntimeErrorPool.Put(msg) // put it back in the pool
 		return nil
 	}
 

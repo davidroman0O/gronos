@@ -22,7 +22,12 @@ func (g *gronos[K]) run(errChan chan<- error) {
 				errChan <- fmt.Errorf("extension error on stop: %w", err)
 			}
 		}
-		g.sendMessage(g.getSystemMetadata(), MsgDestroy[K]())
+		switch value := g.getSystemMetadata().(type) {
+		case Success[*Metadata[K]]:
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageDestroy[K]())
+		case Failure:
+			errChan <- fmt.Errorf("failed to get system metadata for destroy: %w", value.Err)
+		}
 	}()
 
 	dag := dag.NewDAG()
@@ -57,13 +62,30 @@ func (g *gronos[K]) run(errChan chan<- error) {
 
 	// global shutdown or cancellation detection
 	go func() {
-		select {
-		case <-g.ctx.Done():
-			log.Debug("[Gronos] Context cancelled, initiating shutdown")
-			g.sendMessage(g.getSystemMetadata(), MsgInitiateContextCancellation[K]())
-		case <-g.shutdownChan:
-			log.Debug("[Gronos] Shutdown initiated, initiating shutdown")
-			g.sendMessage(g.getSystemMetadata(), MsgInitiateShutdown[K]())
+		switch metadata := g.getSystemMetadata().(type) {
+		case Success[*Metadata[K]]:
+			select {
+			case <-g.ctx.Done():
+				log.Debug("[Gronos] Context cancelled, initiating shutdown")
+				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageInitiateShutdown[K]()).Get().(type) {
+				case Success[Void]:
+					log.Debug("[Gronos] Sent initiate shutdown")
+				case Failure:
+					log.Error("[Gronos] Failed to send initiate shutdown")
+					errChan <- fmt.Errorf("failed to send initiate shutdown: %w", value.Err)
+				}
+			case <-g.shutdownChan:
+				log.Debug("[Gronos] Shutdown initiated, initiating shutdown")
+				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageInitiateShutdown[K]()).Get().(type) {
+				case Success[Void]:
+					log.Debug("[Gronos] Sent initiate shutdown")
+				case Failure:
+					log.Error("[Gronos] Failed to send initiate shutdown")
+					errChan <- fmt.Errorf("failed to send initiate shutdown: %w", value.Err)
+				}
+			}
+		case Failure:
+			errChan <- fmt.Errorf("failed to get system metadata for global shutdown: %w", metadata.Err)
 		}
 	}()
 

@@ -1,75 +1,161 @@
 package gronos
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/charmbracelet/log"
 )
 
-// TODO: sync.Pool for all messages
-type GracePeriodExceededMessage[K Primitive] struct {
-	KeyMessage[K]
+type MessageGracePeriodExceeded[K Primitive] struct {
+	FutureMessage[Void, Void]
 }
 
-var gracePeriodExceededPool = sync.Pool{
-	New: func() interface{} {
-		return &GracePeriodExceededMessage[string]{}
-	},
+var messageGracePeriodExceededPoolInited bool = false
+var messageGracePeriodExceededPool sync.Pool
+
+func NewMessageGracePeriodExceeded[K Primitive]() *MessageGracePeriodExceeded[K] {
+	if !messageGracePeriodExceededPoolInited {
+		messageGracePeriodExceededPoolInited = true
+		messageGracePeriodExceededPool = sync.Pool{
+			New: func() any {
+				return &MessageGracePeriodExceeded[K]{}
+			},
+		}
+	}
+	return &MessageGracePeriodExceeded[K]{
+		FutureMessage: FutureMessage[Void, Void]{
+			Data:   Void{},
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
-func MsgGracePeriodExceeded[K Primitive]() *GracePeriodExceededMessage[K] {
-	return gracePeriodExceededPool.Get().(*GracePeriodExceededMessage[K])
+type MessageShutdownComplete[K Primitive] struct {
+	FutureMessage[Void, Void]
 }
 
-type ShutdownComplete[K Primitive] struct{}
+var messageShutdownCompletePoolInited bool = false
+var messageShutdownCompletePool sync.Pool
 
-type CheckAutomaticShutdown[K Primitive] struct {
-	RequestMessage[K, struct{}]
+func NewMessageShutdownComplete[K Primitive]() *MessageShutdownComplete[K] {
+	if !messageShutdownCompletePoolInited {
+		messageShutdownCompletePoolInited = true
+		messageShutdownCompletePool = sync.Pool{
+			New: func() any {
+				return &MessageShutdownComplete[K]{}
+			},
+		}
+	}
+	return &MessageShutdownComplete[K]{
+		FutureMessage: FutureMessage[Void, Void]{
+			Data:   Void{},
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
-func MsgCheckAutomaticShutdown[K Primitive]() (chan struct{}, *CheckAutomaticShutdown[K]) {
-	done := make(chan struct{})
-	msg := &CheckAutomaticShutdown[K]{}
-	msg.Response = done
-	return done, msg
+type MessageCheckAutomaticShutdown[K Primitive] struct {
+	FutureMessage[Void, Void]
 }
 
-// Message creation functions
-func MsgInitiateShutdown[K Primitive]() *InitiateShutdown[K] {
-	return &InitiateShutdown[K]{}
+var messageCheckAutomaticShutdownPoolInited bool = false
+var messageCheckAutomaticShutdownPool sync.Pool
+
+func NewMessageCheckAutomaticShutdown[K Primitive]() *MessageCheckAutomaticShutdown[K] {
+	if !messageCheckAutomaticShutdownPoolInited {
+		messageCheckAutomaticShutdownPoolInited = true
+		messageCheckAutomaticShutdownPool = sync.Pool{
+			New: func() any {
+				return &MessageCheckAutomaticShutdown[K]{}
+			},
+		}
+	}
+	return &MessageCheckAutomaticShutdown[K]{
+		FutureMessage: FutureMessage[Void, Void]{
+			Data:   Void{},
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
-type Destroy[K Primitive] struct{}
+type MessageInitiateShutdown[K Primitive] struct {
+	FutureMessage[Void, Void]
+}
 
-func MsgDestroy[K Primitive]() *Destroy[K] {
-	return &Destroy[K]{}
+var messageInitiateShutdownPoolInited bool = false
+var messageInitiateShutdownPool sync.Pool
+
+func NewMessageInitiateShutdown[K Primitive]() *MessageInitiateShutdown[K] {
+	if !messageInitiateShutdownPoolInited {
+		messageInitiateShutdownPoolInited = true
+		messageInitiateShutdownPool = sync.Pool{
+			New: func() any {
+				return &MessageInitiateShutdown[K]{}
+			},
+		}
+	}
+	return &MessageInitiateShutdown[K]{
+		FutureMessage: FutureMessage[Void, Void]{
+			Data:   Void{},
+			Result: NewFuture[Void](),
+		},
+	}
+}
+
+type MessageDestroy[K Primitive] struct {
+	FutureMessage[Void, Void]
+}
+
+var messageDestroyPoolInited bool = false
+var messageDestroyPool sync.Pool
+
+func NewMessageDestroy[K Primitive]() *MessageDestroy[K] {
+	if !messageDestroyPoolInited {
+		messageDestroyPoolInited = true
+		messageDestroyPool = sync.Pool{
+			New: func() any {
+				return &MessageDestroy[K]{}
+			},
+		}
+	}
+	return &MessageDestroy[K]{
+		FutureMessage: FutureMessage[Void, Void]{
+			Data:   Void{},
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
 func (g *gronos[K]) handleShutdownStagesMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
-	case *ShutdownProgress[K]:
+	case *MessageShutdownProgress[K]:
 		log.Debug("[GronosMessage] [ShutdownProgress]")
-		return g.handleShutdownProgress(state, msg.RemainingApps), true
-	case *ShutdownComplete[K]:
+		defer messageShutdownProgressPool.Put(msg)
+		return g.handleShutdownProgress(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageShutdownComplete[K]:
 		log.Debug("[GronosMessage] [ShutdownComplete]")
-		return g.handleShutdownComplete(state), true
-	case *CheckAutomaticShutdown[K]:
+		defer messageShutdownCompletePool.Put(msg)
+		return g.handleShutdownComplete(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageCheckAutomaticShutdown[K]:
 		log.Debug("[GronosMessage] [CheckAutomaticShutdown]")
-		return g.handleCheckAutomaticShutdown(state, msg.Response), true
-	case *Destroy[K]:
+		defer messageCheckAutomaticShutdownPool.Put(msg)
+		return g.handleCheckAutomaticShutdown(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageDestroy[K]:
 		log.Debug("[GronosMessage] [Destroy]")
-		return g.handleDestroy(state), true
-	case *GracePeriodExceededMessage[K]:
+		defer messageDestroyPool.Put(msg)
+		return g.handleDestroy(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageGracePeriodExceeded[K]:
 		log.Debug("[GronosMessage] [GracePeriodExceeded]")
-		defer gracePeriodExceededPool.Put(msg)
-		return g.handleGracePeriodExceeded(state), true
+		defer messageGracePeriodExceededPool.Put(msg)
+		return g.handleGracePeriodExceeded(state, m.Metadata, msg.Data, msg.Result), true
 	}
 	return nil, false
 }
 
 // You choose violence
-func (g *gronos[K]) handleGracePeriodExceeded(state *gronosState[K]) error {
+func (g *gronos[K]) handleGracePeriodExceeded(state *gronosState[K], metadata *Metadata[K], data Void, future Future[Void]) error {
 	if !state.allApplicationsTerminated() {
 		log.Error("[Gronos] Shutdown grace period exceeded, some applications failed to terminate in a timely manner")
 		panic("grace period exceeded")
@@ -77,21 +163,28 @@ func (g *gronos[K]) handleGracePeriodExceeded(state *gronosState[K]) error {
 	return nil
 }
 
-func (g *gronos[K]) handleShutdownProgress(state *gronosState[K], remainingApps int) error {
-	log.Debug("[GronosMessage] Shutdown progress", "remaining", remainingApps)
-	metadata := g.getSystemMetadata()
-	if remainingApps == 0 {
-		g.sendMessage(metadata, &ShutdownComplete[K]{})
-	} else {
-		// Check again after a short delay
-		time.AfterFunc(time.Second, func() {
-			g.checkRemainingApps(state)
-		})
+func (g *gronos[K]) handleShutdownProgress(state *gronosState[K], metadata *Metadata[K], data struct{ RemainingApps int }, future Future[Void]) error {
+	log.Debug("[GronosMessage] Shutdown progress", "remaining", data.RemainingApps)
+
+	switch value := g.getSystemMetadata().(type) {
+	case Success[*Metadata[K]]:
+		if data.RemainingApps == 0 {
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageShutdownComplete[K]())
+		} else {
+			// Check again after a short delay
+			time.AfterFunc(time.Second, func() {
+				g.checkRemainingApps(state, value.Value)
+			})
+		}
+		future.Close()
+	case Failure:
+		future.PublishError(fmt.Errorf("failed to get system metadata"))
 	}
+
 	return nil
 }
 
-func (g *gronos[K]) checkRemainingApps(state *gronosState[K]) {
+func (g *gronos[K]) checkRemainingApps(state *gronosState[K], metadata *Metadata[K]) {
 	var remainingApps int
 	state.mkeys.Range(func(key, value K) bool {
 		if alive, ok := state.mali.Load(key); ok && alive {
@@ -99,11 +192,10 @@ func (g *gronos[K]) checkRemainingApps(state *gronosState[K]) {
 		}
 		return true
 	})
-	metadata := g.getSystemMetadata()
-	g.sendMessage(metadata, &ShutdownProgress[K]{RemainingApps: remainingApps})
+	g.enqueue(ChannelTypePublic, metadata, NewMessageShutdownProgress[K](remainingApps))
 }
 
-func (g *gronos[K]) handleShutdownComplete(state *gronosState[K]) error {
+func (g *gronos[K]) handleShutdownComplete(state *gronosState[K], metadata *Metadata[K], data Void, future Future[Void]) error {
 	log.Debug("[GronosMessage] Shutdown waiting")
 	go func() {
 		if g.config.gracePeriod > 0 {
@@ -112,22 +204,26 @@ func (g *gronos[K]) handleShutdownComplete(state *gronosState[K]) error {
 		if g.config.wait {
 			state.wait.Wait()
 		}
-		metadata := g.getSystemMetadata()
-		if !g.sendMessage(metadata, &Destroy[K]{}) {
-			log.Error("[GronosMessage] Failed to send destroy message")
+		switch value := g.getSystemMetadata().(type) {
+		case Success[*Metadata[K]]:
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageDestroy[K]())
+		case Failure:
+			future.PublishError(fmt.Errorf("failed to get system metadata"))
+			return
 		}
+		future.Close()
 		log.Debug("[GronosMessage] Shutdown complete")
 	}()
-	state.wait.Wait()
+	state.wait.Wait() // TODO: not sure anymore that we need it
 	return nil
 }
 
-func (g *gronos[K]) handleCheckAutomaticShutdown(state *gronosState[K], response chan struct{}) error {
+func (g *gronos[K]) handleCheckAutomaticShutdown(state *gronosState[K], metadata *Metadata[K], data Void, future Future[Void]) error {
 	log.Debug("[GronosMessage] Checking automatic shutdown")
 
 	// we already detected an automatic shutdown
 	if state.automaticShutdown.Load() {
-		close(response)
+		future.Close()
 		return nil
 	}
 
@@ -143,15 +239,21 @@ func (g *gronos[K]) handleCheckAutomaticShutdown(state *gronosState[K], response
 	if allDead {
 		log.Debug("[GronosMessage] All applications are dead, initiating shutdown")
 		state.automaticShutdown.Store(true)
-		metadata := g.getSystemMetadata()
-		g.sendMessage(metadata, MsgInitiateShutdown[K]()) // asynchronously trigger it
+		switch value := g.getSystemMetadata().(type) {
+		case Success[*Metadata[K]]:
+			// asynchronously trigger it
+			g.enqueue(ChannelTypePublic, value.Value, NewMessageInitiateShutdown[K]())
+		case Failure:
+			future.PublishError(fmt.Errorf("failed to get system metadata"))
+			return nil
+		}
 	}
 
-	close(response)
+	future.Close()
 	return nil
 }
 
-func (g *gronos[K]) handleDestroy(state *gronosState[K]) error {
+func (g *gronos[K]) handleDestroy(state *gronosState[K], metadata *Metadata[K], data Void, future Future[Void]) error {
 	log.Debug("[GronosMessage] Destroying gronos")
 	g.comClosed.Store(true)
 	log.Debug("[GronosMessage] run closing")

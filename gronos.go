@@ -635,9 +635,17 @@ func (g *gronos[K]) automaticShutdown() {
 				log.Debug("[Gronos] Shutdown in progress, stopping automatic shutdown")
 				return
 			}
-			done, msg := MsgCheckAutomaticShutdown[K]()
-			g.sendMessage(g.getSystemMetadata(), msg)
-			<-done
+			switch metadata := g.getSystemMetadata().(type) {
+			case Success[*Metadata[K]]:
+				switch value := g.enqueue(ChannelTypePublic, metadata.Value, NewMessageCheckAutomaticShutdown[K]()).Get().(type) {
+				case Success[Void]:
+					log.Debug("[Gronos] Sent check automatic shutdown")
+				case Failure:
+					log.Error("[Gronos] Failed to send check automatic shutdown %v", value.Err)
+				}
+			case Failure:
+				log.Debug("[Gronos] Unable to get system metadata for automatic shutdown")
+			}
 		}
 		runtime.Gosched() // give CPU time to other goroutines
 	}

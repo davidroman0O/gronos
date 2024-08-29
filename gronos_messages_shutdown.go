@@ -2,36 +2,76 @@ package gronos
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/log"
 )
 
-// TODO: you're missing from sync.Pool here
-type InitiateShutdown[K comparable] struct{}
-type InitiateContextCancellation[K comparable] struct{}
-type ShutdownProgress[K comparable] struct {
-	RemainingApps int
+type MessageInitiateContextCancellation[K Primitive] struct {
+	FutureMessage[Void, Void]
 }
 
-func MsgInitiateContextCancellation[K comparable]() *InitiateContextCancellation[K] {
-	return &InitiateContextCancellation[K]{}
+var messageInitiateContextCancellationPoolInited bool = false
+var messageInitiateContextCancellationPool sync.Pool
+
+func NewMessageInitiateContextCancellation[K Primitive]() *MessageInitiateContextCancellation[K] {
+	if !messageInitiateContextCancellationPoolInited {
+		messageInitiateContextCancellationPoolInited = true
+		messageInitiateContextCancellationPool = sync.Pool{
+			New: func() any {
+				return &MessageInitiateContextCancellation[K]{}
+			},
+		}
+	}
+	return &MessageInitiateContextCancellation[K]{
+		FutureMessage: FutureMessage[Void, Void]{
+			Data:   Void{},
+			Result: NewFuture[Void](),
+		},
+	}
+}
+
+type MessageShutdownProgress[K Primitive] struct {
+	FutureMessage[struct{ RemainingApps int }, Void]
+}
+
+var messageShutdownProgressPoolInited bool = false
+var messageShutdownProgressPool sync.Pool
+
+func NewMessageShutdownProgress[K Primitive](remainingApps int) *MessageShutdownProgress[K] {
+	if !messageShutdownProgressPoolInited {
+		messageShutdownProgressPoolInited = true
+		messageShutdownProgressPool = sync.Pool{
+			New: func() any {
+				return &MessageShutdownProgress[K]{}
+			},
+		}
+	}
+	return &MessageShutdownProgress[K]{
+		FutureMessage: FutureMessage[struct{ RemainingApps int }, Void]{
+			Data:   struct{ RemainingApps int }{RemainingApps: remainingApps},
+			Result: NewFuture[Void](),
+		},
+	}
 }
 
 func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
-	switch m.Message.(type) {
-	case *InitiateShutdown[K]:
+	switch msg := m.Message.(type) {
+	case *MessageInitiateShutdown[K]:
 		log.Debug("[GronosMessage] [InitiateShutdown]")
-		return g.handleInitiateShutdown(state), true
-	case *InitiateContextCancellation[K]:
+		defer messageInitiateShutdownPool.Put(m.Message)
+		return g.handleInitiateShutdown(state, m.Metadata, msg.Data, msg.Result), true
+	case *MessageInitiateContextCancellation[K]:
 		log.Debug("[GronosMessage] [InitiateContextCancellation]")
-		return g.handleInitiateContextCancellation(state), true
+		defer messageInitiateContextCancellationPool.Put(m.Message)
+		return g.handleInitiateContextCancellation(state, m.Metadata, msg.Data, msg.Result), true
 	}
 	return nil, false
 }
 
-func (g *gronos[K]) handleInitiateShutdown(state *gronosState[K]) error {
+func (g *gronos[K]) handleInitiateShutdown(state *gronosState[K], metadata *Metadata[K], data Void, future Future[Void]) error {
 	if state.shutting.Load() {
 		log.Error("[GronosMessage] already shutting down handleInitiateShutdown")
 		return nil
@@ -41,7 +81,7 @@ func (g *gronos[K]) handleInitiateShutdown(state *gronosState[K]) error {
 	return g.initiateShutdownProcess(state, ShutdownKindTerminate)
 }
 
-func (g *gronos[K]) handleInitiateContextCancellation(state *gronosState[K]) error {
+func (g *gronos[K]) handleInitiateContextCancellation(state *gronosState[K], metadata *Metadata[K], data Void, future Future[Void]) error {
 	if state.shutting.Load() {
 		log.Error("[GronosMessage] already shutting down handleInitiateContextCancellation")
 		return nil
@@ -89,8 +129,6 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 		close(whenAll)
 	}()
 
-	metadata := g.getSystemMetadata()
-
 	// Now that we triggered the shutdown for all the apps, we need to monitor the situation
 	go func() {
 
@@ -98,15 +136,34 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 			select {
 			case <-whenAll:
 				log.Debug("[GronosMessage] all app really shutdown")
-			case <-time.AfterFunc(g.config.gracePeriod+g.config.immediatePeriod, func() { // you're really dead fr fr no cap
-				g.sendMessage(metadata, MsgGracePeriodExceeded[K]())
-			}).C:
-				log.Debug("[GronosMessage] grace period exceeded")
+			// you're really dead fr fr no cap
+			case <-time.After(g.config.gracePeriod + g.config.immediatePeriod):
+				switch value := g.getSystemMetadata().(type) {
+				case Success[*Metadata[K]]:
+					switch g.enqueue(ChannelTypePublic, value.Value, NewMessageGracePeriodExceeded[K]()).Get().(type) {
+					case Success[Void]:
+						log.Debug("[GronosMessage] sent grace period exceeded")
+					case Failure:
+						log.Error("[GronosMessage] failed to send grace period exceeded")
+					}
+				case Failure:
+					log.Error("[GronosMessage] failed to get system metadata for grace period exceeded")
+				}
 			}
-			log.Debug("[GronosMessage] check all application are last state")
 		}
 
-		g.sendMessage(metadata, &ShutdownComplete[K]{})
+		switch value := g.getSystemMetadata().(type) {
+		case Success[*Metadata[K]]:
+			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageShutdownComplete[K]()).Get().(type) {
+			case Success[Void]:
+				log.Debug("[GronosMessage] sent shutdown complete")
+			case Failure:
+				log.Error("[GronosMessage] failed to send shutdown complete")
+			}
+		case Failure:
+			log.Error("[GronosMessage] failed to get system metadata for shutdown complete")
+		}
+
 		log.Debug("[GronosMessage] sent shutdown complete")
 	}()
 
@@ -131,18 +188,28 @@ func (g *gronos[K]) triggerShutdownForApps(state *gronosState[K], localKeys []K,
 }
 
 func (g *gronos[K]) sendShutdownMessage(key K, kind ShutdownKind) {
-	metadata := g.getSystemMetadata()
-	if kind == ShutdownKindTerminate {
-		log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
-		_, msg := MsgForceTerminateShutdown(key)
-		if !g.sendMessage(metadata, msg) {
-			log.Error("[GronosMessage] failed to send forced shutdown process terminate", key)
+	switch value := g.getSystemMetadata().(type) {
+	case Success[*Metadata[K]]:
+		if kind == ShutdownKindTerminate {
+			log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
+			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageForceTerminateShutdown[K](key)).Get().(type) {
+			case Success[Void]:
+				log.Debug("[GronosMessage] sent forced shutdown process terminate", key)
+			case Failure:
+				log.Error("[GronosMessage] failed to send forced shutdown process terminate", key)
+				// what's the backup?
+			}
+		} else {
+			log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
+			switch g.enqueue(ChannelTypePublic, value.Value, NewMessageForceCancelShutdown[K](key, nil)).Get().(type) {
+			case Success[Void]:
+				log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
+			case Failure:
+				log.Error("[GronosMessage] failed to send forced shutdown process cancel", key)
+				// what's the backup?
+			}
 		}
-	} else {
-		log.Debug("[GronosMessage] sent forced shutdown process cancel", key)
-		_, msg := MsgForceCancelShutdown(key, nil)
-		if !g.sendMessage(metadata, msg) {
-			log.Error("[GronosMessage] failed to send forced shutdown process cancel", key)
-		}
+	case Failure:
+		log.Error("[GronosMessage] failed to get system metadata")
 	}
 }
