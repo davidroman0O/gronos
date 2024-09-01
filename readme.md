@@ -4,6 +4,8 @@
 > The new version i'm working on will use etcd (embed standalone, embed etcd with follower/leader, remote etcd leader/follower) to handle the state, for now i just want to rush the general idea!
 > On one of the branches i have a satifying concept, i'm completely re-writting everything to make a new start with etcd
 > From frustration and instinct to reason and usability
+>
+> I did a [small experiment about it](https://gist.github.com/davidroman0O/9903d7d73d85e3ae29478890690ea6e9)
 
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/davidroman0O/gronos.svg)](https://pkg.go.dev/github.com/davidroman0O/gronos)
