@@ -1,5 +1,11 @@
 # Gronos
 
+> Very freestyle programming for now, until I have a good look and feel
+> The new version i'm working on will use etcd (embed standalone, embed etcd with follower/leader, remote etcd leader/follower) to handle the state, for now i just want to rush the general idea!
+> On one of the branches i have a satifying concept, i'm completely re-writting everything to make a new start with etcd
+> From frustration and instinct to reason and usability
+
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/davidroman0O/gronos.svg)](https://pkg.go.dev/github.com/davidroman0O/gronos)
 [![Go Report Card](https://goreportcard.com/badge/github.com/davidroman0O/gronos)](https://goreportcard.com/report/github.com/davidroman0O/gronos)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
