@@ -91,7 +91,7 @@ func TestGronos(t *testing.T) {
 
 		switch maybeMetadata := g.getSystemMetadata().(type) {
 		case Success[*Metadata[string]]:
-			switch g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageTerminatedShutdown("test-app")).WaitWithTimeout(time.Second).(type) {
+			switch g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageTerminatedShutdown("test-app"), WithTimeout(time.Second)).(type) {
 			case Success[any]:
 			case Failure:
 				t.Fatal("Failed to send message")
@@ -102,7 +102,7 @@ func TestGronos(t *testing.T) {
 
 		switch maybeMetadata := g.getSystemMetadata().(type) {
 		case Success[*Metadata[string]]:
-			switch g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageRemoveLifecycleFunction("test-app")).WaitWithTimeout(time.Second).(type) {
+			switch g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageRemoveLifecycleFunction("test-app"), WithTimeout(time.Second)).(type) {
 			case Success[any]:
 			case Failure:
 				t.Fatal("Failed to send message")
@@ -113,7 +113,7 @@ func TestGronos(t *testing.T) {
 
 		switch maybeMetadata := g.getSystemMetadata().(type) {
 		case Success[*Metadata[string]]:
-			switch value := g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageRequestGraph[string]()).WaitWithTimeout(time.Second).(type) {
+			switch value := g.enqueue(ChannelTypePublic, maybeMetadata.Value, NewMessageRequestGraph[string](), WithTimeout(time.Second)).(type) {
 			case Success[*dag.DAG]:
 				if value.Value.GetSize() != 0 {
 					t.Fatalf("Expected 0 applications, got %d", value.Value.GetSize())
