@@ -67,6 +67,10 @@ type EtcdManager struct {
 	requestTimeout time.Duration
 	retryAttempts  int
 	retryDelay     time.Duration
+
+	// Add these new fields
+	username string
+	password string
 }
 
 // Option is a function type for applying configuration options to EtcdManager
@@ -98,6 +102,15 @@ func NewEtcdManager(opts ...Option) (*EtcdManager, error) {
 		return nil, err
 	}
 
+	// Perform a health check
+	ctx, cancel := context.WithTimeout(context.Background(), em.dialTimeout)
+	defer cancel()
+	_, err := em.client.Get(ctx, "health_check")
+	if err != nil {
+		em.Close() // Clean up resources
+		return nil, fmt.Errorf("failed to connect to etcd: %v", err)
+	}
+
 	return em, nil
 }
 
@@ -122,10 +135,19 @@ func (em *EtcdManager) initialize() error {
 	}
 
 	// Create an etcd client for all modes
-	em.client, err = clientv3.New(clientv3.Config{
+	clientConfig := clientv3.Config{
 		Endpoints:   em.endpoints,
 		DialTimeout: em.dialTimeout,
-	})
+	}
+
+	// Add authentication if username and password are provided
+	if em.username != "" && em.password != "" {
+		clientConfig.Username = em.username
+		clientConfig.Password = em.password
+	}
+
+	// Create an etcd client for all modes
+	em.client, err = clientv3.New(clientConfig)
 	if err != nil {
 		if em.server != nil {
 			em.server.Close()
@@ -382,6 +404,10 @@ func (et *EtcdTxn) Get(key string) *EtcdTxn {
 func (et *EtcdTxn) Commit() (*clientv3.TxnResponse, error) {
 	defer et.mutex.Unlock(et.ctx)
 
+	if len(et.ops) == 0 {
+		return nil, fmt.Errorf("cannot commit an empty transaction")
+	}
+
 	ctx, cancel := context.WithTimeout(et.ctx, et.options.Timeout)
 	defer cancel()
 
@@ -537,6 +563,14 @@ func WithRetryAttempts(attempts int) Option {
 func WithRetryDelay(delay time.Duration) Option {
 	return func(em *EtcdManager) error {
 		em.retryDelay = delay
+		return nil
+	}
+}
+
+func WithAuth(username, password string) Option {
+	return func(em *EtcdManager) error {
+		em.username = username
+		em.password = password
 		return nil
 	}
 }

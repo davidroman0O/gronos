@@ -55,41 +55,81 @@ func newTestEtcdManager(t *testing.T, mode Mode, opts ...Option) *testEtcdManage
 	return &testEtcdManager{t: t, em: em}
 }
 
+var (
+	testEtcdServer *embed.Etcd
+	etcdEndpoint   string
+)
+
+func setupTestEtcd(t *testing.T) {
+	t.Helper()
+	cfg := embed.NewConfig()
+	cfg.Dir = t.TempDir()
+	cfg.LogLevel = "error"
+	cfg.ListenClientUrls = []url.URL{{Scheme: "http", Host: "localhost:0"}}
+	cfg.AdvertiseClientUrls = cfg.ListenClientUrls
+
+	var err error
+	testEtcdServer, err = embed.StartEtcd(cfg)
+	require.NoError(t, err, "Failed to start embedded etcd server")
+
+	select {
+	case <-testEtcdServer.Server.ReadyNotify():
+		t.Log("Etcd server is ready")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Etcd server took too long to start")
+	}
+
+	etcdEndpoint = testEtcdServer.Clients[0].Addr().String()
+	t.Logf("Standalone etcd server started at %s", etcdEndpoint)
+}
+
+func teardownTestEtcd() {
+	if testEtcdServer != nil {
+		testEtcdServer.Close()
+	}
+}
+
 func TestEtcdManagerInitialization(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	tests := []struct {
 		name string
 		mode Mode
 		opts []Option
 	}{
-		{"LeaderEmbed", ModeLeaderEmbed, []Option{WithPorts(2380, 2379)}},
-		{"LeaderRemote", ModeLeaderRemote, []Option{WithEndpoints([]string{"localhost:2379"})}},
-		{"Follower", ModeFollower, []Option{WithEndpoints([]string{"localhost:2379"})}},
-		{"Standalone", ModeStandalone, []Option{WithPorts(2382, 2381)}},
+		{"LeaderEmbed", ModeLeaderEmbed, []Option{WithDataDir(t.TempDir()), WithPorts(2380, 2379)}},
+		{"LeaderRemote", ModeLeaderRemote, []Option{WithEndpoints([]string{etcdEndpoint})}},
+		{"Follower", ModeFollower, []Option{WithEndpoints([]string{etcdEndpoint})}},
+		{"Standalone", ModeStandalone, []Option{WithDataDir(t.TempDir()), WithPorts(2382, 2381)}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanupDataDir(t)
-			defer cleanupDataDir(t)
+			em, err := NewEtcdManager(append(tt.opts, WithMode(tt.mode))...)
+			if err != nil {
+				t.Fatalf("Failed to create EtcdManager: %v", err)
+			}
+			defer em.Close()
 
-			em := newTestEtcdManager(t, tt.mode, tt.opts...)
-			assert.NotNil(t, em.em, "EtcdManager should be created successfully")
+			assert.NotNil(t, em, "EtcdManager should be created successfully")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			err = em.Put(ctx, "test_key", "test_value")
+			assert.NoError(t, err, "Failed to put test key-value pair")
+
+			value, err := em.Get(ctx, "test_key")
+			assert.NoError(t, err, "Failed to get test key")
+			assert.Equal(t, "test_value", value, "Retrieved value doesn't match the put value")
 		})
 	}
 }
 
 func TestEtcdManagerCRUD(t *testing.T) {
-	// Start a standalone etcd server for LeaderRemote and Follower tests
-	standaloneServer, err := NewEtcdManager(
-		WithMode(ModeStandalone),
-		WithDataDir(t.TempDir()),
-		WithPorts(2380, 2379),
-	)
-	require.NoError(t, err, "Failed to create standalone etcd server")
-	defer standaloneServer.Close()
-
-	// Wait for the server to be ready
-	time.Sleep(1 * time.Second)
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
 
 	tests := []struct {
 		name string
@@ -97,8 +137,8 @@ func TestEtcdManagerCRUD(t *testing.T) {
 		opts []Option
 	}{
 		{"LeaderEmbed", ModeLeaderEmbed, []Option{WithDataDir(t.TempDir()), WithPorts(2382, 2381)}},
-		{"LeaderRemote", ModeLeaderRemote, []Option{WithEndpoints([]string{"localhost:2379"})}},
-		{"Follower", ModeFollower, []Option{WithEndpoints([]string{"localhost:2379"})}},
+		{"LeaderRemote", ModeLeaderRemote, []Option{WithEndpoints([]string{etcdEndpoint})}},
+		{"Follower", ModeFollower, []Option{WithEndpoints([]string{etcdEndpoint})}},
 		{"Standalone", ModeStandalone, []Option{WithDataDir(t.TempDir()), WithPorts(2384, 2383)}},
 	}
 
@@ -141,19 +181,10 @@ func TestEtcdManagerCRUD(t *testing.T) {
 }
 
 func TestEtcdManagerWatch(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
-
-	// Start a standalone etcd server for LeaderRemote and Follower tests
-	standaloneServer, err := NewEtcdManager(
-		WithMode(ModeStandalone),
-		WithDataDir(t.TempDir()),
-		WithPorts(2380, 2379),
-	)
-	require.NoError(t, err, "Failed to create standalone etcd server")
-	defer standaloneServer.Close()
-
-	// Wait for the server to be ready
-	time.Sleep(1 * time.Second)
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
@@ -170,7 +201,7 @@ func TestEtcdManagerWatch(t *testing.T) {
 			case ModeLeaderRemote, ModeFollower:
 				em, err = NewEtcdManager(
 					WithMode(mode),
-					WithEndpoints([]string{"localhost:2379"}),
+					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
 				em, err = NewEtcdManager(
@@ -180,7 +211,7 @@ func TestEtcdManagerWatch(t *testing.T) {
 				)
 			}
 
-			require.NoError(t, err, "Failed to create EtcdManager")
+			require.NoError(t, err)
 			defer em.Close()
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -226,15 +257,43 @@ func TestEtcdManagerWatch(t *testing.T) {
 }
 
 func TestEtcdManagerTransaction(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+			var em *EtcdManager
+			var err error
+
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+
+			require.NoError(t, err)
+			defer em.Close()
+
 			ctx := context.Background()
 
 			t.Run("Successful Transaction", func(t *testing.T) {
-				txn, err := em.em.BeginTxn(ctx, "test_lock")
+				txn, err := em.BeginTxn(ctx, "test_lock")
 				require.NoError(t, err)
 
 				txn.Put("key1", "value1")
@@ -244,17 +303,17 @@ func TestEtcdManagerTransaction(t *testing.T) {
 				assert.NoError(t, err)
 				assert.True(t, resp.Succeeded)
 
-				value1, err := em.em.Get(ctx, "key1")
+				value1, err := em.Get(ctx, "key1")
 				assert.NoError(t, err)
 				assert.Equal(t, "value1", value1)
 
-				value2, err := em.em.Get(ctx, "key2")
+				value2, err := em.Get(ctx, "key2")
 				assert.NoError(t, err)
 				assert.Equal(t, "value2", value2)
 			})
 
 			t.Run("Transaction Rollback", func(t *testing.T) {
-				txn, err := em.em.BeginTxn(ctx, "test_lock")
+				txn, err := em.BeginTxn(ctx, "test_lock")
 				require.NoError(t, err)
 
 				txn.Put("key3", "value3")
@@ -263,10 +322,10 @@ func TestEtcdManagerTransaction(t *testing.T) {
 				err = txn.Rollback()
 				assert.NoError(t, err)
 
-				_, err = em.em.Get(ctx, "key3")
+				_, err = em.Get(ctx, "key3")
 				assert.Error(t, err, "Key should not exist after rollback")
 
-				_, err = em.em.Get(ctx, "key4")
+				_, err = em.Get(ctx, "key4")
 				assert.Error(t, err, "Key should not exist after rollback")
 			})
 		})
@@ -274,15 +333,43 @@ func TestEtcdManagerTransaction(t *testing.T) {
 }
 
 func TestEtcdManagerCommandResponse(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+			var em *EtcdManager
+			var err error
+
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+
+			require.NoError(t, err)
+			defer em.Close()
+
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			watchChan := em.em.WatchCommands(ctx)
+			watchChan := em.WatchCommands(ctx)
 
 			cmd := Command{
 				ID:     "test_cmd",
@@ -291,7 +378,7 @@ func TestEtcdManagerCommandResponse(t *testing.T) {
 				Data:   map[string]string{"key": "value"},
 			}
 
-			respChan, err := em.em.SendCommand(cmd)
+			respChan, err := em.SendCommand(cmd)
 			require.NoError(t, err)
 
 			go func() {
@@ -307,7 +394,7 @@ func TestEtcdManagerCommandResponse(t *testing.T) {
 							Success:   true,
 							Message:   "Command processed successfully",
 						}
-						em.em.SendResponse(response)
+						em.SendResponse(response)
 					}
 				case <-ctx.Done():
 					t.Error("Watch timed out")
@@ -327,38 +414,83 @@ func TestEtcdManagerCommandResponse(t *testing.T) {
 }
 
 func TestEtcdManagerMultipleNodes(t *testing.T) {
-	cleanupDataDir(t)
-	defer cleanupDataDir(t)
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
 
-	leader := newTestEtcdManager(t, ModeLeaderEmbed, WithPorts(2392, 2391))
-	follower1 := newTestEtcdManager(t, ModeFollower, WithEndpoints([]string{"localhost:2391"}))
-	follower2 := newTestEtcdManager(t, ModeFollower, WithEndpoints([]string{"localhost:2391"}))
+	leader, err := NewEtcdManager(
+		WithMode(ModeLeaderRemote),
+		WithEndpoints([]string{etcdEndpoint}),
+	)
+	require.NoError(t, err)
+	defer leader.Close()
+
+	follower1, err := NewEtcdManager(
+		WithMode(ModeFollower),
+		WithEndpoints([]string{etcdEndpoint}),
+	)
+	require.NoError(t, err)
+	defer follower1.Close()
+
+	follower2, err := NewEtcdManager(
+		WithMode(ModeFollower),
+		WithEndpoints([]string{etcdEndpoint}),
+	)
+	require.NoError(t, err)
+	defer follower2.Close()
 
 	ctx := context.Background()
 
 	key := "multi_node_key"
 	value := "multi_node_value"
 
-	err := leader.em.Put(ctx, key, value)
+	err = leader.Put(ctx, key, value)
 	assert.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
 
-	value1, err := follower1.em.Get(ctx, key)
+	value1, err := follower1.Get(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, value, value1)
 
-	value2, err := follower2.em.Get(ctx, key)
+	value2, err := follower2.Get(ctx, key)
 	assert.NoError(t, err)
 	assert.Equal(t, value, value2)
 }
 
 func TestEtcdManagerConcurrency(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+			var em *EtcdManager
+			var err error
+
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+
+			require.NoError(t, err)
+			defer em.Close()
+
 			ctx := context.Background()
 
 			const numGoroutines = 10
@@ -374,14 +506,14 @@ func TestEtcdManagerConcurrency(t *testing.T) {
 						key := fmt.Sprintf("concurrent_key_%d_%d", id, j)
 						value := fmt.Sprintf("value_%d_%d", id, j)
 
-						err := em.em.Put(ctx, key, value)
+						err := em.Put(ctx, key, value)
 						assert.NoError(t, err)
 
-						got, err := em.em.Get(ctx, key)
+						got, err := em.Get(ctx, key)
 						assert.NoError(t, err)
 						assert.Equal(t, value, got)
 
-						err = em.em.Delete(ctx, key)
+						err = em.Delete(ctx, key)
 						assert.NoError(t, err)
 					}
 				}(i)
@@ -393,11 +525,39 @@ func TestEtcdManagerConcurrency(t *testing.T) {
 }
 
 func TestEtcdManagerLargeValues(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+			var em *EtcdManager
+			var err error
+
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+
+			require.NoError(t, err)
+			defer em.Close()
+
 			ctx := context.Background()
 
 			largeValue := make([]byte, 1024*1024) // 1MB
@@ -406,10 +566,10 @@ func TestEtcdManagerLargeValues(t *testing.T) {
 			}
 
 			key := "large_value_key"
-			err := em.em.Put(ctx, key, string(largeValue))
+			err = em.Put(ctx, key, string(largeValue))
 			assert.NoError(t, err)
 
-			got, err := em.em.Get(ctx, key)
+			got, err := em.Get(ctx, key)
 			assert.NoError(t, err)
 			assert.Equal(t, string(largeValue), got)
 		})
@@ -417,29 +577,59 @@ func TestEtcdManagerLargeValues(t *testing.T) {
 }
 
 func TestEtcdManagerErrorHandling(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+			var em *EtcdManager
+			var err error
+
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+
+			require.NoError(t, err)
+			defer em.Close()
+
 			ctx := context.Background()
 
 			t.Run("Get Non-existent Key", func(t *testing.T) {
-				_, err := em.em.Get(ctx, "non_existent_key")
+				_, err := em.Get(ctx, "non_existent_key")
 				assert.Error(t, err)
 			})
 
 			t.Run("Delete Non-existent Key", func(t *testing.T) {
-				err := em.em.Delete(ctx, "non_existent_key")
+				err := em.Delete(ctx, "non_existent_key")
 				assert.NoError(t, err) // Deleting a non-existent key is not an error in etcd
 			})
+
 			t.Run("Invalid Transaction", func(t *testing.T) {
-				txn, err := em.em.BeginTxn(ctx, "invalid_txn")
+				txn, err := em.BeginTxn(ctx, "invalid_txn")
 				require.NoError(t, err)
 
 				// Attempt to commit an empty transaction
 				_, err = txn.Commit()
 				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "cannot commit an empty transaction")
 			})
 
 			t.Run("Expired Context", func(t *testing.T) {
@@ -447,29 +637,58 @@ func TestEtcdManagerErrorHandling(t *testing.T) {
 				defer cancel()
 				time.Sleep(1 * time.Millisecond) // Ensure context is expired
 
-				err := em.em.Put(expiredCtx, "expired_key", "value")
+				err := em.Put(expiredCtx, "expired_key", "value")
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), "context deadline exceeded")
 			})
-
-			t.Run("Invalid Endpoints", func(t *testing.T) {
-				_, err := NewEtcdManager(
-					WithMode(mode),
-					WithEndpoints([]string{"invalid:12345"}),
-					WithDialTimeout(100*time.Millisecond),
-				)
-				assert.Error(t, err)
-			})
 		})
 	}
+
+	t.Run("Invalid Endpoints", func(t *testing.T) {
+		_, err := NewEtcdManager(
+			WithMode(ModeFollower),
+			WithEndpoints([]string{"invalid:12345"}),
+			WithDialTimeout(100*time.Millisecond),
+		)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to connect to etcd")
+	})
 }
 
 func TestEtcdManagerConcurrentTransactions(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+			var em *EtcdManager
+			var err error
+
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+
+			require.NoError(t, err)
+			defer em.Close()
+
 			ctx := context.Background()
 
 			const numTransactions = 10
@@ -479,7 +698,7 @@ func TestEtcdManagerConcurrentTransactions(t *testing.T) {
 			for i := 0; i < numTransactions; i++ {
 				go func(id int) {
 					defer wg.Done()
-					txn, err := em.em.BeginTxn(ctx, fmt.Sprintf("lock_%d", id))
+					txn, err := em.BeginTxn(ctx, fmt.Sprintf("lock_%d", id))
 					require.NoError(t, err)
 
 					key1 := fmt.Sprintf("concurrent_tx_key1_%d", id)
@@ -492,11 +711,11 @@ func TestEtcdManagerConcurrentTransactions(t *testing.T) {
 					assert.NoError(t, err)
 
 					// Verify the transaction results
-					val1, err := em.em.Get(ctx, key1)
+					val1, err := em.Get(ctx, key1)
 					assert.NoError(t, err)
 					assert.Equal(t, fmt.Sprintf("value1_%d", id), val1)
 
-					val2, err := em.em.Get(ctx, key2)
+					val2, err := em.Get(ctx, key2)
 					assert.NoError(t, err)
 					assert.Equal(t, fmt.Sprintf("value2_%d", id), val2)
 				}(i)
@@ -508,24 +727,52 @@ func TestEtcdManagerConcurrentTransactions(t *testing.T) {
 }
 
 func TestEtcdManagerWatchPrefix(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+			var em *EtcdManager
+			var err error
+
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+
+			require.NoError(t, err)
+			defer em.Close()
+
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
 			prefix := "watch_prefix_"
-			watchChan := em.em.client.Watch(ctx, prefix, clientv3.WithPrefix())
+			watchChan := em.client.Watch(ctx, prefix, clientv3.WithPrefix())
 
 			go func() {
 				time.Sleep(100 * time.Millisecond)
-				em.em.Put(ctx, prefix+"key1", "value1")
+				em.Put(ctx, prefix+"key1", "value1")
 				time.Sleep(100 * time.Millisecond)
-				em.em.Put(ctx, prefix+"key2", "value2")
+				em.Put(ctx, prefix+"key2", "value2")
 				time.Sleep(100 * time.Millisecond)
-				em.em.Delete(ctx, prefix+"key1")
+				em.Delete(ctx, prefix+"key1")
 			}()
 
 			expectedEvents := []struct {
@@ -557,42 +804,37 @@ func TestEtcdManagerWatchPrefix(t *testing.T) {
 }
 
 func TestEtcdManagerLeaseOperations(t *testing.T) {
-	// Start a standalone etcd server for LeaderRemote and Follower tests
-	cfg := embed.NewConfig()
-	cfg.Dir = t.TempDir()
-	cfg.LogLevel = "error"                                                  // Reduce log noise
-	cfg.ListenClientUrls = []url.URL{{Scheme: "http", Host: "localhost:0"}} // Use any available port
-	cfg.AdvertiseClientUrls = cfg.ListenClientUrls
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
 
-	etcdServer, err := embed.StartEtcd(cfg)
-	require.NoError(t, err, "Failed to start embedded etcd server")
-	defer etcdServer.Close()
+	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
-	select {
-	case <-etcdServer.Server.ReadyNotify():
-		t.Log("Etcd server is ready")
-	case <-time.After(10 * time.Second):
-		t.Fatal("Etcd server took too long to start")
-	}
+	for _, mode := range modes {
+		t.Run(mode.String(), func(t *testing.T) {
+			var em *EtcdManager
+			var err error
 
-	standaloneEndpoint := etcdServer.Clients[0].Addr().String()
-	t.Logf("Standalone etcd server started at %s", standaloneEndpoint)
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
 
-	tests := []struct {
-		name string
-		mode Mode
-		opts []Option
-	}{
-		{"LeaderEmbed", ModeLeaderEmbed, []Option{WithDataDir(t.TempDir()), WithPorts(2382, 2381)}},
-		{"LeaderRemote", ModeLeaderRemote, []Option{WithEndpoints([]string{standaloneEndpoint})}},
-		{"Follower", ModeFollower, []Option{WithEndpoints([]string{standaloneEndpoint})}},
-		{"Standalone", ModeStandalone, []Option{WithDataDir(t.TempDir()), WithPorts(2384, 2383)}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			em, err := NewEtcdManager(append(tt.opts, WithMode(tt.mode))...)
-			require.NoError(t, err, "Failed to create EtcdManager")
+			require.NoError(t, err)
 			defer em.Close()
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -628,117 +870,279 @@ func TestEtcdManagerLeaseOperations(t *testing.T) {
 		})
 	}
 }
-func TestEtcdManagerCompaction(t *testing.T) {
-	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
-	for _, mode := range modes {
-		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
+func TestEtcdManagerCompaction(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
+	tests := []struct {
+		name string
+		mode Mode
+		opts []Option
+	}{
+		{"LeaderEmbed", ModeLeaderEmbed, []Option{WithDataDir(t.TempDir()), WithPorts(2382, 2381)}},
+		{"LeaderRemote", ModeLeaderRemote, []Option{WithEndpoints([]string{etcdEndpoint})}},
+		{"Follower", ModeFollower, []Option{WithEndpoints([]string{etcdEndpoint})}},
+		{"Standalone", ModeStandalone, []Option{WithDataDir(t.TempDir()), WithPorts(2384, 2383)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			em, err := NewEtcdManager(append(tt.opts, WithMode(tt.mode))...)
+			require.NoError(t, err, "Failed to create EtcdManager")
+			defer em.Close()
+
 			ctx := context.Background()
 
 			// Put some data
 			for i := 0; i < 10; i++ {
 				key := fmt.Sprintf("compaction_key_%d", i)
 				value := fmt.Sprintf("value_%d", i)
-				err := em.em.Put(ctx, key, value)
+				err := em.Put(ctx, key, value)
 				require.NoError(t, err)
 			}
 
 			// Get the current revision
-			resp, err := em.em.client.Get(ctx, "compaction_key_0")
+			resp, err := em.client.Get(ctx, "compaction_key_0")
 			require.NoError(t, err)
 			currentRev := resp.Header.Revision
 
 			// Compact the log
-			_, err = em.em.client.Compact(ctx, currentRev)
+			_, err = em.client.Compact(ctx, currentRev)
 			assert.NoError(t, err)
 
 			// Try to get an old revision (should fail)
-			_, err = em.em.client.Get(ctx, "compaction_key_0", clientv3.WithRev(currentRev-5))
+			_, err = em.client.Get(ctx, "compaction_key_0", clientv3.WithRev(currentRev-5))
 			assert.Error(t, err)
 		})
 	}
 }
 
 func TestEtcdManagerDefragmentation(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
+	t.Log("Starting TestEtcdManagerDefragmentation")
+
 	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
 
 	for _, mode := range modes {
 		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
-			ctx := context.Background()
+			t.Logf("Testing mode: %s", mode)
 
-			// Put and delete a lot of data to fragment the database
-			for i := 0; i < 1000; i++ {
-				key := fmt.Sprintf("defrag_key_%d", i)
-				value := fmt.Sprintf("value_%d", i)
-				err := em.em.Put(ctx, key, value)
-				require.NoError(t, err)
-				err = em.em.Delete(ctx, key)
+			var em *EtcdManager
+			var err error
+
+			// Create EtcdManager based on mode
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
+			require.NoError(t, err, "Failed to create EtcdManager")
+			defer em.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// Put some data
+			t.Log("Inserting test data")
+			for i := 0; i < 100; i++ {
+				key := fmt.Sprintf("test_key_%d", i)
+				value := fmt.Sprintf("test_value_%d", i)
+				err := em.Put(ctx, key, value)
+				require.NoError(t, err, "Failed to put test data")
+			}
+
+			// Perform defragmentation
+			t.Log("Starting defragmentation")
+			for _, endpoint := range em.endpoints {
+				t.Logf("Defragmenting endpoint: %s", endpoint)
+				_, err = em.client.Maintenance.Defragment(ctx, endpoint)
+				if err != nil {
+					t.Fatalf("Defragmentation failed for endpoint %s: %v", endpoint, err)
+				}
+			}
+			t.Log("Defragmentation completed successfully")
+
+			// Verify data after defragmentation
+			t.Log("Verifying data after defragmentation")
+			for i := 0; i < 100; i++ {
+				key := fmt.Sprintf("test_key_%d", i)
+				expectedValue := fmt.Sprintf("test_value_%d", i)
+				value, err := em.Get(ctx, key)
+				require.NoError(t, err, "Failed to get test data after defragmentation")
+				require.Equal(t, expectedValue, value, "Unexpected value after defragmentation")
+			}
+
+			t.Logf("Test completed successfully for mode: %s", mode)
+		})
+	}
+
+	t.Log("TestEtcdManagerDefragmentation completed")
+}
+func TestEtcdManagerAuthentication(t *testing.T) {
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
+
+	// Create a client for the standalone etcd server
+	standaloneClient, err := clientv3.New(clientv3.Config{
+		Endpoints:   []string{etcdEndpoint},
+		DialTimeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	defer standaloneClient.Close()
+
+	ctx := context.Background()
+
+	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
+
+	for _, mode := range modes {
+		t.Run(mode.String(), func(t *testing.T) {
+			// Disable authentication on the standalone etcd server before each test
+			authStatus, err := standaloneClient.Auth.AuthStatus(ctx)
+			require.NoError(t, err)
+			if authStatus.Enabled {
+				_, err = standaloneClient.Auth.AuthDisable(ctx)
 				require.NoError(t, err)
 			}
 
-			// Defragment the database
-			_, err := em.em.client.Defragment(ctx, "")
-			assert.NoError(t, err)
-		})
-	}
-}
+			var em *EtcdManager
 
-func TestEtcdManagerAuthentication(t *testing.T) {
-	modes := []Mode{ModeLeaderEmbed, ModeLeaderRemote, ModeFollower, ModeStandalone}
+			switch mode {
+			case ModeLeaderEmbed:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2382, 2381),
+				)
+			case ModeLeaderRemote, ModeFollower:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithEndpoints([]string{etcdEndpoint}),
+				)
+			case ModeStandalone:
+				em, err = NewEtcdManager(
+					WithMode(mode),
+					WithDataDir(t.TempDir()),
+					WithPorts(2384, 2383),
+				)
+			}
 
-	for _, mode := range modes {
-		t.Run(mode.String(), func(t *testing.T) {
-			em := newTestEtcdManager(t, mode)
-			ctx := context.Background()
+			require.NoError(t, err)
+			defer em.Close()
+
+			// Create a client config without authentication
+			cfg := clientv3.Config{
+				Endpoints:   em.endpoints,
+				DialTimeout: em.dialTimeout,
+			}
+
+			// Create an unauthenticated client
+			client, err := clientv3.New(cfg)
+			require.NoError(t, err, "Failed to create etcd client")
+			defer client.Close()
+
+			// Check if root user exists
+			_, err = client.Auth.UserGet(ctx, "root")
+			if err != nil {
+				// Create root user if it doesn't exist
+				_, err = client.Auth.UserAdd(ctx, "root", "rootpassword")
+				require.NoError(t, err, "Failed to create root user")
+
+				// Grant root role to root user
+				_, err = client.Auth.UserGrantRole(ctx, "root", "root")
+				require.NoError(t, err, "Failed to grant root role to root user")
+			}
 
 			// Enable authentication
-			_, err := em.em.client.Auth.UserAdd(ctx, "testuser", "testpassword")
-			require.NoError(t, err)
+			_, err = client.Auth.AuthEnable(ctx)
+			require.NoError(t, err, "Failed to enable authentication")
 
-			_, err = em.em.client.Auth.RoleAdd(ctx, "testrole")
-			require.NoError(t, err)
+			// Create a new client with root credentials
+			cfg.Username = "root"
+			cfg.Password = "rootpassword"
+			rootClient, err := clientv3.New(cfg)
+			require.NoError(t, err, "Failed to create authenticated root client")
+			defer rootClient.Close()
 
-			_, err = em.em.client.Auth.UserGrantRole(ctx, "testuser", "testrole")
-			require.NoError(t, err)
+			// Check if test user exists
+			_, err = rootClient.Auth.UserGet(ctx, "testuser")
+			if err != nil {
+				// Use the authenticated root client for subsequent operations
+				_, err = rootClient.Auth.UserAdd(ctx, "testuser", "testpassword")
+				require.NoError(t, err, "Failed to add test user")
 
-			_, err = em.em.client.Auth.AuthEnable(ctx)
-			require.NoError(t, err)
+				_, err = rootClient.Auth.RoleAdd(ctx, "testrole")
+				require.NoError(t, err, "Failed to add test role")
 
-			// Try to perform an operation without authentication (should fail)
-			_, err = em.em.client.Put(ctx, "test_key", "test_value")
-			assert.Error(t, err)
+				// Grant read and write permissions to testrole for a specific key range
+				_, err = rootClient.Auth.RoleGrantPermission(ctx, "testrole", "test", "zzzz", clientv3.PermissionType(clientv3.PermReadWrite))
+				require.NoError(t, err, "Failed to grant permissions to test role")
 
-			// Authenticate and try again
-			em.em.client.Auth = clientv3.NewAuth(em.em.client)
-			_, err = em.em.client.Authenticate(ctx, "testuser", "testpassword")
-			require.NoError(t, err)
+				_, err = rootClient.Auth.UserGrantRole(ctx, "testuser", "testrole")
+				require.NoError(t, err, "Failed to grant role to test user")
+			}
 
-			_, err = em.em.client.Put(ctx, "test_key", "test_value")
-			assert.NoError(t, err)
+			// Verify that authentication is working
+			kv := clientv3.NewKV(rootClient)
+			_, err = kv.Put(ctx, "test_key", "test_value")
+			require.NoError(t, err, "Failed to put test key-value pair")
 
-			// Clean up: disable authentication
-			_, err = em.em.client.Auth.AuthDisable(ctx)
-			require.NoError(t, err)
+			// Try to access without authentication (should fail)
+			_, err = clientv3.NewKV(client).Put(ctx, "unauthorized_key", "unauthorized_value")
+			require.Error(t, err, "Unauthorized put should fail")
+
+			// Verify that the test user can access with correct credentials
+			cfg.Username = "testuser"
+			cfg.Password = "testpassword"
+			testUserClient, err := clientv3.New(cfg)
+			require.NoError(t, err, "Failed to create test user client")
+			defer testUserClient.Close()
+
+			// Test within the permitted range
+			_, err = clientv3.NewKV(testUserClient).Put(ctx, "test_user_key", "testuser_value")
+			require.NoError(t, err, "Test user should be able to put key-value pair within permitted range")
+
+			// Verify that the test user can read the key-value pair
+			resp, err := clientv3.NewKV(testUserClient).Get(ctx, "test_user_key")
+			require.NoError(t, err, "Test user should be able to get key-value pair")
+			require.Equal(t, 1, len(resp.Kvs), "Expected one key-value pair")
+			require.Equal(t, "testuser_value", string(resp.Kvs[0].Value), "Unexpected value for test_user_key")
+
+			// Test outside the permitted range (should fail)
+			_, err = clientv3.NewKV(testUserClient).Put(ctx, "zzzzz_key", "outside_value")
+			require.Error(t, err, "Test user should not be able to put key-value pair outside permitted range")
+
+			// Disable authentication after each test
+			_, err = rootClient.Auth.AuthDisable(ctx)
+			require.NoError(t, err, "Failed to disable authentication")
 		})
 	}
 }
 
 func TestEtcdManagerRetry(t *testing.T) {
-	// Start a real etcd server for testing
-	etcdServer, err := NewEtcdManager(
-		WithMode(ModeStandalone),
-		WithDataDir(t.TempDir()),
-		WithPorts(2380, 2379),
-	)
-	require.NoError(t, err)
-	defer etcdServer.Close()
+	setupTestEtcd(t)
+	defer teardownTestEtcd()
 
 	// Create an EtcdManager client connected to the test server
 	client, err := NewEtcdManager(
 		WithMode(ModeFollower),
-		WithEndpoints([]string{"localhost:2379"}),
+		WithEndpoints([]string{etcdEndpoint}),
 		WithRetryAttempts(3),
 		WithRetryDelay(100*time.Millisecond),
 	)
@@ -754,7 +1158,7 @@ func TestEtcdManagerRetry(t *testing.T) {
 		client.Close()
 		time.Sleep(200 * time.Millisecond)
 		newClient, err := clientv3.New(clientv3.Config{
-			Endpoints: []string{"localhost:2379"},
+			Endpoints: []string{etcdEndpoint},
 		})
 		require.NoError(t, err)
 		client.client = newClient
@@ -783,8 +1187,14 @@ func TestEtcdManagerRetry(t *testing.T) {
 		key := "retry_get_key"
 		value := "retry_get_value"
 
-		// Set a value directly on the server
-		_, err := etcdServer.client.Put(ctx, key, value)
+		// Set a value directly on the server using a separate client
+		setupClient, err := clientv3.New(clientv3.Config{
+			Endpoints: []string{etcdEndpoint},
+		})
+		require.NoError(t, err)
+		defer setupClient.Close()
+
+		_, err = setupClient.Put(ctx, key, value)
 		require.NoError(t, err, "Setting up test data should succeed")
 
 		// Simulate a network issue before the operation
