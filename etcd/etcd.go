@@ -38,6 +38,21 @@ const (
 	ModeStandalone
 )
 
+func (m Mode) String() string {
+	switch m {
+	case ModeLeaderEmbed:
+		return "LeaderEmbed"
+	case ModeLeaderRemote:
+		return "LeaderRemote"
+	case ModeFollower:
+		return "Follower"
+	case ModeStandalone:
+		return "Standalone"
+	default:
+		return "Unknown"
+	}
+}
+
 // EtcdManager encapsulates the etcd client, server, and configuration
 type EtcdManager struct {
 	mode       Mode
@@ -99,6 +114,9 @@ func (em *EtcdManager) initialize() error {
 		em.endpoints = []string{em.server.Config().ListenClientUrls[0].String()}
 	case ModeLeaderRemote, ModeFollower:
 		// For remote leader and follower modes, use the provided endpoints
+		if len(em.endpoints) == 0 {
+			return fmt.Errorf("no endpoints provided for remote or follower mode")
+		}
 	default:
 		return fmt.Errorf("invalid mode")
 	}
@@ -179,8 +197,7 @@ func (em *EtcdManager) Get(ctx context.Context, key string, opts ...OperationOpt
 			return err
 		}
 		if len(resp.Kvs) == 0 {
-			result = ""
-			return nil
+			return fmt.Errorf("key not found: %s", key)
 		}
 		result = string(resp.Kvs[0].Value)
 		return nil
