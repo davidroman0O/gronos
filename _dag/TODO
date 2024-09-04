@@ -1,0 +1,6 @@
+leader:
+    - kept in memory, store the dag
+
+follower:
+    - listen to changes of the dag
+

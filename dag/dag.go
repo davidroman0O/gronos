@@ -1,186 +1,353 @@
 package dag
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"log"
-	"sync"
-
-	"github.com/davidroman0O/gronos/etcd"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"sort"
+	"strings"
 )
 
-type Node struct {
-	ID       string                 `json:"id"`
-	Data     map[string]interface{} `json:"data"`
-	Children []string               `json:"children"`
+// AcyclicGraph is a specialization of Graph that cannot have cycles.
+type AcyclicGraph struct {
+	Graph
 }
 
-type DAG struct {
-	nodes map[string]*Node
-	etcd  *etcd.EtcdManager
-	mu    sync.RWMutex
+// WalkFunc is the callback used for walking the graph.
+type WalkFunc func(Vertex) Diagnostics
+
+// DepthWalkFunc is a walk function that also receives the current depth of the
+// walk as an argument
+type DepthWalkFunc func(Vertex, int) error
+
+func (g *AcyclicGraph) DirectedGraph() Grapher {
+	return g
 }
 
-func NewDAG(etcdManager *etcd.EtcdManager) *DAG {
-	dag := &DAG{
-		nodes: make(map[string]*Node),
-		etcd:  etcdManager,
+// Returns a Set that includes every Vertex yielded by walking down from the
+// provided starting Vertex v.
+func (g *AcyclicGraph) Ancestors(v Vertex) (Set, error) {
+	s := make(Set)
+	memoFunc := func(v Vertex, d int) error {
+		s.Add(v)
+		return nil
 	}
-	dag.loadFromEtcd()
-	go dag.watchCommands()
-	return dag
+
+	if err := g.DepthFirstWalk(g.downEdgesNoCopy(v), memoFunc); err != nil {
+		return nil, err
+	}
+
+	return s, nil
 }
 
-func (d *DAG) AddNode(id string, data map[string]interface{}) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if _, exists := d.nodes[id]; exists {
-		return fmt.Errorf("node with ID %s already exists", id)
+// Returns a Set that includes every Vertex yielded by walking up from the
+// provided starting Vertex v.
+func (g *AcyclicGraph) Descendents(v Vertex) (Set, error) {
+	s := make(Set)
+	memoFunc := func(v Vertex, d int) error {
+		s.Add(v)
+		return nil
 	}
 
-	d.nodes[id] = &Node{
-		ID:       id,
-		Data:     data,
-		Children: []string{},
+	if err := g.ReverseDepthFirstWalk(g.upEdgesNoCopy(v), memoFunc); err != nil {
+		return nil, err
 	}
 
-	return d.saveToEtcd()
+	return s, nil
 }
 
-func (d *DAG) AddEdge(parentID, childID string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	parent, parentExists := d.nodes[parentID]
-	_, childExists := d.nodes[childID]
-
-	if !parentExists || !childExists {
-		return fmt.Errorf("parent or child node does not exist")
-	}
-
-	for _, existingChild := range parent.Children {
-		if existingChild == childID {
-			return fmt.Errorf("edge already exists")
+// Root returns the root of the DAG, or an error.
+//
+// Complexity: O(V)
+func (g *AcyclicGraph) Root() (Vertex, error) {
+	roots := make([]Vertex, 0, 1)
+	for _, v := range g.Vertices() {
+		if g.upEdgesNoCopy(v).Len() == 0 {
+			roots = append(roots, v)
 		}
 	}
 
-	parent.Children = append(parent.Children, childID)
-	return d.saveToEtcd()
-}
-
-func (d *DAG) UpdateNode(id string, data map[string]interface{}) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	node, exists := d.nodes[id]
-	if !exists {
-		return fmt.Errorf("node with ID %s does not exist", id)
+	if len(roots) > 1 {
+		// TODO(mitchellh): make this error message a lot better
+		return nil, fmt.Errorf("multiple roots: %#v", roots)
 	}
 
-	node.Data = data
-	return d.saveToEtcd()
-}
-
-func (d *DAG) DeleteNode(id string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if _, exists := d.nodes[id]; !exists {
-		return fmt.Errorf("node with ID %s does not exist", id)
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("no roots found")
 	}
 
-	delete(d.nodes, id)
+	return roots[0], nil
+}
 
-	for _, node := range d.nodes {
-		for i, childID := range node.Children {
-			if childID == id {
-				node.Children = append(node.Children[:i], node.Children[i+1:]...)
-				break
+// TransitiveReduction performs the transitive reduction of graph g in place.
+// The transitive reduction of a graph is a graph with as few edges as
+// possible with the same reachability as the original graph. This means
+// that if there are three nodes A => B => C, and A connects to both
+// B and C, and B connects to C, then the transitive reduction is the
+// same graph with only a single edge between A and B, and a single edge
+// between B and C.
+//
+// The graph must be free of cycles for this operation to behave properly.
+//
+// Complexity: O(V(V+E)), or asymptotically O(VE)
+func (g *AcyclicGraph) TransitiveReduction() {
+	// For each vertex u in graph g, do a DFS starting from each vertex
+	// v such that the edge (u,v) exists (v is a direct descendant of u).
+	//
+	// For each v-prime reachable from v, remove the edge (u, v-prime).
+	for _, u := range g.Vertices() {
+		uTargets := g.downEdgesNoCopy(u)
+
+		g.DepthFirstWalk(g.downEdgesNoCopy(u), func(v Vertex, d int) error {
+			shared := uTargets.Intersection(g.downEdgesNoCopy(v))
+			for _, vPrime := range shared {
+				g.RemoveEdge(BasicEdge(u, vPrime))
 			}
+
+			return nil
+		})
+	}
+}
+
+// Validate validates the DAG. A DAG is valid if it has a single root
+// with no cycles.
+func (g *AcyclicGraph) Validate() error {
+	if _, err := g.Root(); err != nil {
+		return err
+	}
+
+	// Look for cycles of more than 1 component
+	var diags Diagnostics
+	cycles := g.Cycles()
+	if len(cycles) > 0 {
+		for _, cycle := range cycles {
+			cycleStr := make([]string, len(cycle))
+			for j, vertex := range cycle {
+				cycleStr[j] = VertexName(vertex)
+			}
+
+			diags = diags.Append(fmt.Errorf(
+				"Cycle: %s", strings.Join(cycleStr, ", ")))
 		}
 	}
 
-	return d.saveToEtcd()
-}
-
-func (d *DAG) saveToEtcd() error {
-	dagJSON, err := json.Marshal(d.nodes)
-	if err != nil {
-		return fmt.Errorf("failed to marshal DAG: %v", err)
+	// Look for cycles to self
+	for _, e := range g.Edges() {
+		if e.Source() == e.Target() {
+			diags = diags.Append(fmt.Errorf(
+				"Self reference: %s", VertexName(e.Source())))
+		}
 	}
 
-	return d.etcd.Put("dag", string(dagJSON))
+	return diags.Err()
 }
 
-func (d *DAG) loadFromEtcd() error {
-	dagJSON, err := d.etcd.Get("dag")
-	if err != nil {
-		return fmt.Errorf("failed to get DAG from etcd: %v", err)
+// Cycles reports any cycles between graph nodes.
+// Self-referencing nodes are not reported, and must be detected separately.
+func (g *AcyclicGraph) Cycles() [][]Vertex {
+	var cycles [][]Vertex
+	for _, cycle := range StronglyConnected(&g.Graph) {
+		if len(cycle) > 1 {
+			cycles = append(cycles, cycle)
+		}
 	}
+	return cycles
+}
 
-	if dagJSON != "" {
-		err = json.Unmarshal([]byte(dagJSON), &d.nodes)
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal DAG: %v", err)
+// Walk walks the graph, calling your callback as each node is visited.
+// This will walk nodes in parallel if it can. The resulting diagnostics
+// contains problems from all graphs visited, in no particular order.
+func (g *AcyclicGraph) Walk(cb WalkFunc) Diagnostics {
+	w := &Walker{Callback: cb, Reverse: true}
+	w.Update(g)
+	return w.Wait()
+}
+
+// simple convenience helper for converting a dag.Set to a []Vertex
+func AsVertexList(s Set) []Vertex {
+	vertexList := make([]Vertex, 0, len(s))
+	for _, raw := range s {
+		vertexList = append(vertexList, raw.(Vertex))
+	}
+	return vertexList
+}
+
+type vertexAtDepth struct {
+	Vertex Vertex
+	Depth  int
+}
+
+// DepthFirstWalk does a depth-first walk of the graph starting from
+// the vertices in start.
+// The algorithm used here does not do a complete topological sort. To ensure
+// correct overall ordering run TransitiveReduction first.
+func (g *AcyclicGraph) DepthFirstWalk(start Set, f DepthWalkFunc) error {
+	seen := make(map[Vertex]struct{})
+	frontier := make([]*vertexAtDepth, 0, len(start))
+	for _, v := range start {
+		frontier = append(frontier, &vertexAtDepth{
+			Vertex: v,
+			Depth:  0,
+		})
+	}
+	for len(frontier) > 0 {
+		// Pop the current vertex
+		n := len(frontier)
+		current := frontier[n-1]
+		frontier = frontier[:n-1]
+
+		// Check if we've seen this already and return...
+		if _, ok := seen[current.Vertex]; ok {
+			continue
+		}
+		seen[current.Vertex] = struct{}{}
+
+		// Visit the current node
+		if err := f(current.Vertex, current.Depth); err != nil {
+			return err
+		}
+
+		for _, v := range g.downEdgesNoCopy(current.Vertex) {
+			frontier = append(frontier, &vertexAtDepth{
+				Vertex: v,
+				Depth:  current.Depth + 1,
+			})
 		}
 	}
 
 	return nil
 }
 
-func (d *DAG) ProcessCommand(cmd etcd.Command) etcd.Response {
-	var err error
-	switch cmd.Type {
-	case "add":
-		data, ok := cmd.Data.(map[string]interface{})
-		if !ok {
-			return etcd.Response{CommandID: cmd.ID, Success: false, Message: "Invalid data format for add command"}
+// SortedDepthFirstWalk does a depth-first walk of the graph starting from
+// the vertices in start, always iterating the nodes in a consistent order.
+func (g *AcyclicGraph) SortedDepthFirstWalk(start []Vertex, f DepthWalkFunc) error {
+	seen := make(map[Vertex]struct{})
+	frontier := make([]*vertexAtDepth, len(start))
+	for i, v := range start {
+		frontier[i] = &vertexAtDepth{
+			Vertex: v,
+			Depth:  0,
 		}
-		err = d.AddNode(cmd.NodeID, data)
-	case "update":
-		data, ok := cmd.Data.(map[string]interface{})
-		if !ok {
-			return etcd.Response{CommandID: cmd.ID, Success: false, Message: "Invalid data format for update command"}
+	}
+	for len(frontier) > 0 {
+		// Pop the current vertex
+		n := len(frontier)
+		current := frontier[n-1]
+		frontier = frontier[:n-1]
+
+		// Check if we've seen this already and return...
+		if _, ok := seen[current.Vertex]; ok {
+			continue
 		}
-		err = d.UpdateNode(cmd.NodeID, data)
-	case "delete":
-		err = d.DeleteNode(cmd.NodeID)
-	case "addEdge":
-		childID, ok := cmd.Data.(string)
-		if !ok {
-			return etcd.Response{CommandID: cmd.ID, Success: false, Message: "Invalid data format for addEdge command"}
+		seen[current.Vertex] = struct{}{}
+
+		// Visit the current node
+		if err := f(current.Vertex, current.Depth); err != nil {
+			return err
 		}
-		err = d.AddEdge(cmd.NodeID, childID)
-	default:
-		return etcd.Response{CommandID: cmd.ID, Success: false, Message: fmt.Sprintf("Unknown command type: %s", cmd.Type)}
+
+		// Visit targets of this in a consistent order.
+		targets := AsVertexList(g.downEdgesNoCopy(current.Vertex))
+		sort.Sort(byVertexName(targets))
+
+		for _, t := range targets {
+			frontier = append(frontier, &vertexAtDepth{
+				Vertex: t,
+				Depth:  current.Depth + 1,
+			})
+		}
 	}
 
-	if err != nil {
-		return etcd.Response{CommandID: cmd.ID, Success: false, Message: err.Error()}
-	}
-	return etcd.Response{CommandID: cmd.ID, Success: true, Message: "Command processed successfully"}
+	return nil
 }
 
-func (d *DAG) watchCommands() {
-	watchChan := d.etcd.WatchCommands(context.Background())
-	for watchResp := range watchChan {
-		for _, ev := range watchResp.Events {
-			if ev.Type == clientv3.EventTypePut {
-				var cmd etcd.Command
-				err := json.Unmarshal(ev.Kv.Value, &cmd)
-				if err != nil {
-					log.Printf("Error unmarshaling command: %v\n", err)
-					continue
-				}
-				resp := d.ProcessCommand(cmd)
-				err = d.etcd.SendResponse(resp)
-				if err != nil {
-					log.Printf("Error sending response: %v\n", err)
-				}
-			}
+// ReverseDepthFirstWalk does a depth-first walk _up_ the graph starting from
+// the vertices in start.
+// The algorithm used here does not do a complete topological sort. To ensure
+// correct overall ordering run TransitiveReduction first.
+func (g *AcyclicGraph) ReverseDepthFirstWalk(start Set, f DepthWalkFunc) error {
+	seen := make(map[Vertex]struct{})
+	frontier := make([]*vertexAtDepth, 0, len(start))
+	for _, v := range start {
+		frontier = append(frontier, &vertexAtDepth{
+			Vertex: v,
+			Depth:  0,
+		})
+	}
+	for len(frontier) > 0 {
+		// Pop the current vertex
+		n := len(frontier)
+		current := frontier[n-1]
+		frontier = frontier[:n-1]
+
+		// Check if we've seen this already and return...
+		if _, ok := seen[current.Vertex]; ok {
+			continue
+		}
+		seen[current.Vertex] = struct{}{}
+
+		for _, t := range g.upEdgesNoCopy(current.Vertex) {
+			frontier = append(frontier, &vertexAtDepth{
+				Vertex: t,
+				Depth:  current.Depth + 1,
+			})
+		}
+
+		// Visit the current node
+		if err := f(current.Vertex, current.Depth); err != nil {
+			return err
 		}
 	}
+
+	return nil
+}
+
+// SortedReverseDepthFirstWalk does a depth-first walk _up_ the graph starting from
+// the vertices in start, always iterating the nodes in a consistent order.
+func (g *AcyclicGraph) SortedReverseDepthFirstWalk(start []Vertex, f DepthWalkFunc) error {
+	seen := make(map[Vertex]struct{})
+	frontier := make([]*vertexAtDepth, len(start))
+	for i, v := range start {
+		frontier[i] = &vertexAtDepth{
+			Vertex: v,
+			Depth:  0,
+		}
+	}
+	for len(frontier) > 0 {
+		// Pop the current vertex
+		n := len(frontier)
+		current := frontier[n-1]
+		frontier = frontier[:n-1]
+
+		// Check if we've seen this already and return...
+		if _, ok := seen[current.Vertex]; ok {
+			continue
+		}
+		seen[current.Vertex] = struct{}{}
+
+		// Add next set of targets in a consistent order.
+		targets := AsVertexList(g.upEdgesNoCopy(current.Vertex))
+		sort.Sort(byVertexName(targets))
+		for _, t := range targets {
+			frontier = append(frontier, &vertexAtDepth{
+				Vertex: t,
+				Depth:  current.Depth + 1,
+			})
+		}
+
+		// Visit the current node
+		if err := f(current.Vertex, current.Depth); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// byVertexName implements sort.Interface so a list of Vertices can be sorted
+// consistently by their VertexName
+type byVertexName []Vertex
+
+func (b byVertexName) Len() int      { return len(b) }
+func (b byVertexName) Swap(i, j int) { b[i], b[j] = b[j], b[i] }
+func (b byVertexName) Less(i, j int) bool {
+	return VertexName(b[i]) < VertexName(b[j])
 }
