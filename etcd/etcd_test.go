@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,43 +16,66 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 )
 
-const testDataDir = "./test_data"
+// var (
+// 	testEtcdServer *embed.Etcd
+// 	etcdEndpoint   string
+// )
 
-func cleanupDataDir(t *testing.T) {
-	t.Helper()
-	err := os.RemoveAll(testDataDir)
-	require.NoError(t, err, "Failed to clean up test data directory")
-}
+// func setupTestEtcd(t *testing.T) {
+// 	t.Helper()
 
-type testEtcdManager struct {
-	t  *testing.T
-	em *EtcdManager
-}
+// 	var err error
+// 	maxAttempts := 5
+// 	initialBackoff := 100 * time.Millisecond
+// 	backoff := initialBackoff
 
-func newTestEtcdManager(t *testing.T, mode Mode, opts ...Option) *testEtcdManager {
-	t.Helper()
-	cleanupDataDir(t)
+// 	for attempt := 0; attempt < maxAttempts; attempt++ {
+// 		cfg := embed.NewConfig()
+// 		cfg.Dir = t.TempDir()
+// 		cfg.LogLevel = "error"
+// 		cfg.ListenClientUrls = []url.URL{{Scheme: "http", Host: "localhost:0"}}
+// 		cfg.AdvertiseClientUrls = cfg.ListenClientUrls
+// 		cfg.ListenPeerUrls = []url.URL{{Scheme: "http", Host: "localhost:0"}}
+// 		cfg.InitialCluster = "default=http://localhost:0"
 
-	dataDir := filepath.Join(testDataDir, fmt.Sprintf("%s_%d", mode.String(), time.Now().UnixNano()))
-	opts = append(opts,
-		WithMode(mode),
-		WithDataDir(dataDir),
-		WithDialTimeout(2*time.Second),
-		WithRequestTimeout(2*time.Second),
-		WithRetryAttempts(3),
-		WithRetryDelay(100*time.Millisecond),
-	)
+// 		testEtcdServer, err = embed.StartEtcd(cfg)
+// 		if err == nil {
+// 			break
+// 		}
 
-	em, err := NewEtcdManager(opts...)
-	require.NoError(t, err, "Failed to create EtcdManager")
+// 		t.Logf("Attempt %d failed to start embedded etcd: %v. Retrying in %v...", attempt+1, err, backoff)
+// 		time.Sleep(backoff)
+// 		backoff *= 2 // Exponential backoff
+// 	}
 
-	t.Cleanup(func() {
-		em.Close()
-		cleanupDataDir(t)
-	})
+// 	require.NoError(t, err, "Failed to start embedded etcd server after multiple attempts")
 
-	return &testEtcdManager{t: t, em: em}
-}
+// 	select {
+// 	case <-testEtcdServer.Server.ReadyNotify():
+// 		t.Log("Etcd server is ready")
+// 	case <-time.After(10 * time.Second):
+// 		t.Fatal("Etcd server took too long to start")
+// 	}
+
+// 	etcdEndpoint = testEtcdServer.Clients[0].Addr().String()
+// 	t.Logf("Standalone etcd server started at %s", etcdEndpoint)
+// }
+
+// func teardownTestEtcd() {
+// 	if testEtcdServer != nil {
+// 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// 		defer cancel()
+// 		testEtcdServer.Server.Stop()
+// 		testEtcdServer.Close()
+// 		<-testEtcdServer.Server.StopNotify()
+// 		select {
+// 		case <-ctx.Done():
+// 			fmt.Println("Warning: Etcd server shutdown timed out")
+// 		default:
+// 			fmt.Println("Etcd server shutdown completed")
+// 		}
+// 	}
+// }
 
 var (
 	testEtcdServer *embed.Etcd
@@ -63,15 +84,39 @@ var (
 
 func setupTestEtcd(t *testing.T) {
 	t.Helper()
-	cfg := embed.NewConfig()
-	cfg.Dir = t.TempDir()
-	cfg.LogLevel = "error"
-	cfg.ListenClientUrls = []url.URL{{Scheme: "http", Host: "localhost:0"}}
-	cfg.AdvertiseClientUrls = cfg.ListenClientUrls
 
 	var err error
-	testEtcdServer, err = embed.StartEtcd(cfg)
-	require.NoError(t, err, "Failed to start embedded etcd server")
+	maxAttempts := 5
+	initialBackoff := 100 * time.Millisecond
+	backoff := initialBackoff
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		clientPort, err := getAvailablePort()
+		require.NoError(t, err, "Failed to get available client port")
+
+		peerPort, err := getAvailablePort()
+		require.NoError(t, err, "Failed to get available peer port")
+
+		cfg := embed.NewConfig()
+		cfg.Dir = t.TempDir()
+		cfg.LogLevel = "error"
+		cfg.ListenClientUrls = []url.URL{{Scheme: "http", Host: fmt.Sprintf("localhost:%d", clientPort)}}
+		cfg.AdvertiseClientUrls = cfg.ListenClientUrls
+		cfg.ListenPeerUrls = []url.URL{{Scheme: "http", Host: fmt.Sprintf("localhost:%d", peerPort)}}
+		cfg.AdvertisePeerUrls = cfg.ListenPeerUrls
+		cfg.InitialCluster = fmt.Sprintf("default=http://localhost:%d", peerPort)
+
+		testEtcdServer, err = embed.StartEtcd(cfg)
+		if err == nil {
+			break
+		}
+
+		t.Logf("Attempt %d failed to start embedded etcd: %v. Retrying in %v...", attempt+1, err, backoff)
+		time.Sleep(backoff)
+		backoff *= 2 // Exponential backoff
+	}
+
+	require.NoError(t, err, "Failed to start embedded etcd server after multiple attempts")
 
 	select {
 	case <-testEtcdServer.Server.ReadyNotify():

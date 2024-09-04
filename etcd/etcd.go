@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -71,6 +72,8 @@ type EtcdManager struct {
 	// Add these new fields
 	username string
 	password string
+
+	removeDarDir bool
 }
 
 // Option is a function type for applying configuration options to EtcdManager
@@ -88,6 +91,7 @@ func NewEtcdManager(opts ...Option) (*EtcdManager, error) {
 		requestTimeout: 5 * time.Second,
 		retryAttempts:  3,
 		retryDelay:     1 * time.Second,
+		removeDarDir:   false,
 	}
 
 	// Apply all provided options
@@ -120,7 +124,7 @@ func (em *EtcdManager) initialize() error {
 	switch em.mode {
 	case ModeLeaderEmbed, ModeStandalone:
 		// Start an embedded etcd server for leader embed and standalone modes
-		em.server, err = em.startEmbeddedEtcd()
+		em.server, err = em.retryStartEmbeddedEtcd(5, 100*time.Millisecond)
 		if err != nil {
 			return fmt.Errorf("failed to start embedded etcd: %v", err)
 		}
@@ -177,6 +181,25 @@ func (em *EtcdManager) startEmbeddedEtcd() (*embed.Etcd, error) {
 	return embed.StartEtcd(cfg)
 }
 
+func (em *EtcdManager) retryStartEmbeddedEtcd(maxAttempts int, initialBackoff time.Duration) (*embed.Etcd, error) {
+	var server *embed.Etcd
+	var err error
+	backoff := initialBackoff
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		server, err = em.startEmbeddedEtcd()
+		if err == nil {
+			return server, nil
+		}
+
+		log.Printf("Attempt %d failed to start embedded etcd: %v. Retrying in %v...", attempt+1, err, backoff)
+		time.Sleep(backoff)
+		backoff *= 2 // Exponential backoff
+	}
+
+	return nil, fmt.Errorf("failed to start embedded etcd after %d attempts: %v", maxAttempts, err)
+}
+
 // Close gracefully shuts down the etcd client and server (if applicable)
 func (em *EtcdManager) Close() {
 	if em.client != nil {
@@ -184,6 +207,14 @@ func (em *EtcdManager) Close() {
 	}
 	if em.server != nil {
 		em.server.Close()
+	}
+
+	// Add a small delay to ensure all resources are released
+	time.Sleep(100 * time.Millisecond)
+
+	// Remove the data directory
+	if em.removeDarDir {
+		os.RemoveAll(em.dataDir)
 	}
 }
 
@@ -526,14 +557,40 @@ func WithEndpoints(endpoints []string) Option {
 	}
 }
 
+// Function to find an available port
+func getAvailablePort() (int, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return 0, err
+	}
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
 // WithPorts sets the peer and client ports for the embedded etcd server
 func WithPorts(peerPort, clientPort int) Option {
 	return func(em *EtcdManager) error {
-		if peerPort <= 0 || clientPort <= 0 {
-			return fmt.Errorf("invalid port numbers")
+		var err error
+		if peerPort <= 0 {
+			em.peerPort, err = getAvailablePort()
+			if err != nil {
+				return fmt.Errorf("failed to get available peer port: %v", err)
+			}
+		} else {
+			em.peerPort = peerPort
 		}
-		em.peerPort = peerPort
-		em.clientPort = clientPort
+		if clientPort <= 0 {
+			em.clientPort, err = getAvailablePort()
+			if err != nil {
+				return fmt.Errorf("failed to get available client port: %v", err)
+			}
+		} else {
+			em.clientPort = clientPort
+		}
 		return nil
 	}
 }
@@ -589,6 +646,13 @@ func WithAuth(username, password string) Option {
 	return func(em *EtcdManager) error {
 		em.username = username
 		em.password = password
+		return nil
+	}
+}
+
+func WithRemoveDataDir() Option {
+	return func(em *EtcdManager) error {
+		em.removeDarDir = true
 		return nil
 	}
 }
