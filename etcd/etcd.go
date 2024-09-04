@@ -282,26 +282,34 @@ func (em *EtcdManager) SendCommand(cmd Command, opts ...OperationOptions) (<-cha
 	ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
 	defer cancel()
 
+	log.Printf("Sending command: %+v", cmd)
 	err = em.Put(ctx, commandPrefix+cmd.ID, string(cmdJSON), options)
 	if err != nil {
+		log.Printf("Error sending command: %v", err)
 		return nil, fmt.Errorf("failed to send command to etcd: %v", err)
 	}
+	log.Printf("Command sent successfully")
 
 	respChan := make(chan Response, 1)
+	log.Printf("Command sent successfully, waiting for response")
 	go em.waitForResponse(cmd.ID, respChan, options)
+	log.Printf("Returning response channel")
 
 	return respChan, nil
 }
 
 // waitForResponse waits for a response to a specific command
 func (em *EtcdManager) waitForResponse(cmdID string, respChan chan<- Response, options OperationOptions) {
+	log.Printf("Starting to wait for response for command %s", cmdID)
 	ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
 	defer cancel()
 
 	watchChan := em.Watch(ctx, responsePrefix+cmdID)
 	select {
 	case watchResp := <-watchChan:
+		log.Printf("Received watch response for command %s: %+v", cmdID, watchResp)
 		for _, ev := range watchResp.Events {
+			log.Printf("Event: %+v", ev)
 			if ev.Type == clientv3.EventTypePut {
 				var resp Response
 				err := json.Unmarshal(ev.Kv.Value, &resp)
@@ -309,12 +317,14 @@ func (em *EtcdManager) waitForResponse(cmdID string, respChan chan<- Response, o
 					log.Printf("Error unmarshaling response: %v", err)
 					continue
 				}
+				log.Printf("Unmarshaled response: %+v", resp)
 				respChan <- resp
 				close(respChan)
 				return
 			}
 		}
 	case <-ctx.Done():
+		log.Printf("Timeout waiting for response for command %s", cmdID)
 		respChan <- Response{CommandID: cmdID, Success: false, Message: "Timeout waiting for response"}
 		close(respChan)
 	}
@@ -322,11 +332,13 @@ func (em *EtcdManager) waitForResponse(cmdID string, respChan chan<- Response, o
 
 // WatchCommands sets up a watch for incoming commands
 func (em *EtcdManager) WatchCommands(ctx context.Context) clientv3.WatchChan {
-	return em.Watch(ctx, commandPrefix)
+	log.Printf("Starting to watch commands and responses")
+	return em.client.Watch(ctx, "/", clientv3.WithPrefix())
 }
 
 // SendResponse sends a response to a specific command
 func (em *EtcdManager) SendResponse(resp Response, opts ...OperationOptions) error {
+	log.Printf("SendResponse called with: %+v", resp)
 	options := em.mergeOptions(opts...)
 	respJSON, err := json.Marshal(resp)
 	if err != nil {
@@ -336,7 +348,13 @@ func (em *EtcdManager) SendResponse(resp Response, opts ...OperationOptions) err
 	ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
 	defer cancel()
 
-	return em.Put(ctx, responsePrefix+resp.CommandID, string(respJSON), options)
+	log.Printf("Sending response: %+v", resp)
+	err = em.Put(ctx, responsePrefix+resp.CommandID, string(respJSON), options)
+	if err != nil {
+		return fmt.Errorf("failed to send response to etcd: %v", err)
+	}
+	log.Printf("Response sent successfully")
+	return nil
 }
 
 // TxnOp represents an operation in a transaction

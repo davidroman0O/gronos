@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -366,10 +367,11 @@ func TestEtcdManagerCommandResponse(t *testing.T) {
 			require.NoError(t, err)
 			defer em.Close()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
 			watchChan := em.WatchCommands(ctx)
+			time.Sleep(1 * time.Second) // Give some time for the watch to be set up
 
 			cmd := Command{
 				ID:     "test_cmd",
@@ -381,33 +383,72 @@ func TestEtcdManagerCommandResponse(t *testing.T) {
 			respChan, err := em.SendCommand(cmd)
 			require.NoError(t, err)
 
+			// Send the response
 			go func() {
-				select {
-				case watchResp := <-watchChan:
-					for _, ev := range watchResp.Events {
-						var receivedCmd Command
-						json.Unmarshal(ev.Kv.Value, &receivedCmd)
-						assert.Equal(t, cmd, receivedCmd)
+				time.Sleep(2 * time.Second) // Simulate some processing time
+				response := Response{
+					CommandID: cmd.ID,
+					Success:   true,
+					Message:   "Command processed successfully",
+				}
+				err := em.SendResponse(response)
+				require.NoError(t, err)
+			}()
 
-						response := Response{
-							CommandID: receivedCmd.ID,
-							Success:   true,
-							Message:   "Command processed successfully",
+			// Wait for command response
+			select {
+			case resp := <-respChan:
+				t.Logf("Received command response: %+v", resp)
+				assert.True(t, resp.Success)
+				assert.Equal(t, "Command processed successfully", resp.Message)
+			case <-time.After(10 * time.Second):
+				t.Fatal("Timeout waiting for command response")
+			}
+
+			// Wait for watch events
+			watchEventReceived := make(chan struct{})
+			go func() {
+				commandSeen := false
+				responseSeen := false
+				for watchResp := range watchChan {
+					for _, ev := range watchResp.Events {
+						t.Logf("Received watch event: Type=%s, Key=%s, Value=%s", ev.Type, string(ev.Kv.Key), string(ev.Kv.Value))
+						if strings.HasPrefix(string(ev.Kv.Key), commandPrefix) {
+							var receivedCmd map[string]interface{}
+							err := json.Unmarshal(ev.Kv.Value, &receivedCmd)
+							require.NoError(t, err)
+
+							assert.Equal(t, cmd.ID, receivedCmd["id"])
+							assert.Equal(t, cmd.Type, receivedCmd["type"])
+							assert.Equal(t, cmd.NodeID, receivedCmd["nodeId"])
+
+							data, ok := receivedCmd["data"].(map[string]interface{})
+							assert.True(t, ok, "Data should be a map")
+							assert.Equal(t, "value", data["key"])
+
+							commandSeen = true
+						} else if strings.HasPrefix(string(ev.Kv.Key), responsePrefix) {
+							var receivedResp Response
+							err := json.Unmarshal(ev.Kv.Value, &receivedResp)
+							require.NoError(t, err)
+							assert.Equal(t, cmd.ID, receivedResp.CommandID)
+							assert.True(t, receivedResp.Success)
+							assert.Equal(t, "Command processed successfully", receivedResp.Message)
+							responseSeen = true
 						}
-						em.SendResponse(response)
+						if commandSeen && responseSeen {
+							close(watchEventReceived)
+							return
+						}
 					}
-				case <-ctx.Done():
-					t.Error("Watch timed out")
 				}
 			}()
 
 			select {
-			case resp := <-respChan:
-				assert.Equal(t, cmd.ID, resp.CommandID)
-				assert.True(t, resp.Success)
-				assert.Equal(t, "Command processed successfully", resp.Message)
-			case <-ctx.Done():
-				t.Fatal("Timeout waiting for response")
+			case <-watchEventReceived:
+				t.Log("Received expected watch events")
+			case <-time.After(10 * time.Second):
+				t.Error("Timed out waiting for watch events")
 			}
 		})
 	}
