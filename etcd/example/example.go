@@ -27,7 +27,7 @@ func main() {
 func demonstrateLeaderEmbedWithFollowers(ctx context.Context) {
 	fmt.Println("\n=== Demonstrating Leader Embed with Followers ===")
 
-	leader, err := etcd.NewEtcdManager(
+	leader, err := etcd.NewEtcd(
 		etcd.WithMode(etcd.ModeLeaderEmbed),
 		etcd.WithDataDir("./data/leader_embed"),
 		etcd.WithPorts(2380, 2379),
@@ -39,7 +39,7 @@ func demonstrateLeaderEmbedWithFollowers(ctx context.Context) {
 
 	followers := make([]*etcd.EtcdManager, 2)
 	for i := range followers {
-		follower, err := etcd.NewEtcdManager(
+		follower, err := etcd.NewEtcd(
 			etcd.WithMode(etcd.ModeFollower),
 			etcd.WithEndpoints([]string{"localhost:2379"}),
 		)
@@ -56,7 +56,7 @@ func demonstrateLeaderEmbedWithFollowers(ctx context.Context) {
 func demonstrateLeaderRemoteWithFollowers(ctx context.Context) {
 	fmt.Println("\n=== Demonstrating Leader Remote with Followers ===")
 
-	etcdServer, err := etcd.NewEtcdManager(
+	etcdServer, err := etcd.NewEtcd(
 		etcd.WithMode(etcd.ModeStandalone),
 		etcd.WithDataDir("./data/remote_etcd"),
 		etcd.WithPorts(2382, 2381),
@@ -66,7 +66,7 @@ func demonstrateLeaderRemoteWithFollowers(ctx context.Context) {
 	}
 	defer etcdServer.Close()
 
-	leader, err := etcd.NewEtcdManager(
+	leader, err := etcd.NewEtcd(
 		etcd.WithMode(etcd.ModeLeaderRemote),
 		etcd.WithEndpoints([]string{"localhost:2381"}),
 	)
@@ -77,7 +77,7 @@ func demonstrateLeaderRemoteWithFollowers(ctx context.Context) {
 
 	followers := make([]*etcd.EtcdManager, 2)
 	for i := range followers {
-		follower, err := etcd.NewEtcdManager(
+		follower, err := etcd.NewEtcd(
 			etcd.WithMode(etcd.ModeFollower),
 			etcd.WithEndpoints([]string{"localhost:2381"}),
 		)
@@ -94,7 +94,7 @@ func demonstrateLeaderRemoteWithFollowers(ctx context.Context) {
 func demonstrateStandalone(ctx context.Context) {
 	fmt.Println("\n=== Demonstrating Standalone ===")
 
-	standalone, err := etcd.NewEtcdManager(
+	standalone, err := etcd.NewEtcd(
 		etcd.WithMode(etcd.ModeStandalone),
 		etcd.WithDataDir("./data/standalone"),
 		etcd.WithPorts(2384, 2383),

@@ -16,67 +16,6 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 )
 
-// var (
-// 	testEtcdServer *embed.Etcd
-// 	etcdEndpoint   string
-// )
-
-// func setupTestEtcd(t *testing.T) {
-// 	t.Helper()
-
-// 	var err error
-// 	maxAttempts := 5
-// 	initialBackoff := 100 * time.Millisecond
-// 	backoff := initialBackoff
-
-// 	for attempt := 0; attempt < maxAttempts; attempt++ {
-// 		cfg := embed.NewConfig()
-// 		cfg.Dir = t.TempDir()
-// 		cfg.LogLevel = "error"
-// 		cfg.ListenClientUrls = []url.URL{{Scheme: "http", Host: "localhost:0"}}
-// 		cfg.AdvertiseClientUrls = cfg.ListenClientUrls
-// 		cfg.ListenPeerUrls = []url.URL{{Scheme: "http", Host: "localhost:0"}}
-// 		cfg.InitialCluster = "default=http://localhost:0"
-
-// 		testEtcdServer, err = embed.StartEtcd(cfg)
-// 		if err == nil {
-// 			break
-// 		}
-
-// 		t.Logf("Attempt %d failed to start embedded etcd: %v. Retrying in %v...", attempt+1, err, backoff)
-// 		time.Sleep(backoff)
-// 		backoff *= 2 // Exponential backoff
-// 	}
-
-// 	require.NoError(t, err, "Failed to start embedded etcd server after multiple attempts")
-
-// 	select {
-// 	case <-testEtcdServer.Server.ReadyNotify():
-// 		t.Log("Etcd server is ready")
-// 	case <-time.After(10 * time.Second):
-// 		t.Fatal("Etcd server took too long to start")
-// 	}
-
-// 	etcdEndpoint = testEtcdServer.Clients[0].Addr().String()
-// 	t.Logf("Standalone etcd server started at %s", etcdEndpoint)
-// }
-
-// func teardownTestEtcd() {
-// 	if testEtcdServer != nil {
-// 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-// 		defer cancel()
-// 		testEtcdServer.Server.Stop()
-// 		testEtcdServer.Close()
-// 		<-testEtcdServer.Server.StopNotify()
-// 		select {
-// 		case <-ctx.Done():
-// 			fmt.Println("Warning: Etcd server shutdown timed out")
-// 		default:
-// 			fmt.Println("Etcd server shutdown completed")
-// 		}
-// 	}
-// }
-
 var (
 	testEtcdServer *embed.Etcd
 	etcdEndpoint   string
@@ -152,7 +91,7 @@ func TestEtcdManagerInitialization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			em, err := NewEtcdManager(append(tt.opts, WithMode(tt.mode))...)
+			em, err := NewEtcd(append(tt.opts, WithMode(tt.mode))...)
 			if err != nil {
 				t.Fatalf("Failed to create EtcdManager: %v", err)
 			}
@@ -190,7 +129,7 @@ func TestEtcdManagerCRUD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			em, err := NewEtcdManager(append(tt.opts, WithMode(tt.mode))...)
+			em, err := NewEtcd(append(tt.opts, WithMode(tt.mode))...)
 			require.NoError(t, err, "Failed to create EtcdManager")
 			defer em.Close()
 
@@ -239,18 +178,18 @@ func TestEtcdManagerWatch(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -315,18 +254,18 @@ func TestEtcdManagerTransaction(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -391,18 +330,18 @@ func TestEtcdManagerCommandResponse(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -503,21 +442,21 @@ func TestEtcdManagerMultipleNodes(t *testing.T) {
 	setupTestEtcd(t)
 	defer teardownTestEtcd()
 
-	leader, err := NewEtcdManager(
+	leader, err := NewEtcd(
 		WithMode(ModeLeaderRemote),
 		WithEndpoints([]string{etcdEndpoint}),
 	)
 	require.NoError(t, err)
 	defer leader.Close()
 
-	follower1, err := NewEtcdManager(
+	follower1, err := NewEtcd(
 		WithMode(ModeFollower),
 		WithEndpoints([]string{etcdEndpoint}),
 	)
 	require.NoError(t, err)
 	defer follower1.Close()
 
-	follower2, err := NewEtcdManager(
+	follower2, err := NewEtcd(
 		WithMode(ModeFollower),
 		WithEndpoints([]string{etcdEndpoint}),
 	)
@@ -556,18 +495,18 @@ func TestEtcdManagerConcurrency(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -623,18 +562,18 @@ func TestEtcdManagerLargeValues(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -675,18 +614,18 @@ func TestEtcdManagerErrorHandling(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -731,7 +670,7 @@ func TestEtcdManagerErrorHandling(t *testing.T) {
 	}
 
 	t.Run("Invalid Endpoints", func(t *testing.T) {
-		_, err := NewEtcdManager(
+		_, err := NewEtcd(
 			WithMode(ModeFollower),
 			WithEndpoints([]string{"invalid:12345"}),
 			WithDialTimeout(100*time.Millisecond),
@@ -754,18 +693,18 @@ func TestEtcdManagerConcurrentTransactions(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -825,18 +764,18 @@ func TestEtcdManagerWatchPrefix(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -902,18 +841,18 @@ func TestEtcdManagerLeaseOperations(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -974,7 +913,7 @@ func TestEtcdManagerCompaction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			em, err := NewEtcdManager(append(tt.opts, WithMode(tt.mode))...)
+			em, err := NewEtcd(append(tt.opts, WithMode(tt.mode))...)
 			require.NoError(t, err, "Failed to create EtcdManager")
 			defer em.Close()
 
@@ -1022,18 +961,18 @@ func TestEtcdManagerDefragmentation(t *testing.T) {
 			// Create EtcdManager based on mode
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -1111,18 +1050,18 @@ func TestEtcdManagerAuthentication(t *testing.T) {
 
 			switch mode {
 			case ModeLeaderEmbed:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2382, 2381),
 				)
 			case ModeLeaderRemote, ModeFollower:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithEndpoints([]string{etcdEndpoint}),
 				)
 			case ModeStandalone:
-				em, err = NewEtcdManager(
+				em, err = NewEtcd(
 					WithMode(mode),
 					WithDataDir(t.TempDir()),
 					WithPorts(2384, 2383),
@@ -1226,7 +1165,7 @@ func TestEtcdManagerRetry(t *testing.T) {
 	defer teardownTestEtcd()
 
 	// Create an EtcdManager client connected to the test server
-	client, err := NewEtcdManager(
+	client, err := NewEtcd(
 		WithMode(ModeFollower),
 		WithEndpoints([]string{etcdEndpoint}),
 		WithRetryAttempts(3),
