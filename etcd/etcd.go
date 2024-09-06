@@ -15,6 +15,7 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.etcd.io/etcd/server/v3/embed"
 )
 
@@ -130,6 +131,7 @@ func (em *EtcdManager) Mode() Mode {
 // initialize sets up the etcd client and/or server based on the operational mode
 func (em *EtcdManager) initialize() error {
 	var err error
+
 	switch em.mode {
 	case ModeLeaderEmbed, ModeStandalone:
 		// Start an embedded etcd server for leader embed and standalone modes
@@ -138,17 +140,11 @@ func (em *EtcdManager) initialize() error {
 			return fmt.Errorf("failed to start embedded etcd: %v", err)
 		}
 		em.endpoints = []string{em.server.Config().ListenClientUrls[0].String()}
-	case ModeLeaderRemote, ModeFollower:
+	case ModeLeaderRemote, ModeFollower, ModeBeacon:
 		// For remote leader and follower modes, use the provided endpoints
 		if len(em.endpoints) == 0 {
 			return fmt.Errorf("no endpoints provided for remote or follower mode")
 		}
-	case ModeBeacon:
-		if err := em.setupBeacon(); err != nil {
-			return fmt.Errorf("failed to setup beacon: %v", err)
-		}
-	default:
-		return fmt.Errorf("invalid mode")
 	}
 
 	// Create an etcd client for all modes
@@ -172,7 +168,20 @@ func (em *EtcdManager) initialize() error {
 		return fmt.Errorf("failed to create etcd client: %v", err)
 	}
 
+	if em.mode == ModeBeacon {
+		if err := em.startBeacon(); err != nil {
+			return fmt.Errorf("failed to start beacon: %v", err)
+		}
+	}
+
 	return nil
+}
+
+func (em *EtcdManager) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), em.dialTimeout)
+	defer cancel()
+	_, err := em.client.Get(ctx, "health_check")
+	return err
 }
 
 // startEmbeddedEtcd initializes and starts an embedded etcd server
@@ -213,7 +222,7 @@ func (em *EtcdManager) retryStartEmbeddedEtcd(maxAttempts int, initialBackoff ti
 	return nil, fmt.Errorf("failed to start embedded etcd after %d attempts: %v", maxAttempts, err)
 }
 
-func (em *EtcdManager) setupBeacon() error {
+func (em *EtcdManager) startBeacon() error {
 	lis, err := net.Listen("tcp", em.beaconAddr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on beacon address: %v", err)
@@ -239,18 +248,20 @@ func (em *EtcdManager) serveBeacon() {
 func (em *EtcdManager) handleBeaconConnection(conn net.Conn) {
 	defer conn.Close()
 
-	endpoint := em.GetEtcdEndpoint()
-	_, err := conn.Write([]byte(endpoint))
-	if err != nil {
-		log.Printf("Error sending etcd endpoint: %v\n", err)
-	}
-}
+	fmt.Printf("New connection from %s\n", conn.RemoteAddr())
 
-func (em *EtcdManager) GetEtcdEndpoint() string {
-	if len(em.endpoints) > 0 {
-		return em.endpoints[0]
+	endpointsJSON, err := json.Marshal(em.endpoints)
+	if err != nil {
+		fmt.Printf("Error marshaling endpoints for %s: %v\n", conn.RemoteAddr(), err)
+		return
 	}
-	return ""
+
+	_, err = conn.Write(endpointsJSON)
+	if err != nil {
+		fmt.Printf("Error sending endpoints to %s: %v\n", conn.RemoteAddr(), err)
+	} else {
+		fmt.Printf("Successfully sent endpoints to %s\n", conn.RemoteAddr())
+	}
 }
 
 // Close gracefully shuts down the etcd client and server (if applicable)
@@ -421,7 +432,7 @@ func (em *EtcdManager) waitForResponse(cmdID string, respChan chan<- Response, o
 // WatchCommands sets up a watch for incoming commands
 func (em *EtcdManager) WatchCommands(ctx context.Context) clientv3.WatchChan {
 	log.Printf("Starting to watch commands and responses")
-	return em.client.Watch(ctx, "/", clientv3.WithPrefix())
+	return em.client.Watch(ctx, commandPrefix, clientv3.WithPrefix())
 }
 
 // SendResponse sends a response to a specific command
@@ -468,6 +479,149 @@ func (em *EtcdManager) retryOperation(ctx context.Context, options OperationOpti
 	}
 	// All retry attempts failed, return the last error encountered
 	return fmt.Errorf("operation failed after %d attempts: %v", options.RetryAttempts, lastErr)
+}
+
+// func (em *EtcdManager) retryOperation(ctx context.Context, options OperationOptions, op interface{}) (interface{}, error) {
+// 	var lastErr error
+// 	for i := 0; i < options.RetryAttempts; i++ {
+// 		select {
+// 		case <-ctx.Done():
+// 			return nil, ctx.Err()
+// 		default:
+// 		}
+
+// 		switch operation := op.(type) {
+// 		case func() (string, error):
+// 			result, err := operation()
+// 			if err == nil {
+// 				return result, nil
+// 			}
+// 			lastErr = err
+// 		case func() (*clientv3.TxnResponse, error):
+// 			result, err := operation()
+// 			if err == nil {
+// 				return result, nil
+// 			}
+// 			lastErr = err
+// 		default:
+// 			return nil, fmt.Errorf("unsupported operation type")
+// 		}
+
+// 		time.Sleep(options.RetryDelay)
+// 	}
+// 	return nil, fmt.Errorf("operation failed after %d attempts: %v", options.RetryAttempts, lastErr)
+// }
+
+func (em *EtcdManager) retryOperationTx(ctx context.Context, options OperationOptions, operation func() (*clientv3.TxnResponse, error)) (*clientv3.TxnResponse, error) {
+	var lastErr error
+	for i := 0; i < options.RetryAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		result, err := operation()
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+
+		time.Sleep(options.RetryDelay)
+	}
+	return nil, fmt.Errorf("operation failed after %d attempts: %v", options.RetryAttempts, lastErr)
+}
+
+type TxnOp struct {
+	Key   string
+	Value string
+	Type  string // "put", "delete", or "get"
+}
+
+type EtcdTxn struct {
+	ctx     context.Context
+	txn     clientv3.Txn
+	client  *clientv3.Client
+	mutex   *concurrency.Mutex
+	ops     []clientv3.Op
+	manager *EtcdManager
+	options OperationOptions
+}
+
+func (em *EtcdManager) BeginTxn(ctx context.Context, lockName string, opts ...OperationOptions) (*EtcdTxn, error) {
+	options := em.mergeOptions(opts...)
+	session, err := concurrency.NewSession(em.client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session: %v", err)
+	}
+
+	mutex := concurrency.NewMutex(session, fmt.Sprintf("/locks/%s", lockName))
+
+	if err := mutex.Lock(ctx); err != nil {
+		return nil, fmt.Errorf("failed to acquire lock: %v", err)
+	}
+
+	return &EtcdTxn{
+		ctx:     ctx,
+		txn:     em.client.Txn(ctx),
+		client:  em.client,
+		mutex:   mutex,
+		ops:     []clientv3.Op{},
+		manager: em,
+		options: options,
+	}, nil
+}
+
+func (et *EtcdTxn) Put(key, value string) *EtcdTxn {
+	et.ops = append(et.ops, clientv3.OpPut(key, value))
+	return et
+}
+
+func (et *EtcdTxn) Delete(key string) *EtcdTxn {
+	et.ops = append(et.ops, clientv3.OpDelete(key))
+	return et
+}
+
+func (et *EtcdTxn) Get(key string) *EtcdTxn {
+	et.ops = append(et.ops, clientv3.OpGet(key))
+	return et
+}
+
+func (et *EtcdTxn) Commit() (*clientv3.TxnResponse, error) {
+	defer et.mutex.Unlock(et.ctx)
+	return et.manager.retryOperationTx(et.ctx, et.options, func() (*clientv3.TxnResponse, error) {
+		return et.txn.Then(et.ops...).Commit()
+	})
+}
+
+func (et *EtcdTxn) Rollback() error {
+	defer et.mutex.Unlock(et.ctx)
+	// In etcd, if we don't commit, the transaction is automatically rolled back
+	// So we just need to release the lock
+	return nil
+}
+
+func (em *EtcdManager) ExecuteTransaction(ctx context.Context, lockName string, ops []TxnOp, opts ...OperationOptions) (*clientv3.TxnResponse, error) {
+	txn, err := em.BeginTxn(ctx, lockName, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %v", err)
+	}
+
+	for _, op := range ops {
+		switch op.Type {
+		case "put":
+			txn.Put(op.Key, op.Value)
+		case "delete":
+			txn.Delete(op.Key)
+		case "get":
+			txn.Get(op.Key)
+		default:
+			txn.Rollback()
+			return nil, fmt.Errorf("unsupported operation type: %s", op.Type)
+		}
+	}
+
+	return txn.Commit()
 }
 
 // Option functions

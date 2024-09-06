@@ -2,12 +2,18 @@ package gronos
 
 import (
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 
 	"github.com/davidroman0O/gronos/etcd"
 )
+
+// type OptionsFollower struct{}
+// type OptionsLeader struct{}
+// type OptionsBeacon struct{}
 
 type Options struct {
 	Mode          etcd.Mode
@@ -16,7 +22,6 @@ type Options struct {
 	ClientPort    int
 	Endpoints     []string
 	BeaconAddr    string
-	EtcdEndpoint  string
 	RemoveDataDir bool
 }
 
@@ -29,6 +34,7 @@ func NewOptionsBuilder(mode etcd.Mode) *OptionsBuilder {
 		opts: Options{
 			Mode:          mode,
 			RemoveDataDir: false,
+			ClientPort:    2379, // Default client port
 		},
 	}
 	builder.setDefaultsForMode()
@@ -39,14 +45,16 @@ func (b *OptionsBuilder) setDefaultsForMode() {
 	b.opts.DataDir = filepath.Join(os.TempDir(), fmt.Sprintf("gronos-%s", b.opts.Mode))
 	switch b.opts.Mode {
 	case etcd.ModeStandalone, etcd.ModeLeaderEmbed:
-		b.opts.PeerPort = 2380
-		b.opts.ClientPort = 2379
+		b.opts.PeerPort = findAvailablePort(2380) // Start looking from default peer port
 	case etcd.ModeLeaderRemote, etcd.ModeFollower:
 		b.opts.Endpoints = []string{"localhost:2379"}
 	case etcd.ModeBeacon:
 		b.opts.BeaconAddr = "localhost:5000"
-		b.opts.EtcdEndpoint = "localhost:2379"
+		b.opts.Endpoints = []string{"localhost:2379"}
 	}
+	// I don't think we need to search for this port to be available
+	// by default everyone expect to connect to it
+	// b.opts.ClientPort = findAvailablePort(b.opts.ClientPort)
 }
 
 func (b *OptionsBuilder) WithDataDir(dir string) *OptionsBuilder {
@@ -70,11 +78,6 @@ func (b *OptionsBuilder) WithBeacon(addr string) *OptionsBuilder {
 	return b
 }
 
-func (b *OptionsBuilder) WithEtcdEndpoint(endpoint string) *OptionsBuilder {
-	b.opts.EtcdEndpoint = endpoint
-	return b
-}
-
 func (b *OptionsBuilder) WithRemoveDataDir() *OptionsBuilder {
 	b.opts.RemoveDataDir = true
 	return b
@@ -87,14 +90,26 @@ func (b *OptionsBuilder) Build() (Options, error) {
 
 	b.applyEnvironmentOverrides()
 
+	// // Ensure ports are available
+	// b.opts.ClientPort = findAvailablePort(b.opts.ClientPort)
+	// if b.opts.Mode == etcd.ModeStandalone || b.opts.Mode == etcd.ModeLeaderEmbed {
+	// 	b.opts.PeerPort = findAvailablePort(b.opts.PeerPort)
+	// }
+
+	// // Log port assignments
+	// log.Printf("Assigned client port: %d", b.opts.ClientPort)
+	// if b.opts.Mode == etcd.ModeStandalone || b.opts.Mode == etcd.ModeLeaderEmbed {
+	// 	log.Printf("Assigned peer port: %d", b.opts.PeerPort)
+	// }
+
 	// Create data directory if it doesn't exist
-	if b.opts.Mode == etcd.ModeBeacon || b.opts.Mode == etcd.ModeStandalone || b.opts.Mode == etcd.ModeLeaderEmbed {
-		if b.opts.DataDir != "" {
-			if err := os.MkdirAll(b.opts.DataDir, 0755); err != nil {
-				return Options{}, fmt.Errorf("failed to create data directory: %v", err)
-			}
+	// if b.opts.Mode == etcd.ModeBeacon || b.opts.Mode == etcd.ModeStandalone || b.opts.Mode == etcd.ModeLeaderEmbed {
+	if b.opts.DataDir != "" {
+		if err := os.MkdirAll(b.opts.DataDir, 0755); err != nil {
+			return Options{}, fmt.Errorf("failed to create data directory: %v", err)
 		}
 	}
+	// }
 
 	return b.opts, nil
 }
@@ -116,7 +131,7 @@ func (b *OptionsBuilder) validate() error {
 		if b.opts.BeaconAddr == "" {
 			return fmt.Errorf("BeaconAddr is required for Beacon mode")
 		}
-		if b.opts.EtcdEndpoint == "" {
+		if len(b.opts.Endpoints) == 0 {
 			return fmt.Errorf("EtcdEndpoint is required for Beacon mode")
 		}
 	default:
@@ -145,7 +160,23 @@ func (b *OptionsBuilder) applyEnvironmentOverrides() {
 	if envBeaconAddr := os.Getenv("GRONOS_BEACON_ADDR"); envBeaconAddr != "" {
 		b.opts.BeaconAddr = envBeaconAddr
 	}
-	if envEtcdEndpoint := os.Getenv("GRONOS_ETCD_ENDPOINT"); envEtcdEndpoint != "" {
-		b.opts.EtcdEndpoint = envEtcdEndpoint
+}
+
+func findAvailablePort(startPort int) int {
+	for port := startPort; port < 65535; port++ {
+		if isPortAvailable(port) {
+			return port
+		}
 	}
+	log.Fatalf("No available ports found")
+	return 0
+}
+
+func isPortAvailable(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
 }
