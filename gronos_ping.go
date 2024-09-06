@@ -35,12 +35,17 @@ func (h *HealthCheck) Run(ctx context.Context, manager *etcd.EtcdManager) error 
 			return ctx.Err()
 		case <-ticker.C:
 			heartbeat := etcd.Command{
-				ID:   fmt.Sprintf("heartbeat"),
+				ID:   fmt.Sprintf("heartbeat-%v", h.name),
 				Type: "health_check",
-				Data: h.name,
 			}
 			_, err := manager.SendCommand(heartbeat)
 			fmt.Println("HealthCheck still active...", err)
+			if err == nil {
+				if err = manager.Delete(context.Background(), heartbeat.ID); err != nil {
+					fmt.Println("Error deleting command", err)
+				}
+				fmt.Println("HealthCheck key deleted successfully")
+			}
 		}
 	}
 }

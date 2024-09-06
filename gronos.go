@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/avast/retry-go/v3"
 	"github.com/davidroman0O/gronos/etcd"
 	"github.com/davidroman0O/gronos/graph"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -85,15 +86,28 @@ func New[T Primitive](opts Options) (*Gronos, error) {
 		if len(opts.Endpoints) > 0 {
 			etcdOpts = append(etcdOpts, etcd.WithEndpoints(opts.Endpoints))
 		}
-		if opts.BeaconAddr != "" {
-			// TODO: beacon returns an array of etcd endpoints
-			etcdEndpoints, err := getEtcdEndpointFromBeacon(opts.BeaconAddr)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get etcd endpoint from beacon: %v", err)
-			}
-			fmt.Println("etcd endpoint:", etcdEndpoints)
-			etcdOpts = append(etcdOpts, etcd.WithEndpoints(etcdEndpoints))
+		if opts.BeaconAddr == "" {
+			return nil, fmt.Errorf("beacon address is required for follower mode")
 		}
+		var etcdEndpoints []string
+		// retry
+		if err := retry.Do(
+			func() error {
+				var err error
+				fmt.Println("Getting etcd endpoint from beacon...")
+				etcdEndpoints, err = getEtcdEndpointFromBeacon(opts.BeaconAddr)
+				if err != nil {
+					return fmt.Errorf("failed to get etcd endpoint from beacon: %v", err)
+				}
+				return nil
+			},
+			retry.Attempts(10),
+			retry.Delay(3*time.Second),
+		); err != nil {
+			return nil, fmt.Errorf("failed to get etcd endpoint from beacon: %v", err)
+		}
+		fmt.Println("etcd endpoint:", etcdEndpoints)
+		etcdOpts = append(etcdOpts, etcd.WithEndpoints(etcdEndpoints))
 
 	case etcd.ModeBeacon:
 		etcdOpts = append(etcdOpts, etcd.WithBeacon(opts.BeaconAddr))
@@ -128,11 +142,13 @@ func New[T Primitive](opts Options) (*Gronos, error) {
 }
 
 func getEtcdEndpointFromBeacon(beaconAddr string) ([]string, error) {
-	conn, err := net.DialTimeout("tcp", beaconAddr, 3*time.Second)
+	conn, err := net.DialTimeout("tcp", beaconAddr, time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to beacon: %v", err)
 	}
 	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(1 * time.Second))
 
 	data, err := io.ReadAll(conn)
 	if err != nil {

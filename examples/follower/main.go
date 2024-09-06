@@ -14,6 +14,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	opts, err := gronos.NewOptionsBuilder(etcd.ModeFollower).
+		WithName("follower1").
 		WithRemoveDataDir().
 		WithBeacon("localhost:5000").
 		Build()

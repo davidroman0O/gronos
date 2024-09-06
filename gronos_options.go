@@ -16,6 +16,7 @@ import (
 // type OptionsBeacon struct{}
 
 type Options struct {
+	Name          string
 	Mode          etcd.Mode
 	DataDir       string
 	PeerPort      int
@@ -83,6 +84,11 @@ func (b *OptionsBuilder) WithRemoveDataDir() *OptionsBuilder {
 	return b
 }
 
+func (b *OptionsBuilder) WithName(name string) *OptionsBuilder {
+	b.opts.Name = name
+	return b
+}
+
 func (b *OptionsBuilder) Build() (Options, error) {
 	if err := b.validate(); err != nil {
 		return Options{}, err
@@ -110,6 +116,10 @@ func (b *OptionsBuilder) Build() (Options, error) {
 		}
 	}
 	// }
+
+	if b.opts.Name == "" {
+		b.opts.Name = fmt.Sprintf("gronos-%s", b.opts.Mode)
+	}
 
 	return b.opts, nil
 }

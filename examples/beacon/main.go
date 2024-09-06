@@ -17,6 +17,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	opts, err := gronos.NewOptionsBuilder(etcd.ModeBeacon).
+		WithName("beacon").
 		WithRemoveDataDir().
 		WithBeacon("localhost:5000").
 		WithEndpoints([]string{"localhost:2379"}).

@@ -14,6 +14,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	opts, err := gronos.NewOptionsBuilder(etcd.ModeLeaderEmbed).
+		WithName("leader1").
 		WithRemoveDataDir().
 		WithPorts(2380, 2379).
 		Build()

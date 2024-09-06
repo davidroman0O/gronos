@@ -114,7 +114,7 @@ func runBeacon(ctx context.Context, wg *sync.WaitGroup, ready chan<- struct{}, e
 	opts, err := NewOptionsBuilder(etcd.ModeBeacon).
 		WithRemoveDataDir().
 		WithBeacon("localhost:5000").
-		WithEtcdEndpoint("localhost:2379").
+		WithEndpoints([]string{"localhost:2379"}).
 		Build()
 	if err != nil {
 		errChan <- fmt.Errorf("Error creating new options for beacon: %v", err)

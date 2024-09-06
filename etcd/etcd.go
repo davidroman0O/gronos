@@ -19,6 +19,11 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 )
 
+//// Little internal documentation on the terminology used in etcd:
+//// create_revision: The revision when the key was first created
+//// mod_revision: The latest revision when the key was modified
+//// version: The number of times the key has been updated (starting from 1 when first created)
+
 // Constants for command and response key prefixes in etcd
 const (
 	commandPrefix  = "/commands/"
@@ -430,9 +435,10 @@ func (em *EtcdManager) waitForResponse(cmdID string, respChan chan<- Response, o
 
 // WatchCommands sets up a watch for incoming commands
 // WatchCommands sets up a watch for incoming commands
-func (em *EtcdManager) WatchCommands(ctx context.Context) clientv3.WatchChan {
+func (em *EtcdManager) WatchCommands(ctx context.Context, opts ...clientv3.OpOption) clientv3.WatchChan {
 	log.Printf("Starting to watch commands and responses")
-	return em.client.Watch(ctx, commandPrefix, clientv3.WithPrefix())
+	opts = append(opts, clientv3.WithPrefix())
+	return em.client.Watch(ctx, commandPrefix, opts...)
 }
 
 // SendResponse sends a response to a specific command
