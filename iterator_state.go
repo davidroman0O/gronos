@@ -36,13 +36,13 @@ func WithInitialState[T any](state *T) IteratorStateOption[T] {
 }
 
 // IteratorState creates a RuntimeApplication that uses a LoopableIteratorState to execute tasks with a shared state
-func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorStateOption[T]) RuntimeApplication {
+func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorStateOption[T]) LifecyleFunc {
 	config := &iteratorStateConfig[T]{}
 	for _, opt := range opts {
 		opt(config)
 	}
 
-	log.Info("[Iterator State] Creating iterator")
+	log.Debug("[Iterator State] Creating iterator")
 	return func(ctx context.Context, shutdown <-chan struct{}) error {
 		var state *T
 		if config.state != nil {
@@ -54,16 +54,16 @@ func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorState
 		li := NewLoopableIteratorState(tasks, state, config.loopOpts...)
 		errChan := li.Run(ctx)
 
-		log.Info("[Iterator State] Starting iterator")
+		log.Debug("[Iterator State] Starting iterator")
 		var finalErr error
 		select {
 		case <-ctx.Done():
-			log.Info("[Iterator State] Context done")
+			log.Debug("[Iterator State] Context done")
 			li.Stop()
 			li.Cancel()
 			finalErr = ctx.Err()
 		case <-shutdown:
-			log.Info("[Iterator State] Shutdown")
+			log.Debug("[Iterator State] Shutdown")
 			li.Stop()
 			li.Cancel()
 		case err, ok := <-errChan:
@@ -72,7 +72,7 @@ func IteratorState[T any](tasks []CancellableStateTask[T], opts ...IteratorState
 			}
 			li.Cancel()
 			finalErr = err
-			log.Info("[Iterator State] Error", finalErr)
+			log.Debug("[Iterator State] Error", finalErr)
 		}
 
 		li.Wait()
@@ -186,7 +186,7 @@ func (li *LoopableIteratorState[T]) Run(ctx context.Context) chan error {
 	go func() {
 		defer func() {
 			li.cleanup(errChan)
-			log.Info("LoopableIteratorState cleanup")
+			log.Debug("LoopableIteratorState cleanup")
 		}()
 
 		for {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+	"github.com/heimdalr/dag"
 )
 
 type RequestStatus[K comparable] struct {
@@ -34,6 +35,10 @@ type RequestStatusAsync[K comparable] struct {
 	RequestMessage[K, struct{}]
 }
 
+type RequestGraph[K comparable] struct {
+	RequestMessage[K, *dag.DAG]
+}
+
 var requestStatusPoolInited bool
 var requestStatusPool sync.Pool
 
@@ -48,6 +53,9 @@ var requestAllAlivePool sync.Pool
 
 var requestStatusAsyncPoolInited bool
 var requestStatusAsyncPool sync.Pool
+
+var requestGraphInited bool
+var requestGraphPool sync.Pool
 
 func MsgRequestStatus[K comparable](key K) (<-chan StatusState, *RequestStatus[K]) {
 	if !requestStatusPoolInited {
@@ -127,7 +135,21 @@ func MsgRequestStatusAsync[K comparable](key K, when StatusState) (<-chan struct
 	return response, msg
 }
 
-func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+func MsgRequestGraph[K comparable]() (<-chan *dag.DAG, *RequestGraph[K]) {
+	if !requestGraphInited {
+		requestGraphInited = true
+		requestGraphPool = sync.Pool{
+			New: func() any {
+				return &RequestGraph[K]{}
+			},
+		}
+	}
+	msg := requestGraphPool.Get().(*RequestGraph[K])
+	msg.Response = make(chan *dag.DAG, 1)
+	return msg.Response, msg
+}
+
+func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
 	case *RequestStatus[K]:
 		log.Debug("[GronosMessage] [RequestStatus]", msg.Key)
@@ -149,49 +171,55 @@ func (g *gronos[K]) handleStateMessage(state *gronosState[K], m *MessagePayload)
 		log.Debug("[GronosMessage] [RequestStatusAsync]", msg.Key)
 		defer requestStatusAsyncPool.Put(msg)
 		return g.handleRequestStatusAsync(state, msg.Key, msg.When, msg.Response), true
+	case *RequestGraph[K]:
+		log.Debug("[GronosMessage] [RequestGraph]")
+		defer requestGraphPool.Put(msg)
+		msg.Response <- state.graph
+		close(msg.Response)
+		return nil, true
 	}
 	return nil, false
 }
 
 func (g *gronos[K]) handleRequestStatus(state *gronosState[K], key K, response chan<- StatusState) error {
 	defer close(response)
-	var value any
+	var value StatusState
 	var ok bool
 	if value, ok = state.mstatus.Load(key); !ok {
 		response <- StatusNotFound
 		// return fmt.Errorf("app not found (status property) %v", key)
 		return nil
 	}
-	response <- value.(StatusState)
+	response <- value
 	return nil
 }
 
 func (g *gronos[K]) handleRequestAlive(state *gronosState[K], key K, response chan<- bool) error {
-	var value any
+	var value bool
 	var ok bool
 	if value, ok = state.mali.Load(key); !ok {
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
-	response <- value.(bool)
+	response <- value
 	close(response)
 	return nil
 }
 
 func (g *gronos[K]) handleRequestReason(state *gronosState[K], key K, response chan<- error) error {
-	var value any
+	var value error
 	var ok bool
 	if value, ok = state.mrea.Load(key); !ok {
 		return fmt.Errorf("app not found (reason property) %v", key)
 	}
-	response <- value.(error)
+	response <- value
 	close(response)
 	return nil
 }
 
 func (g *gronos[K]) handleRequestAllAlive(state *gronosState[K], response chan<- bool) error {
 	var alive bool
-	state.mali.Range(func(key, value any) bool {
-		if value.(bool) {
+	state.mali.Range(func(key K, value bool) bool {
+		if value {
 			alive = true
 			return false
 		}
@@ -208,7 +236,7 @@ func (g *gronos[K]) handleRequestStatusAsync(state *gronosState[K], key K, when 
 		var currentState int
 		for currentState < stateNumber(when) {
 			if value, ok := state.mstatus.Load(key); ok {
-				currentState = stateNumber(value.(StatusState))
+				currentState = stateNumber(value)
 			}
 			<-time.After(time.Second / 16)
 			runtime.Gosched()

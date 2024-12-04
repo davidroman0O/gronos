@@ -18,7 +18,7 @@ func main() {
 
 	watermillMiddleware := watermillext.New[string](watermill.NewStdLogger(true, true))
 
-	g, errChan := gronos.New[string](ctx, map[string]gronos.RuntimeApplication{
+	g, errChan := gronos.New[string](ctx, map[string]gronos.LifecyleFunc{
 		"setup": setupApp,
 	},
 		gronos.WithShutdownBehavior[string](gronos.ShutdownAutomatic),

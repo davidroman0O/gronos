@@ -200,7 +200,7 @@ func TestIteratorHOF(t *testing.T) {
 		))
 
 		ctx, cancel := context.WithCancel(context.Background())
-		g, errChan := New[string](ctx, map[string]RuntimeApplication{
+		g, errChan := New[string](ctx, map[string]LifecyleFunc{
 			"iterator": iterApp,
 		})
 

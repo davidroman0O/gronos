@@ -12,7 +12,7 @@ import (
 
 type AddMessage[K comparable] struct {
 	KeyMessage[K]
-	RuntimeApplication
+	LifecyleFunc
 	RequestMessage[K, struct{}]
 }
 
@@ -110,7 +110,7 @@ func MsgGetListRuntimeApplication[K comparable]() (<-chan []K, *GetListRuntimeAp
 	return msg.Response, msg
 }
 
-func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddMessage[K]) {
+func MsgAdd[K comparable](key K, app LifecyleFunc) (<-chan struct{}, *AddMessage[K]) {
 	if !addRuntimeApplicationPoolInited {
 		addRuntimeApplicationPoolInited = true
 		addRuntimeApplicationPool = sync.Pool{
@@ -121,7 +121,7 @@ func MsgAdd[K comparable](key K, app RuntimeApplication) (<-chan struct{}, *AddM
 	}
 	msg := addRuntimeApplicationPool.Get().(*AddMessage[K])
 	msg.Key = key
-	msg.RuntimeApplication = app
+	msg.LifecyleFunc = app
 	msg.Response = make(chan struct{}, 1)
 	return msg.Response, msg
 }
@@ -239,12 +239,12 @@ func msgErroredShutdown[K comparable](key K, err error) (<-chan struct{}, *Error
 	return response, msg
 }
 
-func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch msg := m.Message.(type) {
 	case *AddMessage[K]:
-		log.Debug("[GronosMessage] [AddMessage]", msg.Key)
+		log.Debug("[GronosMessage] [AddMessage]", "key", msg.Key, "metadata", m.Metadata.String())
 		defer addRuntimeApplicationPool.Put(msg)
-		return g.handleAddRuntimeApplication(state, msg.Key, msg.Response, msg.RuntimeApplication), true
+		return g.handleAddRuntimeApplication(state, m.Metadata, msg.Key, msg.Response, msg.LifecyleFunc), true
 	case *RemoveMessage[K]:
 		log.Debug("[GronosMessage] [RemoveMessage]", msg.Key)
 		defer removeRuntimeApplicationPool.Put(msg)
@@ -285,8 +285,8 @@ func (g *gronos[K]) handleRuntimeApplicationMessage(state *gronosState[K], m *Me
 func (g *gronos[K]) handleRequestListRuntimeApplication(state *gronosState[K], response chan []K) error {
 	defer close(response)
 	var list []K
-	state.mkeys.Range(func(k, v any) bool {
-		list = append(list, k.(K))
+	state.mkeys.Range(func(k, v K) bool {
+		list = append(list, k)
 		return true
 	})
 	response <- list
@@ -295,13 +295,13 @@ func (g *gronos[K]) handleRequestListRuntimeApplication(state *gronosState[K], r
 
 // need to check if the have it or not, terminate it and remove it
 // it's an async process
-func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K, metadata map[string]interface{}, done chan bool) error {
+func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K, metadata *Metadata[K], done chan bool) error {
 
 	if state.shutting.Load() {
 		return fmt.Errorf("gronos is shutting down")
 	}
 
-	remove := func() {
+	remove := func() error {
 		state.mkeys.Delete(key)
 		state.mapp.Delete(key)
 		state.mctx.Delete(key)
@@ -314,40 +314,49 @@ func (g *gronos[K]) handleRemoveRuntimeApplication(state *gronosState[K], key K,
 		state.mdone.Delete(key)
 		state.mcloser.Delete(key)
 		state.mcancel.Delete(key)
+		if err := state.graph.DeleteVertex(fmt.Sprintf("%v", key)); err != nil {
+			log.Error("[GronosMessage] [RemoveMessage] failed to delete vertex", key, err)
+			return err
+		}
 		log.Debug("[GronosMessage] [RemoveMessage] application removed", key)
 		done <- true
 		close(done)
+		return nil
 	}
 
 	log.Debug("[GronosMessage] [RemoveMessage] remove application", key)
 
-	var value any
+	var alive bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
+	if alive, ok = state.mali.Load(key); !ok {
 		log.Debug("[GronosMessage] [RemoveMessage] malive application not found", key) // but that's fine
-		remove()
-		return nil
+		return remove()
 	}
-	if !value.(bool) {
+	if !alive {
 		log.Debug("[GronosMessage] [RemoveMessage] application already dead", key) // but that's fine
-		remove()
-		return nil
+		return remove()
 	} else {
-		// then it will be async
-		go func(whenTerminated <-chan struct{}) {
-			log.Debug("[GronosMessage] [RemoveMessage] terminate application", key)
-			<-whenTerminated
-			remove()
-		}(
-			g.sendMessageWait(metadata, func() (<-chan struct{}, Message) {
-				return MsgForceTerminateShutdown(key)
-			}),
-		)
+		log.Debug("[GronosMessage] [RemoveMessage] try to remove when terminated asynchronously", key)
+		go func() {
+			// then it will be async
+			go func(whenTerminated <-chan struct{}) {
+				log.Debug("[GronosMessage] [RemoveMessage] terminate application", key)
+				<-whenTerminated
+				if err := remove(); err != nil {
+					// TODO: send to error channel
+					log.Debug("[GronosMessage] [RemoveMessage] failed to remove application", key, err)
+				}
+			}(
+				g.sendMessageWait(metadata, func() (<-chan struct{}, Message) {
+					return MsgForceTerminateShutdown(key)
+				}),
+			)
+		}()
 		return nil
 	}
 }
 
-func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, done chan struct{}, app RuntimeApplication) error {
+func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], metadata *Metadata[K], key K, done chan struct{}, app LifecyleFunc) error {
 	defer close(done)
 
 	if state.shutting.Load() {
@@ -374,6 +383,12 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 		ctx = ext.OnNewRuntime(ctx)
 	}
 
+	metadata.data.Range(func(k, v any) bool {
+		log.Debug("[GronosMessage] [AddMessage] add application with metadata", "key", key, k, v)
+		ctx = context.WithValue(ctx, k, v)
+		return true
+	})
+
 	state.mkeys.Store(key, key)
 	state.mapp.Store(key, app)
 	state.mctx.Store(key, ctx)
@@ -399,7 +414,7 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 		cancel()
 	}))
 
-	go g.handleRuntimeApplication(state, key, g.sendMessage)
+	go g.handleRuntimeApplication(state, metadata, key, g.sendMessage)
 
 	log.Debug("[GronosMessage] [AddMessage] application added", key)
 
@@ -407,26 +422,27 @@ func (g *gronos[K]) handleAddRuntimeApplication(state *gronosState[K], key K, do
 }
 
 func (g *gronos[K]) handleForceCancelShutdown(state *gronosState[K], key K, err error) error {
-	var value any
+	var alive bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
+	if alive, ok = state.mali.Load(key); !ok {
 		log.Debug("[GronosMessage] [ForceCancelShutdown] app not found (alive property)", key)
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
-	if !value.(bool) {
+	if !alive {
 		log.Debug("[GronosMessage] [ForceCancelShutdown] app already dead", key)
 		return fmt.Errorf("app already dead %v", key)
 	}
 
+	var cancel func()
 	log.Debug("[GronosMessage] [ForceCancelShutdown] cancel", key, err)
-	if value, ok = state.mcancel.Load(key); !ok {
+	if cancel, ok = state.mcancel.Load(key); !ok {
 		log.Debug("[GronosMessage] [ForceCancelShutdown] app not found (cancel property)", key)
 		return fmt.Errorf("app not found (closer property) %v", key)
 	}
 
 	state.mstatus.Store(key, StatusShutingDown)
 
-	value.(func())()
+	cancel()
 
 	state.mstatus.Store(key, StatusShutingDown)
 	log.Debug("[GronosMessage] [ForceCancelShutdown] cancel done", key)
@@ -435,22 +451,25 @@ func (g *gronos[K]) handleForceCancelShutdown(state *gronosState[K], key K, err 
 }
 
 func (g *gronos[K]) handleForceTerminateShutdown(state *gronosState[K], key K, response chan struct{}) error {
-	defer close(response)
-	var value any
+	defer func() {
+		close(response)
+	}()
+	var alive bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
+	if alive, ok = state.mali.Load(key); !ok {
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
-	if !value.(bool) {
+	if !alive {
 		return fmt.Errorf("app already dead %v", key)
 	}
 
+	var closer func()
 	log.Debug("[GronosMessage] [ForceTerminateShutdown] terminate shutdown", key)
-	if value, ok = state.mcloser.Load(key); !ok {
+	if closer, ok = state.mcloser.Load(key); !ok {
 		return fmt.Errorf("app not found (closer property) %v", key)
 	}
 
-	value.(func())()
+	closer()
 
 	state.mstatus.Store(key, StatusShutingDown)
 
@@ -460,16 +479,17 @@ func (g *gronos[K]) handleForceTerminateShutdown(state *gronosState[K], key K, r
 }
 
 func (g *gronos[K]) handleCancelledShutdown(state *gronosState[K], key K, err error, response chan struct{}) error {
-	var value any
+	var alive bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
+	if alive, ok = state.mali.Load(key); !ok {
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
-	if !value.(bool) {
+	if !alive {
 		return fmt.Errorf("app already dead %v", key)
 	}
 
-	if value, ok = state.mdone.Load(key); !ok {
+	var chnDone chan struct{}
+	if chnDone, ok = state.mdone.Load(key); !ok {
 		return fmt.Errorf("app not found (done property) %v", key)
 	}
 
@@ -479,15 +499,15 @@ func (g *gronos[K]) handleCancelledShutdown(state *gronosState[K], key K, err er
 
 		metadata := g.getSystemMetadata()
 
-		<-value.(chan struct{})
+		<-chnDone
 		log.Debug("[GronosMessage] [CancelledShutdown] terminate cancelled shutdown done", key, ok)
 
-		if value, ok = state.mali.Load(key); !ok {
+		if alive, ok = state.mali.Load(key); !ok {
 			g.sendMessage(metadata, MsgRuntimeError(key, fmt.Errorf("app not found (alive property) %v", key)))
 			return
 		}
 
-		if value.(bool) {
+		if alive {
 			state.mali.Store(key, false)
 		}
 
@@ -504,33 +524,34 @@ func (g *gronos[K]) handleCancelledShutdown(state *gronosState[K], key K, err er
 }
 
 func (g *gronos[K]) handleTerminateShutdown(state *gronosState[K], key K, response chan struct{}) error {
-	var value any
+	var alive bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
+	if alive, ok = state.mali.Load(key); !ok {
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
-	if !value.(bool) {
+	if !alive {
 		return fmt.Errorf("app already dead %v", key)
 	}
 
-	if value, ok = state.mdone.Load(key); !ok {
+	var chnDone chan struct{}
+	if chnDone, ok = state.mdone.Load(key); !ok {
 		return fmt.Errorf("app not found (done property) %v", key)
 	}
 
-	log.Debug("[GronosMessage] [TerminateShutdown] terminate shutdown waiting real done", key)
+	log.Debug("[GronosMessage] [TerminateShutdown] terminate shutdown waiting real done asynchronously", key)
 
 	go func() {
 
 		metadata := g.getSystemMetadata()
-		<-value.(chan struct{})
+		<-chnDone
 		log.Debug("[GronosMessage] [TerminateShutdown] terminate shutdown done", key, ok)
 
-		if value, ok = state.mali.Load(key); !ok {
+		if alive, ok = state.mali.Load(key); !ok {
 			g.sendMessage(metadata, MsgRuntimeError(key, fmt.Errorf("app not found (alive property) %v", key)))
 			return
 		}
 
-		if value.(bool) {
+		if alive {
 			state.mali.Store(key, false)
 		}
 
@@ -545,19 +566,19 @@ func (g *gronos[K]) handleTerminateShutdown(state *gronosState[K], key K, respon
 }
 
 func (g *gronos[K]) handlePanicShutdown(state *gronosState[K], key K, err error) error {
-	var value any
+	var alive bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
+	if alive, ok = state.mali.Load(key); !ok {
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
-	if !value.(bool) {
+	if !alive {
 		return fmt.Errorf("app already dead %v", key)
 	}
 
 	log.Debug("[GronosMessage] [PanickedShutdown] panic", key, err)
 	state.mrea.Store(key, err)
 	state.mstatus.Store(key, StatusShutdownPanicked)
-	if value.(bool) {
+	if alive {
 		state.mali.Store(key, false)
 	}
 
@@ -568,19 +589,19 @@ func (g *gronos[K]) handlePanicShutdown(state *gronosState[K], key K, err error)
 }
 
 func (g *gronos[K]) handleErrorShutdown(state *gronosState[K], key K, err error) error {
-	var value any
+	var alive bool
 	var ok bool
-	if value, ok = state.mali.Load(key); !ok {
+	if alive, ok = state.mali.Load(key); !ok {
 		return fmt.Errorf("app not found (alive property) %v", key)
 	}
-	if !value.(bool) {
+	if !alive {
 		return fmt.Errorf("app already dead %v", key)
 	}
 
 	log.Debug("[GronosMessage] [ErroredShutdown] error", key, err)
 	state.mrea.Store(key, err)
 	state.mstatus.Store(key, StatusShutdownError)
-	if value.(bool) {
+	if alive {
 		state.mali.Store(key, false)
 	}
 
@@ -590,34 +611,67 @@ func (g *gronos[K]) handleErrorShutdown(state *gronosState[K], key K, err error)
 	return nil
 }
 
-func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send func(metadata map[string]interface{}, m Message) bool) {
+func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], metadata *Metadata[K], key K, send func(metadata *Metadata[K], m Message) bool) {
 	var retries uint
 	var shutdown chan struct{}
-	var app RuntimeApplication
+	var app LifecyleFunc
 	var ctx context.Context
 
 	// Load necessary data
 	if value, ok := state.mret.Load(key); ok {
-		retries = value.(uint)
+		retries = value
 	}
 	if value, ok := state.mapp.Load(key); ok {
-		app = value.(RuntimeApplication)
+		app = value
 	}
 	if value, ok := state.mctx.Load(key); ok {
-		ctx = value.(context.Context)
+		ctx = value
 	}
 	if value, ok := state.mshu.Load(key); ok {
-		shutdown = value.(chan struct{})
+		shutdown = value
 	}
 
 	ctx = context.WithValue(ctx, keyKey, key)
 
 	state.mstatus.Store(key, StatusRunning)
 
-	log.Debug("[RuntimeApplication] goroutine executed", key)
-
 	errChan := make(chan error, 1)
 	defer close(errChan)
+
+	// TODO: add priority for shutdown as a weight
+	// vertex := gograph.NewVertex(key, gograph.WithVertexWeight(1))
+	// state.graph.AddVertex(vertex)
+	var err error
+	var vertex string
+
+	if vertex, err = state.graph.AddVertex(NewLifecycleVertexData(key)); err != nil {
+		// TODO: log error on cerr
+		log.Error("[RuntimeApplication] failed to add vertex", key, err)
+		return
+	}
+
+	log.Debug("[RuntimeApplication] goroutine executed", "key", key, "metadata", metadata.String(), "vertex", vertex)
+
+	if metadata.HasKey() {
+		fmt.Println("metadata.HasKey()", state.rootVertex, vertex)
+		if metadata.GetKey() == g.computedRootKey {
+			if err = state.graph.AddEdge(state.rootVertex, vertex); err != nil {
+				// TODO: log error on cerr
+				log.Error("[RuntimeApplication] failed to add edge", state.rootVertex, vertex, err)
+				return
+			}
+		} else {
+			parent := metadata.GetKeyString()
+			fmt.Println("\tparent", parent, "of", vertex)
+			if err = state.graph.AddEdge(parent, vertex); err != nil {
+				// TODO: log error on cerr
+				log.Error("[RuntimeApplication] failed to add edge", parent, vertex, err)
+				return
+			}
+		}
+	} else {
+		// TODO: i think that a bug, come back later to think about it
+	}
 
 	done := make(chan struct{})
 	state.wait.Add(1)
@@ -657,7 +711,6 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 
 	log.Debug("[RuntimeApplication] waiting goroutine", key)
 
-	var err error
 	// if the context is cancelled => the application is cancelled
 	// if the shutdown channel is closed => the application is terminated
 	// if the done channel is closed => the application is stopped but maybe abrubtly
@@ -676,10 +729,12 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 
 	log.Debug("[RuntimeApplication] wait done", "app", key, "err", err)
 
+	// when the runtime application is REALLY done, which mean the closer or cancel or panic was called or returned an error
 	defer func() {
 		log.Debug("[RuntimeApplication] defer", key, err)
-		if value, ok := state.mdone.Load(key); ok {
-			close(value.(chan struct{}))
+		if chndone, ok := state.mdone.Load(key); ok {
+			close(chndone)
+			log.Debug("[RuntimeApplication] defer closed done channel", key)
 		} else {
 			log.Debug("[RuntimeApplication] defer not found", key)
 		}
@@ -692,32 +747,32 @@ func (g *gronos[K]) handleRuntimeApplication(state *gronosState[K], key K, send 
 	}
 
 	// Check if the application is still alive
-	if value, ok := state.mali.Load(key); !ok || !value.(bool) {
+	if value, ok := state.mali.Load(key); !ok || !value {
 		return
 	}
 
 	log.Debug("[RuntimeApplication] com", key, err)
 
-	metadata := g.getSystemMetadata()
+	systemmetadata := g.getSystemMetadata()
 
 	//	Notify to the global state
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			log.Debug("[RuntimeApplication] com canceled", key, err)
 			_, msg := msgCancelledShutdown(key, err)
-			send(metadata, msg) // sending and working on the response
+			send(systemmetadata, msg) // sending and working on the response
 		} else if errors.Is(err, ErrPanic) {
 			log.Debug("[RuntimeApplication] com panic", key, err)
 			_, msg := msgPanickedShutdown(key, err)
-			send(metadata, msg) // final state, it is definitly finished
+			send(systemmetadata, msg) // final state, it is definitly finished
 		} else {
 			log.Debug("[RuntimeApplication] com error", key, err)
 			_, msg := msgErroredShutdown(key, err) // final state, it is definitly finished
-			send(metadata, msg)
+			send(systemmetadata, msg)
 		}
 	} else {
 		log.Debug("[RuntimeApplication] com terminate", key)
 		_, msg := msgTerminatedShutdown(key)
-		send(metadata, msg) // sending and working on the response
+		send(systemmetadata, msg) // sending and working on the response
 	}
 }

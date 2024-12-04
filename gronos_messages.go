@@ -3,7 +3,6 @@ package gronos
 import (
 	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/charmbracelet/log"
 )
@@ -30,15 +29,9 @@ type RequestMessage[K comparable, Y any] struct {
 }
 
 // handleMessage processes incoming messages and updates the gronos state accordingly.
-func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload) error {
+func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload[K]) error {
 
-	log.Debug("[GronosMessage] handle message", "name", m.Metadata["$name"], "metadata", m.Metadata, "message", m.Message)
-
-	// clean up pool data
-	defer func() {
-		metadataPool.Put(m.Metadata)
-		messagePayloadPool.Put(m)
-	}()
+	log.Debug("[GronosMessage] handle message", "metadata", m.String(), "message", m.Message)
 
 	// Try to handle the message with the gronos core
 	coreErr := g.handleGronosMessage(state, m)
@@ -69,8 +62,7 @@ func (g *gronos[K]) handleMessage(state *gronosState[K], m *MessagePayload) erro
 	return coreErr
 }
 
-func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload) error {
-	log.Debug("[GronosMessage] handle gronos message", reflect.TypeOf(m).Name(), m)
+func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload[K]) error {
 
 	// While read the rest of the functions: if you're asking "wouldn't be simpler with a map?"
 	// the answer is simple, i don't want to impede on the performance of the user of gronos
@@ -128,8 +120,8 @@ func (g *gronos[K]) handleGronosMessage(state *gronosState[K], m *MessagePayload
 
 func (state *gronosState[K]) allApplicationsTerminated() bool {
 	allTerminated := true
-	state.mali.Range(func(_, value interface{}) bool {
-		if value.(bool) {
+	state.mali.Range(func(_ K, value bool) bool {
+		if value {
 			allTerminated = false
 			return false // stop iteration
 		}

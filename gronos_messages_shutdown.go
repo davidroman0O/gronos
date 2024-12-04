@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/log"
 )
 
+// TODO: you're missing from sync.Pool here
 type InitiateShutdown[K comparable] struct{}
 type InitiateContextCancellation[K comparable] struct{}
 type ShutdownProgress[K comparable] struct {
@@ -18,7 +19,7 @@ func MsgInitiateContextCancellation[K comparable]() *InitiateContextCancellation
 	return &InitiateContextCancellation[K]{}
 }
 
-func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m *MessagePayload) (error, bool) {
+func (g *gronos[K]) handleShutdownMessage(state *gronosState[K], m *MessagePayload[K]) (error, bool) {
 	switch m.Message.(type) {
 	case *InitiateShutdown[K]:
 		log.Debug("[GronosMessage] [InitiateShutdown]")
@@ -64,8 +65,8 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 	go func() {
 		for !endStates.Load() {
 			allEqual := true
-			state.mstatus.Range(func(_, value interface{}) bool {
-				if stateNumber(value.(StatusState)) != 3 {
+			state.mstatus.Range(func(_ K, value StatusState) bool {
+				if stateNumber(value) != 3 {
 					allEqual = false
 					return false // stops here
 				}
@@ -88,10 +89,10 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 		close(whenAll)
 	}()
 
+	metadata := g.getSystemMetadata()
+
 	// Now that we triggered the shutdown for all the apps, we need to monitor the situation
 	go func() {
-
-		metadata := g.getSystemMetadata()
 
 		if g.config.immediatePeriod > 0 {
 			select {
@@ -114,8 +115,8 @@ func (g *gronos[K]) initiateShutdownProcess(state *gronosState[K], kind Shutdown
 
 func (g *gronos[K]) getLocalKeys(state *gronosState[K]) []K {
 	localKeys := make([]K, 0)
-	state.mkeys.Range(func(key, value interface{}) bool {
-		localKeys = append(localKeys, key.(K))
+	state.mkeys.Range(func(key, value K) bool {
+		localKeys = append(localKeys, key)
 		return true
 	})
 	return localKeys
@@ -123,7 +124,7 @@ func (g *gronos[K]) getLocalKeys(state *gronosState[K]) []K {
 
 func (g *gronos[K]) triggerShutdownForApps(state *gronosState[K], localKeys []K, kind ShutdownKind) {
 	for _, key := range localKeys {
-		if alive, ok := state.mali.Load(key); ok && alive.(bool) {
+		if alive, ok := state.mali.Load(key); ok && alive {
 			g.sendShutdownMessage(key, kind)
 		}
 	}
